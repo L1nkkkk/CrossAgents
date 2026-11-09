@@ -134,10 +134,7 @@ async fn a_rework_proposes_a_judgement_that_names_the_entry_it_contradicts() {
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!(
-                    "wrote beta {}",
-                    call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks" }))
-                ),
+                "summary": "wrote beta",
             })
         )
     );
@@ -148,10 +145,7 @@ async fn a_rework_proposes_a_judgement_that_names_the_entry_it_contradicts() {
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!(
-                    "wrote alpha {}",
-                    call("task_rework", json!({ "task": "a", "notes": notes }))
-                ),
+                "summary": "wrote alpha",
             })
         )
     );
@@ -168,9 +162,25 @@ async fn a_rework_proposes_a_judgement_that_names_the_entry_it_contradicts() {
         )
         .await;
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
-    w.until(
-        "a sent back",
-        task_moved("a", TaskStatus::Passed, TaskStatus::Running),
+    // The lead is not handed the report: it sends the rework once the task waits, then accepts
+    // the second report.
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "a",
+        &call("task_rework", json!({ "task": "a", "notes": notes })),
+    )
+    .await;
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "a",
+        &call(
+            "task_accept",
+            json!({ "task": "a", "force": true, "reason": "no checks" }),
+        ),
     )
     .await;
     w.until(
@@ -218,10 +228,7 @@ async fn a_first_try_merge_proposes_the_goal_and_the_summary_as_an_example() {
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!(
-                    "{summary} {}",
-                    call("task_accept", json!({ "task": "z", "force": true, "reason": "no checks" }))
-                ),
+                "summary": summary,
             })
         )
     );
@@ -238,6 +245,17 @@ async fn a_first_try_merge_proposes_the_goal_and_the_summary_as_an_example() {
         )
         .await;
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "z",
+        &call(
+            "task_accept",
+            json!({ "task": "z", "force": true, "reason": "no checks" }),
+        ),
+    )
+    .await;
     w.until(
         "z merged",
         task_moved("z", TaskStatus::Passed, TaskStatus::Merged),

@@ -300,8 +300,16 @@ impl AgentHost for HubHost {
         self.runtime.withdraw(&AgentKey::Id(agent), message).await
     }
 
-    async fn notify(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
-        self.runtime.notify(&AgentKey::Id(agent), topic, line).await
+    async fn notify(
+        &self,
+        agent: AgentId,
+        topic: &str,
+        line: &str,
+        class: crossagents_core::NoticeClass,
+    ) -> Result<(), CoreError> {
+        self.runtime
+            .notify(&AgentKey::Id(agent), topic, line, class)
+            .await
     }
 
     async fn clone_agent(
@@ -476,14 +484,17 @@ impl AgentHost for HubHost {
     async fn usage_report(&self, run: Option<RunId>) -> Result<serde_json::Value, CoreError> {
         use crossagents_api_types::UsageGroup;
         let store = self.bus.store().as_ref();
-        let by_run = crate::usage::compute(store, UsageGroup::Run).await?;
-        let by_agent = crate::usage::compute(store, UsageGroup::Agent).await?;
+        let by_run = crate::usage::compute(store, UsageGroup::Run, &self.home).await?;
+        let by_agent = crate::usage::compute(store, UsageGroup::Agent, &self.home).await?;
         let spent = match run {
             Some(run) => {
                 serde_json::to_value(by_run.rows.iter().find(|r| r.key == run.to_string()))
                     .unwrap_or_default()
             }
-            None => serde_json::json!({ "total_cost_usd": by_run.total_cost_usd }),
+            None => serde_json::json!({
+                "total_cost_usd": by_run.total_cost_usd,
+                "estimated_cost_usd": by_run.rows.iter().try_fold(0.0, |sum, row| row.estimated_cost_usd.map(|cost| sum + cost)),
+            }),
         };
         let mut quota = Vec::new();
         for account in store.list_accounts().await? {
@@ -502,7 +513,7 @@ impl AgentHost for HubHost {
             "spent": spent,
             "by_agent": by_agent.rows,
             "accounts": quota,
-            "note": "Costs are what agents report; Codex reports quota windows rather than dollars.",
+            "note": "Reported costs and price-table estimates are separate; estimates are unknown without prices.",
         }))
     }
 
@@ -551,6 +562,10 @@ impl AgentHost for HubHost {
             .capabilities(agent)
             .await
             .is_some_and(|c| c.move_cwd)
+    }
+
+    async fn renew_session(&self, agent: AgentId) -> Result<bool, CoreError> {
+        self.runtime.renew(&AgentKey::Id(agent)).await
     }
 }
 

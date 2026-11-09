@@ -5,6 +5,7 @@ import type { Agent } from "./Agent";
 import type { AgentId } from "./AgentId";
 import type { AgentStatus } from "./AgentStatus";
 import type { Attachment } from "./Attachment";
+import type { CarriedNotice } from "./CarriedNotice";
 import type { CheckResult } from "./CheckResult";
 import type { ContextPart } from "./ContextPart";
 import type { ContinuationState } from "./ContinuationState";
@@ -19,10 +20,13 @@ import type { Lesson } from "./Lesson";
 import type { MessageId } from "./MessageId";
 import type { MessageSource } from "./MessageSource";
 import type { NoteScope } from "./NoteScope";
+import type { NoticeClass } from "./NoticeClass";
 import type { OutputStream } from "./OutputStream";
 import type { PermissionDecision } from "./PermissionDecision";
 import type { QueuedReason } from "./QueuedReason";
 import type { RateLimits } from "./RateLimits";
+import type { RoundNotice } from "./RoundNotice";
+import type { RoundSource } from "./RoundSource";
 import type { Run } from "./Run";
 import type { RunId } from "./RunId";
 import type { RunStatus } from "./RunStatus";
@@ -68,7 +72,11 @@ notices?: Array<string>,
 /**
  * Why it waits, when `queued`; absent when it starts a turn at once.
  */
-queued_reason?: QueuedReason, } } | { "type": "agent.input_refused", "data": { id: AgentId, message_id: MessageId, text: string, reason: QueuedReason, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.model_changed", "data": { id: AgentId, model: string | null, effort: string | null, from_model: string | null, from_effort: string | null, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.steered", "data": { id: AgentId, message_id: MessageId, text: string, attachments?: Array<Attachment>, } } | { "type": "agent.steer_read", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, 
+queued_reason?: QueuedReason, } } | { "type": "agent.input_refused", "data": { id: AgentId, message_id: MessageId, text: string, reason: QueuedReason, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.model_changed", "data": { id: AgentId, model: string | null, effort: string | null, from_model: string | null, from_effort: string | null, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.steered", "data": { id: AgentId, message_id: MessageId, text: string, 
+/**
+ * Who sent it; absent in events written before the field existed (a person).
+ */
+from?: MessageSource, attachments?: Array<Attachment>, } } | { "type": "agent.steer_read", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, 
 /**
  * The turn it belongs to; absent in events written before the field existed (the
  * running turn, else the last one that started).
@@ -77,7 +85,29 @@ message_id?: MessageId,
 /**
  * Who worked it out; absent means the driver.
  */
-source?: DiffSource, } } | { "type": "agent.permission", "data": { id: AgentId, kind: string, title: string, decision: PermissionDecision, } } | { "type": "agent.rate_limits", "data": { id: AgentId, limits: RateLimits, } } | { "type": "agent.warning", "data": { id: AgentId, message: string, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "agent.usage", "data": { id: AgentId, used: number, size: number, cost_usd: number | null, 
+source?: DiffSource, } } | { "type": "agent.permission", "data": { id: AgentId, kind: string, title: string, decision: PermissionDecision, } } | { "type": "agent.rate_limits", "data": { id: AgentId, limits: RateLimits, } } | { "type": "agent.warning", "data": { id: AgentId, message: string, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "notice.carried", "data": { id: AgentId, message_id: MessageId, notices: Array<CarriedNotice>, } } | { "type": "agent.tool_used", "data": { id: AgentId, tool: string, ok: boolean, } } | { "type": "agent.prompt_via_file", "data": { id: AgentId, } } | { "type": "agent.round", "data": { id: AgentId, 
+/**
+ * The message that started the turn, then any steered in during it.
+ */
+message_ids: Array<MessageId>, sources: Array<RoundSource>, notices: Array<RoundNotice>, 
+/**
+ * The turn's model usage: the growth of the session's cumulative counts. Null when
+ * the agent reported no usage during it. A request count the agent did not report
+ * is null inside.
+ */
+tokens: TokenUsage | null, 
+/**
+ * The hub tools called, by name, each once.
+ */
+tools: Array<string>, 
+/**
+ * A tool that changes state (see `hub::rounds::decides`) succeeded.
+ */
+decided: boolean, 
+/**
+ * The prompt was handed over as a file this turn.
+ */
+prompt_via_file: boolean, } } | { "type": "agent.usage", "data": { id: AgentId, used: number, size: number, cost_usd: number | null, 
 /**
  * Cumulative token counts, when the agent reports them.
  */
@@ -85,7 +115,7 @@ tokens?: TokenUsage, } } | { "type": "agent.context", "data": { id: AgentId, par
 /**
  * The turn that was running and goes on.
  */
-message_id: MessageId | null, } } | { "type": "agent.session_started", "data": { id: AgentId, session_id: string, } } | { "type": "human.asked", "data": { item: HumanItem, } } | { "type": "human.answered", "data": { item: HumanItem, } } | { "type": "human.dismissed", "data": { id: string, } } | { "type": "run.landed", "data": { id: RunId, landing: Landing, } } | { "type": "run.deleted", "data": { run_id: RunId, } } | { "type": "run.budget", "data": { id: RunId, what: string, percent: number, } } | { "type": "hub.build_cache", "data": { used: number, limit: number, } } | { "type": "note.written", "data": { scope: NoteScope, run_id: RunId | null, key: string, author: AgentId, text: string | null, } } | { "type": "issue.recorded", "data": { run_id: RunId, key: string, author: AgentId, } } | { "type": "issue.triaged", "data": { run_id: RunId, records: Array<TriageRecord>, } } | { "type": "lesson.created", "data": { lesson: Lesson, } } | { "type": "lesson.updated", "data": { lesson: Lesson, } } | { "type": "reminder.fired", "data": { owner: AgentId, reminder_id: string, note: string, } } | { "type": "watch.triggered", "data": { owner: AgentId, watch_id: string, line: string, } } | { "type": "account.created", "data": { account: Account, } } | { "type": "account.removed", "data": { id: string, } } | { "type": "account.quota_updated", "data": { id: string, } } | { "type": "account.login_finished", "data": { id: string, ok: boolean, message: string | null, } } | { "type": "account.login_pending", "data": { id: string, url: string | null, } } | { "type": "work.created", "data": { work: Work, } } | { "type": "work.updated", "data": { work: Work, } } | { "type": "run.created", "data": { run: Run, } } | { "type": "run.continuation_changed", "data": { id: RunId, state: ContinuationState, } } | { "type": "run.status_changed", "data": { id: RunId, from: RunStatus, to: RunStatus, note: string | null, } } | { "type": "run.plan_submitted", "data": { id: RunId, tasks: Array<string>, } } | { "type": "task.status_changed", "data": { run_id: RunId, id: TaskId, key: string, from: TaskStatus, to: TaskStatus, assignee: AgentId | null, } } | { "type": "task.progress", "data": { run_id: RunId, id: TaskId, key: string, text: string, } } | { "type": "task.rerouted", "data": { run_id: RunId, id: TaskId, key: string, to: AgentId, reason: string, } } | { "type": "task.routed", "data": { run_id: RunId, id: TaskId, key: string, 
+message_id: MessageId | null, } } | { "type": "agent.session_started", "data": { id: AgentId, session_id: string, } } | { "type": "human.asked", "data": { item: HumanItem, } } | { "type": "human.answered", "data": { item: HumanItem, } } | { "type": "human.dismissed", "data": { id: string, } } | { "type": "run.landed", "data": { id: RunId, landing: Landing, } } | { "type": "run.deleted", "data": { run_id: RunId, } } | { "type": "run.budget", "data": { id: RunId, what: string, percent: number, } } | { "type": "task.budget", "data": { run_id: RunId, id: TaskId, key: string, what: string, used: number, max: number, } } | { "type": "task.reviewer", "data": { run_id: RunId, id: TaskId, key: string, reviewer: AgentId, } } | { "type": "task.check_timed", "data": { run_id: RunId, id: TaskId, key: string, duration_ms: number, } } | { "type": "hub.build_cache", "data": { used: number, limit: number, } } | { "type": "note.written", "data": { scope: NoteScope, run_id: RunId | null, key: string, author: AgentId, text: string | null, } } | { "type": "issue.recorded", "data": { run_id: RunId, key: string, author: AgentId, } } | { "type": "issue.triaged", "data": { run_id: RunId, records: Array<TriageRecord>, } } | { "type": "lesson.created", "data": { lesson: Lesson, } } | { "type": "lesson.updated", "data": { lesson: Lesson, } } | { "type": "reminder.fired", "data": { owner: AgentId, reminder_id: string, note: string, } } | { "type": "watch.triggered", "data": { owner: AgentId, watch_id: string, line: string, } } | { "type": "notice.recorded", "data": { id: AgentId, topic: string, line: string, class: NoticeClass, } } | { "type": "account.created", "data": { account: Account, } } | { "type": "account.removed", "data": { id: string, } } | { "type": "account.quota_updated", "data": { id: string, } } | { "type": "account.login_finished", "data": { id: string, ok: boolean, message: string | null, } } | { "type": "account.login_pending", "data": { id: string, url: string | null, } } | { "type": "work.created", "data": { work: Work, } } | { "type": "work.updated", "data": { work: Work, } } | { "type": "run.created", "data": { run: Run, } } | { "type": "run.continuation_changed", "data": { id: RunId, state: ContinuationState, } } | { "type": "run.status_changed", "data": { id: RunId, from: RunStatus, to: RunStatus, note: string | null, } } | { "type": "run.plan_submitted", "data": { id: RunId, tasks: Array<string>, } } | { "type": "task.status_changed", "data": { run_id: RunId, id: TaskId, key: string, from: TaskStatus, to: TaskStatus, assignee: AgentId | null, } } | { "type": "task.progress", "data": { run_id: RunId, id: TaskId, key: string, text: string, } } | { "type": "task.rerouted", "data": { run_id: RunId, id: TaskId, key: string, to: AgentId, reason: string, } } | { "type": "task.routed", "data": { run_id: RunId, id: TaskId, key: string, 
 /**
  * The account the worker runs on; `None` when routing knew no account.
  */

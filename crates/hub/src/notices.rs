@@ -12,7 +12,7 @@ use std::time::Duration;
 use chrono::Utc;
 use crossagents_core::{
     AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus, EventKind, MessageSource,
-    StopReason, TaskStatus, WatchOn, WatchTarget,
+    NoticeClass, StopReason, TaskStatus, WatchOn, WatchTarget,
 };
 use crossagents_orchestrator::breaker;
 use crossagents_orchestrator::watch::{Trigger, WAIT_MAX_DAYS, account_trigger, save_rule};
@@ -49,6 +49,9 @@ impl Notices {
                 ticks = ticks.wrapping_add(1);
                 if let Err(err) = clock.fire_due().await {
                     tracing::warn!(error = %err, "cannot check reminders");
+                }
+                if let Err(err) = clock.runtime.poll_notice_wakes().await {
+                    tracing::warn!(error = %err, "cannot wake on pending notices");
                 }
                 // A waiting rule that ran out wakes its owner once and closes (multica §2.1).
                 if let Err(err) = clock.orchestrator.expire_watches().await {
@@ -142,9 +145,7 @@ impl Notices {
             let line = if reminder.wait_expired {
                 format!(
                     "Reminder ({}): {} — the wait was cut to {} days: what you were waiting for did not happen.",
-                    reminder.id,
-                    reminder.note,
-                    WAIT_MAX_DAYS
+                    reminder.id, reminder.note, WAIT_MAX_DAYS
                 )
             } else {
                 format!("Reminder ({}): {}", reminder.id, reminder.note)
@@ -218,7 +219,11 @@ impl Notices {
 
     /// Adds a line to the owner's digest; `false` when it could not be delivered.
     async fn tell(&self, owner: AgentId, topic: &str, line: &str) -> bool {
-        match self.runtime.notify(&AgentKey::Id(owner), topic, line).await {
+        match self
+            .runtime
+            .notify(&AgentKey::Id(owner), topic, line, NoticeClass::Decide)
+            .await
+        {
             Ok(()) => true,
             Err(err) => {
                 tracing::warn!(%owner, error = %err, "cannot deliver a notice");

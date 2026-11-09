@@ -62,6 +62,7 @@ impl Orchestrator {
                 run.planner,
                 &format!("quota:expiring:{}", tip.account),
                 &tip.line(),
+                crossagents_core::NoticeClass::Batch,
             )
             .await;
         }
@@ -88,6 +89,7 @@ impl Orchestrator {
                     brief::task_ref(task),
                     worker.name
                 ),
+                crossagents_core::NoticeClass::Silent,
             )
             .await;
         }
@@ -125,6 +127,7 @@ impl Orchestrator {
                     "{}: its worker hit its quota ({why}) and no other account or teammate has quota left.",
                     brief::task_ref(&task)
                 ),
+                crossagents_core::NoticeClass::Decide,
             )
             .await;
             return Ok(());

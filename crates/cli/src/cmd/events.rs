@@ -200,6 +200,15 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::RunBudget { id, what, percent } => {
             format!("{} {what} {percent}%", short_tail(id))
         }
+        EventKind::TaskBudget {
+            key, what, used, max, ..
+        } => format!("#{key} {what} {used:.2} of {max:.2}"),
+        EventKind::TaskReviewer { key, reviewer, .. } => {
+            format!("#{key} reviewed by {}", short_tail(reviewer))
+        }
+        EventKind::TaskCheckTimed { key, duration_ms, .. } => {
+            format!("#{key} checks took {duration_ms} ms")
+        }
         EventKind::BuildCache { used, limit } => format!(
             "build output {} GB of a {} GB soft budget",
             used >> 30,
@@ -296,6 +305,26 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentTurnCompleted {
             id, stop_reason, ..
         } => format!("{} {}", short(id), enum_name(stop_reason)),
+        EventKind::AgentToolUsed { id, tool, ok } => {
+            format!("{} {tool} {}", short(id), if *ok { "ok" } else { "failed" })
+        }
+        EventKind::AgentPromptViaFile { id } => format!("{} prompt in a file", short(id)),
+        EventKind::AgentRound {
+            id,
+            message_ids,
+            decided,
+            tokens,
+            ..
+        } => format!(
+            "{} {} message(s), {}, {}",
+            short(id),
+            message_ids.len(),
+            if *decided { "decided" } else { "no decision" },
+            tokens.as_ref().map_or_else(
+                || "usage unknown".to_owned(),
+                |t| format!("{} in / {} out", t.input, t.output)
+            )
+        ),
         EventKind::AgentUsage { id, used, size, .. } => {
             format!("{} context {used}/{size}", short(id))
         }
@@ -462,6 +491,28 @@ pub fn summary(kind: &EventKind) -> String {
             }
             text
         }
+        EventKind::NoticeCarried {
+            id,
+            message_id,
+            notices,
+        } => format!(
+            "{} {} notice(s) for {}",
+            short(id),
+            notices.len(),
+            short(message_id)
+        ),
+        EventKind::NoticeRecorded {
+            id,
+            topic,
+            class,
+            line,
+            ..
+        } => format!(
+            "{} {topic} [{}] {}",
+            short(id),
+            class.as_str(),
+            one_line(line)
+        ),
     }
 }
 

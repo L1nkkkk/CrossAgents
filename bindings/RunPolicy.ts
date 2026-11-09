@@ -5,6 +5,7 @@ import type { Budget } from "./Budget";
 import type { ContinuationPolicy } from "./ContinuationPolicy";
 import type { LandPolicy } from "./LandPolicy";
 import type { PlanApproval } from "./PlanApproval";
+import type { TaskBudget } from "./TaskBudget";
 
 export type RunPolicy = { 
 /**
@@ -15,6 +16,10 @@ continuation: ContinuationPolicy | null, plan_approval: PlanApproval, land: Land
  * For [`AskPolicy::Timeout`].
  */
 ask_timeout_minutes: number, budget: Budget, 
+/**
+ * Caps every task gets unless its plan sets its own (`spec.budget`); absent: no caps.
+ */
+task_budget?: TaskBudget, 
 /**
  * Whether the lead may recruit teammates (H1-5), and how many at most.
  */

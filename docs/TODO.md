@@ -339,3 +339,82 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 - 手边有 Mac（2026-11-08 定）。Mac2 起的打包和界面要在这台 Mac 上实测。这台是 Windows，mac 包在这里打不出来
 - [>] 有没有 Apple Developer 账号（Mac4 的硬依赖）。2026-11-08：没有，Mac4 暂不做。现在停在 ad-hoc 签名的包，不自动更新。见 [tasks/MACOS.md](tasks/MACOS.md) §8
 - [ ] macOS CI 的费用。私有仓库的 macOS runner 要计费；要不要只在 `main` 和发版前跑，等有账号时再定
+
+## 二十八、省协调成本（统计与通知分类、评审闭环、消息直传与会话交接）
+
+> 来源：2026-11-09 run `c917a9ab`（标题「省协调成本：统计与通知分类、评审闭环、消息直传与会话交接」）。设计、实测结果与逐条说明见 [tasks/COORDINATION.md](tasks/COORDINATION.md)；**完成清单见 [DONE.md](DONE.md) 同名一节**（9 个任务全部合并，已从本清单剪过去）。
+> **本轮的新功能要等本轮落地、hub 升级后才生效**；这一轮自己是在 hub 0.2.11 上跑的，仍按 0.2.11 的流程走（每条通知立刻叫醒、lead 手动开评审、手动接受）。人当时在 Mac 上测远程 GUI，连的就是这台机器上正在跑的 0.2.11，本轮没有停、重启或升级它。
+> 标记：**【实测】** 还要在真实 agent / 真机上量；**【下一轮】** 实现或改动留到后续；**【待评估 / 待定】** 判定或做法未定；**【已知】** 已知行为，本轮不改。状态沿用 `[ ]` 未开始 · `[~]` 进行中 · `[>]` 推迟。
+> 下面是 `lead/leftovers`（2026-11-09 03:03 更新版）的**全部**条目，逐条落到这里和设计稿 §11「遗留」；已修、不再是遗留的两条在各自小节里写明一句。
+
+### 28.1 Cursor 驱动（#cursor-driver，已合并 `585d81d`）
+
+- [>] 【下一轮 / 低优先】同一天的版本目录用目录名降序打平（`crates/drivers/src/argv.rs:52`）。`YYYY.MM.DD-<hex>` 与 `YYYY.MM.DD-HH-MM-SS-<hex>` 混在同一天时更晚的构建可能排到后面；`cursor-agent.ps1` 对同一天也不固定顺序
+- [>] 【下一轮 / 低优先】`displayName` 写死 `crossagents`、命名空间固定 `plugin-crossagents-crossagents`（`crates/drivers/src/cursor_native/mod.rs:496`）；同进程再加载同名插件会撞名。本机已装的 stripe、outlook、gmail、x 不撞
+- 已修、不再是遗留（#rounds `07875a2`）：`*.new` 版本先走脚本升级、下次再直接启 `node`；提示词长度按引号转义后的 UTF-16 长度算。设计稿 §6 写了一句
+
+### 28.2 通知（#notices，已合并 `ee04aad`）
+
+- [~] 【已知 / 故意】已归档 agent 的待带通知不投递、也不清理，行留在 agent id 上（恢复后还能看到）；删除 agent 时才清
+
+### 28.3 回合记录（#rounds，已合并 `07875a2`）
+
+- [ ] 【下一轮】hub 重启前已在排队的消息，重启后跑出的回合没有 `sources` 和 `notices`；recover 补发的 `TurnCompleted` 也产出没有来源的回合。要修得在启动时把未完成消息的事件灌回 `rounds`，或 `requeue` 时补发输入事件
+- [ ] 【已知 / 原有缺口】stream rule 排队注入（`crates/hub/src/runtime.rs` 的 `inject` 直接 `inbox.push`、不写 `agent.input`）跑出的回合没有来源；回合中插话那条路径记为通知（`Notice`）
+- [ ] 【下一轮】叫醒消息的 `notice.carried` 在投递成功后才发，回合先结束则这一回合缺这些通知、事件随后丢弃；外部 agent 取消息很快时也可能碰上
+- [ ] 【已知】外部 agent（`take_external`）的回合错后一条消息；用量不报（`null`）
+- [ ] 【下一轮】`usage --by round --run` 只认编排器发出的消息；人发给该 run 成员的消息开始的回合不算进去
+- [ ] 【实测】Cursor / With 发 `PromptViaFile` 没有单元测试；没在真实 agent 上跑过 `usage --by round` 的端到端输出
+- [ ] 【实测】Codex 恢复会话的用量修正只在单元测试里验证，没在真实 Codex 会话上跑过（恢复时若先重发一条旧用量通知，上一次调用会被多算）；恢复或分叉出来的 Codex 会话请求次数仍记为未知（`null`）
+
+### 28.4 评审闭环（#review-loop，已合并 `f94bee7`）
+
+- [ ] 【实测】同一个评审 agent 跨轮（`reviewer_fresh=false`）在 mock 里跑不起来（驱动不能在另一个目录恢复会话、计划被拒），只有单元测试覆盖
+- [ ] 【实测】hub 重启后恢复 `Reviewing` / `Passed` 的任务只有单元测试（`crates/orchestrator/src/tests_verification.rs`），没有 mock 重启测试
+- [ ] 【实测】原 worker 会话已不在、退回时换新会话的路径没有 mock 测试
+- 已修、不再是遗留（#task-budget `2201c36`）：`review_submit` 的 `reviewed_sha` 原来要求完整相等、拒绝信息却给 8 位短提交号；现在去空白、不分大小写、至少 7 位前缀算同一个提交，拒绝信息给完整提交号。设计稿 §4 写了一句
+- 【生效条件，非遗留，但须记住】新评审闭环要等本轮落地、hub 升级后才生效；这一轮自己按 0.2.11 的流程走（lead 手动开评审、手动接受）
+
+### 28.5 每轮新会话（#lead-session，已合并 `f95fe4b`）
+
+- [ ] 【下一轮 / 单开任务】已归档 lead 通过 `/v1/works/{id}/runs` 开新一轮：轮次建起来、会话重启，但开轮消息送不到、run 一直不结束。`create_work_round` 传 `source=None`（`crates/orchestrator/src/work.rs:275`），不走续会话和交接，`send_envelope` 对已归档 agent 返回 Conflict。原有问题
+- [~] 【已知】排队中的消息只在内存里：续会话后、新会话打开前 hub 重启，去向和以前一样（本轮没有新增保护）
+- [ ] 【实测】「空闲才关」和旧会话取下一条消息之间的竞争只有 Inbox 的单元测试，没有端到端测试
+- [~] 【已知】lead 一直忙、队列一直有消息时，换会话拖到 `round_wait_limit`（默认 120 秒），之后这一轮在旧会话里开（日志里有警告）
+
+### 28.6 任务预算（#task-budget，已合并 `2201c36`）
+
+- [~] 【已知】预算都没配时整套检查跳过、**默认不起作用**；下面几条只在配了预算时会碰上
+- [ ] 【下一轮】`max_idle_minutes` 只认任务状态、进度、检查、命令和用量事件（`crates/hub/src/task_cost.rs:126-234`），不认 agent 在回合里的工具调用和输出；用量到回合结束才报，一个 25 分钟的长回合会被算成无进展、可能误报超限并停掉自动退回。要把被派 agent 的回合活动也算作进展
+- [ ] 【下一轮】故障自动重试（`crates/orchestrator/src/attempts.rs` 的 `retry_same` / `retry_new_session`）不看 `report.budget_over`，超限任务出错仍按 `max_attempts` 自动重试；`attempts.rs` 不在本轮范围
+- [ ] 【实测】hub 的预算检查（`crates/hub/src/budget.rs` 的 `check_tasks`，按 tick 跑）没有端到端测试，只测了纯函数和编排器发的通知；`crates/mock-agent/tests/task_budget.rs` 没写；`crossagents usage --by task` 没在真实数据上跑过、没有输出样例
+- [ ] 【待评估】任务账本不落表，hub 启动时重放 `events` 表重建（`Store` trait 在 `crates/core/src/store.rs`，不在本轮范围）；重启不丢，但事件越多启动越慢；`usage` 表仍然没人写
+- [~] 【已知】范围外的改动：`crates/cli/src/cmd/events.rs` 给三个新事件（`task.budget`、`task.reviewer`、`task.check_timed`）加了 match 分支；`bindings/TaskReport.ts` 重新生成；`TaskSpec` 和 `PlannedTask` 去掉了 `Eq`（`TaskBudget` 含 `f64`）
+
+### 28.7 换档（#phase-model，只交报告）
+
+- [>] 【下一轮】实测数据、方案和下一轮要先测的几条见 [tasks/COORDINATION.md](tasks/COORDINATION.md) §9 与 run 笔记 `lead/phase-model`；**实现留到下一轮**。下一轮先测（【实测】）：换回低档那一步的缓存；真实 lead 会话中途换档后长对话的缓存命中；缓存能留多久；协调阶段用低档的输出占比和质量
+
+### 28.8 测试（偶发失败，本轮未改测试与辅助函数）
+
+- [~] 【已知】`crates/mock-agent/tests/continuation.rs` 的 `a_task_that_moves_within_the_threshold_is_not_reported` 偶发失败（期望 0 次续跑叫醒，实际 1 次）；#notices 的 `ee04aad` 第一次验收挂在这条，代码不动用 `task_verify` 重跑四条全过。后面验收再碰上就 `task_verify` 重跑
+- [ ] 【待评估】`crates/mock-agent/tests/run_policy.rs` 的 `the_stuck_report_is_set_kept_and_turned_off` 偶发失败过一次（`run_policy.rs:162`，设 `stuck_minutes=15` 后回复里是 None），疑是与其他写 run 的路径并发，原因没查；另外 cargo 在第一个失败文件就停，验收命令可考虑加 `--no-fail-fast`
+- [~] 【已知】`crossagents-core` 的 `exec_tree` 测试 `exec_waits_for_a_live_predecessor_root_process`（断言 `elapsed >= 1s`）全量跑时偶发失败，单独重跑通过
+- [~] 【已知 / 疑似时序】`crates/mock-agent/tests/stream_rules.rs` 的 `a_rule_goes_once_in_twenty_turns`、`compaction_lets_the_rule_go_again`、`the_agents_own_compaction_lets_the_rule_go_again` 整组跑时失败过一次，单独重跑通过
+
+### 28.9 hub 平台
+
+- [ ] 【待定，问过人】任务验收每条命令的超时写死 600 秒（`crates/orchestrator/src/verify.rs:57`），`crossagents.toml` 的 `timeout_secs` 只管落地前的检查；这一轮靠把验收拆成多条命令绕过。是否做成可配：待定
+- [ ] 【下一轮】`task_verify` 只能整组重跑验收，不能只重跑挂掉的那一条；一条偶发失败就要再等整组（约 20 分钟）
+- [ ] 【下一轮】空的 `scope.allow` 被当成「可能改任何文件」（`crates/orchestrator/src/plan.rs:147-150`），计划里不写范围就全部串行；协议文本或 `plan_submit` 应提醒 lead 写范围
+- [ ] 【下一轮】验收通过后 worker 又交一次会让检查重跑（#notices 发生了两次，每次约 12 分钟）
+- [ ] 【下一轮】验收有一条没过时任务状态仍显示 `passed`（只表示验收跑完了），靠 `task_accept` 拒绝来拦；任务列表里看不出没过
+- [ ] 【待评估】`usage_get` 显示 Cursor 账号 `limit_reached=true`，但月度窗口只用了 22%，且 #phase-model 在 Cursor 账号上跑了 **9 个真实回合都没碰到限额错误**：这个判定很可能不对，依据待评估。因此 #rounds、#review-loop、#lead-session、#task-budget、#phase-model 都被改派给 Cleo 2（Claude Haiku）
+- [~] 【已知】任务的 mock-agent 测试不在验收里时（如 #rounds），改了共用类型的编译问题要等下一个跑 mock 的任务才暴露；主导靠人工查构造处兜底
+- [~] 【已知】两个任务各自在分支上验收、先后合并后的组合没有人自动验证：#review-loop 与 #lead-session 合并后，主导在 run 分支 `5b1a6d1` 上手动跑了 `crossagents-orchestrator` 和两边相关的 8 个 mock 测试文件，全过
+- [ ] 【下一轮】Claude Haiku 的会话多次以 `end_turn` 收尾却没交结果：#lead-session 的 worker 没汇报、任务 stalled；#replay 的评审把意见写在回复里、没提交结论；#task-budget 的 worker 在后台跑整组测试、**等 Monitor 通知时结束了回合**（回合结束后这种通知叫不醒它）。hub 只发一条「没汇报 / 没结论」通知要 lead 介入；可考虑：回合以 `end_turn` 结束而任务还在 running / reviewing 时 hub 自动提醒一次「用工具交结果」、评审把回复文字附在通知里、worker 协议文字写明「不要等后台任务的通知」。经验库 `dc8dc64a`
+- [ ] 【下一轮】lead 用 `agent_send` 的 `now:true` 打断 worker、插一条消息时，被取消的回合仍按「没汇报就结束」处理：任务标 `stalled`、叫醒 lead，其实那条消息已经在排队、新回合马上就开（#docs 这次：回合取消到标 stalled 隔 6 毫秒，0.2 秒后新回合开始）。worker 一报进度或交付就恢复（`crates/orchestrator/src/tasks.rs:607`、`:707`），只是白叫醒 lead 一次。改法：回合以 `cancelled` 结束、而这个 agent 还有排队消息时，不标 stalled、不发通知（`crates/orchestrator/src/attempts.rs:283-286` 的 `turn_ended`）
+
+### 28.10 其他
+
+- [ ] 【下一轮】`scripts/release.mjs:42` 的注释过时：`build.extraResources` 应为 `build.win.extraResources`

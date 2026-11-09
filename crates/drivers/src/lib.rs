@@ -13,6 +13,7 @@
 //! (docs/PROCESS-SUPERVISION.md).
 
 pub mod acp;
+mod argv;
 pub mod claude_native;
 pub mod codebuddy_native;
 pub mod codex_native;

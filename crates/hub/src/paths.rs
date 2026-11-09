@@ -488,6 +488,10 @@ struct HubSection {
     terminal_shell: Option<Vec<String>>,
     /// Minutes a terminal nobody is connected to, with nothing running, stays (default 120).
     terminal_idle_minutes: Option<u64>,
+    /// Seconds a batch of notices stays quiet after the latest one before it wakes (default 60).
+    notice_batch_quiet_secs: Option<u64>,
+    /// Seconds after the earliest batched notice at which it wakes anyway (default 180).
+    notice_batch_max_secs: Option<u64>,
 }
 
 /// Hub settings. `port = 0` binds a random free port.
@@ -521,6 +525,10 @@ pub struct HubConfig {
     pub terminal_shell: Option<Vec<String>>,
     /// How long a terminal nobody is connected to, with nothing running, stays.
     pub terminal_idle: std::time::Duration,
+    /// Quiet interval after the latest batched notice before that batch wakes an agent.
+    pub notice_batch_quiet: std::time::Duration,
+    /// Longest a batched notice waits after the earliest one in the batch.
+    pub notice_batch_max: std::time::Duration,
 }
 
 impl HubConfig {
@@ -539,6 +547,8 @@ impl HubConfig {
             build_cache_limit: crossagents_orchestrator::DEFAULT_BUILD_CACHE_LIMIT,
             terminal_shell: None,
             terminal_idle: crate::terminal::DEFAULT_IDLE,
+            notice_batch_quiet: std::time::Duration::from_secs(60),
+            notice_batch_max: std::time::Duration::from_secs(180),
         }
     }
 }
@@ -603,6 +613,12 @@ impl HubConfig {
                 .map_or(crate::terminal::DEFAULT_IDLE, |minutes| {
                     std::time::Duration::from_secs(minutes * 60)
                 }),
+            notice_batch_quiet: std::time::Duration::from_secs(
+                config.hub.notice_batch_quiet_secs.unwrap_or(60),
+            ),
+            notice_batch_max: std::time::Duration::from_secs(
+                config.hub.notice_batch_max_secs.unwrap_or(180),
+            ),
         })
     }
 }

@@ -104,8 +104,15 @@ pub trait AgentHost: Send + Sync {
     async fn interrupt(&self, agent: AgentId) -> Result<(), CoreError>;
     /// Takes back a message that has not started yet.
     async fn withdraw(&self, agent: AgentId, message: MessageId) -> Result<(), CoreError>;
-    /// Adds a line to the agent's notification digest (see `Runtime::notify`).
-    async fn notify(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError>;
+    /// Records a notice for the agent. `class` decides whether it wakes them now
+    /// (see `Runtime::notify`).
+    async fn notify(
+        &self,
+        agent: AgentId,
+        topic: &str,
+        line: &str,
+        class: crossagents_core::NoticeClass,
+    ) -> Result<(), CoreError>;
     /// Creates a new agent with `template`'s plugin, model and settings, working in `cwd`.
     async fn clone_agent(
         &self,
@@ -203,6 +210,14 @@ pub trait AgentHost: Send + Sync {
     async fn can_move(&self, agent: &Agent) -> bool {
         let _ = agent;
         false
+    }
+    /// Ends the agent's session so that its next message opens a new one, the way a new round
+    /// starts (the lead keeps its id, name and conversation in the transcript). Busy only while
+    /// a turn runs: messages waiting for the agent move to the new session. `Ok(false)` when the
+    /// host keeps the session (an agent that runs outside it).
+    async fn renew_session(&self, agent: AgentId) -> Result<bool, CoreError> {
+        let _ = agent;
+        Ok(false)
     }
 }
 

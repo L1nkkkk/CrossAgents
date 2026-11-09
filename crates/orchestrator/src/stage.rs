@@ -117,21 +117,14 @@ impl Orchestrator {
     /// the batch came to and whether the next stage may start (docs/research/multica.md
     /// §2.2). Runs without stages get nothing here: `engine::schedule_reporting` tells the
     /// lead once every task has ended, as before.
-    pub(crate) async fn wake_stages(
-        &self,
-        run: &Run,
-        tasks: &[Task],
-    ) -> Result<(), CoreError> {
+    pub(crate) async fn wake_stages(&self, run: &Run, tasks: &[Task]) -> Result<(), CoreError> {
         // Marked before the notices go out, under the lock alone: two schedules of the same
         // run cannot both claim a stage, and the guard is never held across an await.
         let fresh: Vec<u32> = {
             let ended = ended(tasks);
             let mut fresh = Vec::new();
             if !ended.is_empty() {
-                let mut seen = self
-                    .stage_wakeups
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut seen = self.stage_wakeups.lock().unwrap_or_else(|e| e.into_inner());
                 let seen = seen.entry(run.id).or_default();
                 fresh.extend(ended.into_iter().filter(|stage| seen.insert(*stage)));
             }
@@ -142,6 +135,7 @@ impl Orchestrator {
                 run.planner,
                 &format!("run:{}:stage:{stage}", run.id),
                 &notice(run, tasks, *stage),
+                crossagents_core::NoticeClass::Decide,
             )
             .await;
         }

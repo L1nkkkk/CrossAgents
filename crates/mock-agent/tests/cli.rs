@@ -69,6 +69,23 @@ fn send_wait_prints_the_answer() {
 }
 
 /// Polls `run show` until the run reaches `status`.
+/// Waits until the run's first task has `status`.
+fn wait_task(home: &Home, id: &str, status: &str) {
+    let deadline = std::time::Instant::now() + common::wait_limit();
+    loop {
+        let detail: serde_json::Value =
+            serde_json::from_str(&home.stdout(&["run", "show", id, "--json"])).unwrap();
+        if detail["tasks"][0]["status"] == status {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task never reached {status}: {detail:#}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 fn wait_run(home: &Home, id: &str, status: &str) -> serde_json::Value {
     let deadline = std::time::Instant::now() + common::wait_limit();
     loop {
@@ -127,8 +144,7 @@ fn full_run_with_a_directory_plugin() {
         "key": "hello",
         "title": "write hello",
         "spec": {
-            // The summary carries the planner's next step: accept the task.
-            "goal": r#"[write hello.txt=hi] [call task_complete {"task_id":"{task_id}","summary":"hello [call task_accept {\"task\":\"hello\"}] [call run_finish {\"summary\":\"done\"}]"}]"#,
+            "goal": r#"[write hello.txt=hi] [call task_complete {"task_id":"{task_id}","summary":"hello"}]"#,
             "acceptance": ["git grep -q hi -- hello.txt"]
         }
     }]});
@@ -151,6 +167,13 @@ fn full_run_with_a_directory_plugin() {
     assert!(human.contains("waiting for approval"), "{human}");
 
     home.stdout(&["run", "approve", &id]);
+    // The lead is not handed the worker's report: it accepts once the task waits for it.
+    wait_task(&home, &id, "passed");
+    home.stdout(&[
+        "send",
+        "boss",
+        r#"[call task_accept {"task":"hello"}] [call run_finish {"summary":"done"}]"#,
+    ]);
     let done = wait_run(&home, &id, "completed");
     assert_eq!(done["tasks"][0]["status"], "merged");
     // Who had each task, in turn.

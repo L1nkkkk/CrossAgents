@@ -14,7 +14,7 @@ use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::lesson::{IssueRef, Lesson, Project, TriageRecord, TriageStep};
 use crate::model::{Agent, AgentProfile, AgentStatus, Run, Task};
 use crate::note::{Note, NoteScope};
-use crate::notify::{Reminder, Watch};
+use crate::notify::{PendingNotice, Reminder, Watch};
 
 /// Look an agent up by id or by its unique name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +314,60 @@ pub trait Store: Send + Sync {
             id: id.to_owned(),
         })
     }
+    /// Inserts `notice`, or replaces the same agent and topic. A replacement keeps `first_at`
+    /// and refreshes the line, class and `updated_at`. Returns the row as stored.
+    async fn upsert_pending_notice(
+        &self,
+        notice: &PendingNotice,
+    ) -> Result<PendingNotice, CoreError> {
+        let _ = notice;
+        Err(CoreError::Unsupported("pending notices".into()))
+    }
+    /// `agent`'s pending notices, or everyone's, oldest update first.
+    async fn list_pending_notices(
+        &self,
+        agent: Option<AgentId>,
+    ) -> Result<Vec<PendingNotice>, CoreError> {
+        let _ = agent;
+        Ok(Vec::new())
+    }
+    /// Drops pending notices whose topic and `updated_at` still match. A newer replacement
+    /// of the same topic is left in place.
+    async fn delete_pending_versions(
+        &self,
+        agent: AgentId,
+        versions: &[(String, chrono::DateTime<chrono::Utc>)],
+    ) -> Result<(), CoreError> {
+        let _ = (agent, versions);
+        Ok(())
+    }
+    /// The message `message` is now carrying these versions. A newer replacement is left alone.
+    async fn mark_notices_carried(
+        &self,
+        agent: AgentId,
+        versions: &[(String, chrono::DateTime<chrono::Utc>)],
+        message: MessageId,
+    ) -> Result<(), CoreError> {
+        let _ = (agent, versions, message);
+        Ok(())
+    }
+    /// The turn that carried `message` ended. Success deletes those rows. Failure clears
+    /// the carry and counts one failed automatic wake.
+    async fn settle_carried_notices(
+        &self,
+        message: MessageId,
+        success: bool,
+    ) -> Result<(), CoreError> {
+        let _ = (message, success);
+        Ok(())
+    }
+    /// Clears the carry on notices whose message is not a turn this hub took over.
+    /// That is not a failed wake: the next poll builds one wake from the rows.
+    async fn release_stranded_notices(&self, keep: &[MessageId]) -> Result<(), CoreError> {
+        let _ = keep;
+        Ok(())
+    }
+
     async fn insert_watch(&self, watch: &Watch) -> Result<(), CoreError> {
         let _ = watch;
         Err(CoreError::Unsupported("watches".into()))

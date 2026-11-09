@@ -10,8 +10,98 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{AgentId, TaskId};
+use crate::ids::{AgentId, MessageId, TaskId};
 use crate::model::Health;
+
+/// How a notice should reach its agent (run note `brief/common`).
+///
+/// Recording is separate from waking: every notice is kept, and only some classes start a
+/// turn on their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeClass {
+    /// Progress already handled. Kept for the next wake; does not start one.
+    Silent,
+    /// Worth a look, and nothing downstream is waiting on it. Wakes on a quiet interval
+    /// after the latest one, or a maximum wait after the earliest, whichever comes first.
+    Batch,
+    /// Accepting it would unblock a downstream task. Wakes at once.
+    Unblock,
+    /// Needs a decision: a failure, a question, a reminder, a watch. Wakes at once.
+    Decide,
+    /// Every task of the run has ended. Wakes at once.
+    RunDone,
+}
+
+impl NoticeClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Silent => "silent",
+            Self::Batch => "batch",
+            Self::Unblock => "unblock",
+            Self::Decide => "decide",
+            Self::RunDone => "run_done",
+        }
+    }
+
+    /// Starts a wake by itself, without waiting out the batch window.
+    pub fn wakes_immediately(self) -> bool {
+        matches!(self, Self::Unblock | Self::Decide | Self::RunDone)
+    }
+
+    /// Listed under "to handle" when several notices are read together. Silent is the
+    /// change list that follows.
+    pub fn is_action(self) -> bool {
+        !matches!(self, Self::Silent)
+    }
+
+    /// Order of the "to handle" section: unblock, decide, run done, then batch.
+    pub fn action_rank(self) -> u8 {
+        match self {
+            Self::Unblock => 0,
+            Self::Decide => 1,
+            Self::RunDone => 2,
+            Self::Batch => 3,
+            Self::Silent => 4,
+        }
+    }
+}
+
+impl std::str::FromStr for NoticeClass {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "silent" => Ok(Self::Silent),
+            "batch" => Ok(Self::Batch),
+            "unblock" => Ok(Self::Unblock),
+            "decide" => Ok(Self::Decide),
+            "run_done" => Ok(Self::RunDone),
+            other => Err(format!("unknown notice class {other:?}")),
+        }
+    }
+}
+
+/// One notice waiting to be carried to `agent`. The same `topic` replaces the previous
+/// line and class; `first_at` stays so a batch window does not start over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct PendingNotice {
+    pub agent: AgentId,
+    pub topic: String,
+    pub line: String,
+    pub class: NoticeClass,
+    pub first_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// Message that currently carries this version. Empty when the row is free to ride a wake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_by: Option<MessageId>,
+    /// Automatic wakes of this version that failed or were interrupted. At 2 it stops
+    /// starting a turn and only rides the next one.
+    #[serde(default)]
+    pub wake_tries: u32,
+}
 
 /// At most this many reminders, and as many watches, per agent.
 pub const MAX_PER_AGENT: usize = 20;

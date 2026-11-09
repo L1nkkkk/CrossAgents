@@ -322,6 +322,7 @@ mod tests {
             output,
             reasoning_output: 0,
             total: input + output,
+            ..TokenUsage::default()
         }
     }
 

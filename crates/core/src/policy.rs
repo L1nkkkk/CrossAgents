@@ -72,6 +72,56 @@ impl Budget {
     }
 }
 
+/// Caps for one task, from its `spec.budget` or the run's `task_budget` (the default for every
+/// task). `None` means no cap. A task's own cap wins field by field.
+///
+/// The hub measures spend as agents report it. Dollars are the price table's estimate (a task
+/// with an unpriced model is not held to `max_usd`, and the lead is told why); requests count
+/// only when the agents report them. Usage is reported when a turn ends, so a cap can be
+/// passed by one turn before the lead hears of it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct TaskBudget {
+    pub max_usd: Option<f64>,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub max_tokens: Option<u64>,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub max_requests: Option<u64>,
+    /// How many times the task may be sent back for rework before the lead decides.
+    pub max_rework: Option<u32>,
+    /// Minutes from the task's first start, to its end (or now).
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub max_minutes: Option<u64>,
+    /// Minutes without progress (a status change, a check, a report, or usage) while the task
+    /// is being worked on.
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub max_idle_minutes: Option<u64>,
+}
+
+impl TaskBudget {
+    pub fn is_set(&self) -> bool {
+        self.max_usd.is_some()
+            || self.max_tokens.is_some()
+            || self.max_requests.is_some()
+            || self.max_rework.is_some()
+            || self.max_minutes.is_some()
+            || self.max_idle_minutes.is_some()
+    }
+
+    /// The caps a task gets: its own, field by field, else the run's default.
+    pub fn with_default(&self, default: &TaskBudget) -> TaskBudget {
+        TaskBudget {
+            max_usd: self.max_usd.or(default.max_usd),
+            max_tokens: self.max_tokens.or(default.max_tokens),
+            max_requests: self.max_requests.or(default.max_requests),
+            max_rework: self.max_rework.or(default.max_rework),
+            max_minutes: self.max_minutes.or(default.max_minutes),
+            max_idle_minutes: self.max_idle_minutes.or(default.max_idle_minutes),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RunPolicy {
@@ -89,6 +139,10 @@ pub struct RunPolicy {
     pub ask_timeout_minutes: f64,
     #[serde(default)]
     pub budget: Budget,
+    /// Caps every task gets unless its plan sets its own (`spec.budget`); absent: no caps.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub task_budget: Option<TaskBudget>,
     /// Whether the lead may recruit teammates (H1-5), and how many at most.
     #[serde(default = "yes")]
     pub spawn: bool,
@@ -124,6 +178,7 @@ impl Default for RunPolicy {
             human_ask: AskPolicy::default(),
             ask_timeout_minutes: default_ask_timeout(),
             budget: Budget::default(),
+            task_budget: None,
             spawn: yes(),
             max_agents: default_max_agents(),
             spawn_models: None,
@@ -199,5 +254,27 @@ mod tests {
         let stuck: RunPolicy =
             serde_json::from_str(r#"{"continuation":{"stuck_minutes":15}}"#).unwrap();
         assert_eq!(stuck.continuation.unwrap().stuck_minutes, Some(15));
+    }
+
+    #[test]
+    fn a_tasks_own_caps_win_field_by_field_over_the_runs_default() {
+        let policy: RunPolicy = serde_json::from_str(
+            r#"{"task_budget":{"max_usd":2.5,"max_rework":3,"max_idle_minutes":20}}"#,
+        )
+        .unwrap();
+        let run_default = policy.task_budget.clone().unwrap_or_default();
+        assert!(run_default.is_set());
+        assert_eq!(run_default.max_tokens, None, "absent means no cap");
+        let own = TaskBudget {
+            max_usd: Some(1.0),
+            max_minutes: Some(45),
+            ..TaskBudget::default()
+        };
+        let effective = own.with_default(&run_default);
+        assert_eq!(effective.max_usd, Some(1.0));
+        assert_eq!(effective.max_rework, Some(3));
+        assert_eq!(effective.max_minutes, Some(45));
+        assert_eq!(effective.max_idle_minutes, Some(20));
+        assert!(!TaskBudget::default().is_set());
     }
 }

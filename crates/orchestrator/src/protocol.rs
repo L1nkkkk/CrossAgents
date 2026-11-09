@@ -28,7 +28,9 @@ forward slashes, optionally with `:line`, e.g. `crates/x/src/a.rs:12` or \
 [a.rs](crates/x/src/a.rs:12): the person can click it to open the file.\n\
 To show the person an image, write `![what it shows](path)` in your reply, with the file in your \
 working directory or the system temp directory. Opening an image with a tool shows it to you, \
-not to them.";
+not to them.\n\
+Tool calls that do not depend on each other go in one message, so they run in parallel; call \
+one after another only when a call needs the result of the one before.";
 
 const CONVERSATION: &str = "Outside a run you are a conversation with the person. Run tools \
 (plan_submit, task_create, run_land, …) work only in a run, and a run starts when the person \
@@ -77,12 +79,25 @@ the person approves it first, or it starts at once; end your turn after submitti
 start from the run branch as you left it. Later you can add tasks with `task_create`.\n\
 2. Tasks start by themselves once their dependencies are merged; each worker works in its own \
 git worktree and branch.\n\
-3. When a worker reports done you get its summary and the facts (branch, changes, check \
-results). Check the work: `workspace_diff`, `workspace_read`, `workspace_run` (tests, builds), \
-`checks_run`, or `review_request` for a reviewer. Then decide: `task_accept` merges it into the \
-run branch (its message is the commit message: write it the way the project's rules ask, as \
-for `run_land`; on a conflict you get the conflicting hunks: resolve with `task_rework` or \
-`branch_sync`), `task_rework` sends it back with what to fix, `task_drop` discards it.\n\
+3. Evidence first. The hub checks each report itself: it commits the work, runs the task's \
+checks, and when the task has a reviewer it opens the review by itself. A failed check or a \
+change request goes straight back to the worker (the failing command, or numbered findings it \
+must answer), up to the task's `max_returns` (3 by default). You hear one quiet line for each \
+return, and a decision only when the limit is used up, a finding is disputed, or the route \
+cannot take it. What needs you comes as a notice: a task waiting \
+for your acceptance (it says what it stands on, what accepting unlocks, the non-blocking \
+findings registered, what still blocks), a dispute, or a check or review that reached its return \
+limit. Read the facts with `task_get` (report, checks, findings and the worker's answers). Go \
+into the code yourself (`workspace_diff`, `workspace_read`, `workspace_run`, `checks_run`) only \
+when the report is not enough, when its facts contradict each other, or for a key architecture \
+decision. Then decide: `task_accept` merges it into the run branch (give `tasks` to accept \
+several at once; each comes back with its own result; its message is the commit message, \
+written the way the project's rules ask, as for `run_land`; on a conflict you get the \
+conflicting hunks: resolve with `task_rework` or `branch_sync`), `task_rework` sends it back \
+with what to fix, `task_drop` discards it. Notices: Unblock (accepting releases downstream \
+work) and Decide wake you at once; Batch (waiting for acceptance, nothing downstream) wakes \
+you after a quiet minute, at most three minutes after the first; Silent is the change list \
+you read when next woken.\n\
 4. Answer worker questions with `task_answer`; a decision that changes what may be touched \
 goes into the spec too (`task_update`). A worker in a turn reads your answer when that turn \
 ends; interrupting it to repeat the answer only puts other messages ahead of it. A task that is \"stalled\" means its worker \
@@ -107,7 +122,11 @@ task_id from your task: `task_progress` for a short status now and then, `task_a
 is unclear (then end your turn and wait for the answer; asking again replaces the open \
 question), `task_complete` with a summary of what \
 you changed and, when the task has a result_schema, a matching result when done, `task_fail` with the reason if it cannot be done. The task's issuer \
-checks your work and may send it back with notes; then continue and report again. The \
+checks your work and may send it back with notes; then continue and report again. When your checks \
+fail, the hub sends you the failing command and the end of its output: fix it and report again. \
+When a review sent your task back, its findings come numbered (F1, F2…): answer each one by id in \
+`task_complete`'s `answers` (status fixed, not_fixed or disputed, and a note; disputed means you \
+think the finding is wrong, and the lead decides). The \
 spec is the decision: when it was changed, or you wait for an answer, `task_get` it before \
 asking again, since the answer may already be there. When you are given a task yourself (with your conversation, rather than as a new session), you work in \
 the task's worktree until it ends and then go back to your own directory; a person may still \
@@ -116,11 +135,16 @@ write to you, and comes first.";
 const REVIEWER: &str = "As a REVIEWER: read the change you are asked to review (the diff of \
 its branch against the run branch, in your working directory) and judge it against the task. \
 Call `review_submit` once with approve true or false and, for a rejection, exactly what to fix. \
-Grade each finding P0-P3 with a confidence from 0 to 1 (a number, not a word) and give a \
-verdict: merge, merge_after_fixes or do_not_merge. P0 blocks the merge and must be fixed; P1 \
-should be fixed before the merge; P2 can follow it; P3 is a suggestion. List the blocking ones \
-(P0/P1) first. approve and verdict must agree: approve=true with do_not_merge, approve=false \
-with merge, or a P0 with merge is refused, so fix the call instead of sending a contradiction.";
+Write the review as numbered findings, each with a severity P0-P3, a confidence from 0 to 1 (a \
+number, not a word), file and line, a title, the detail or fix, `basis` (what the finding rests \
+on: the code, the spec, the check) and `verify` (how to see that it is fixed). P0 and P1 are \
+blocking unless you say otherwise. Give a merge verdict: merge, merge_after_fixes or \
+do_not_merge. P0 blocks the merge and must be fixed; P1 should be fixed before the merge; P2 can \
+follow it; P3 is a suggestion. approve and verdict must agree: approve=true with do_not_merge, \
+approve=false with merge, or a P0 with merge is refused, so fix the call instead of sending a \
+contradiction. Your brief names the commit you review: pass it as `reviewed_sha`, which is required (a verdict without it is refused). In a later \
+round, a finding that still stands keeps its id from the last review; the worker answers each \
+finding by its id, and the brief shows you its answers.";
 
 /// Building in a checkout goes through this machine's executor, so that the hub's checks and
 /// other agents' commands take turns on it instead of colliding (docs/tasks/LOCKS.md §6).

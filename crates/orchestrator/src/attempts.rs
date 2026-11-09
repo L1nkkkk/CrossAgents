@@ -360,8 +360,13 @@ impl Orchestrator {
                 brief::task_ref(task)
             ),
         };
-        self.notice(issuer, &format!("task:{}", task.id), &format!("{line}{related}"))
-            .await;
+        self.notice(
+            issuer,
+            &format!("task:{}", task.id),
+            &format!("{line}{related}"),
+            crossagents_core::NoticeClass::Decide,
+        )
+        .await;
     }
 
     /// The fault is one the platform can fix: the same session gets the task again, with what
@@ -413,6 +418,7 @@ impl Orchestrator {
                 brief::task_ref(task),
                 fault.word()
             ),
+            crossagents_core::NoticeClass::Silent,
         )
         .await;
     }
@@ -461,6 +467,7 @@ impl Orchestrator {
                         brief::task_ref(task),
                         clip(error)
                     ),
+                    crossagents_core::NoticeClass::Silent,
                 )
                 .await;
             }
@@ -476,6 +483,7 @@ impl Orchestrator {
                     issuer,
                     &format!("task:{}", task.id),
                     &format!("Task {} is stalled: {why}{related}", brief::task_ref(task)),
+                    crossagents_core::NoticeClass::Decide,
                 )
                 .await;
             }
@@ -740,7 +748,13 @@ mod tests {
         async fn withdraw(&self, _: AgentId, _: MessageId) -> Result<(), CoreError> {
             Ok(())
         }
-        async fn notify(&self, _: AgentId, _: &str, line: &str) -> Result<(), CoreError> {
+        async fn notify(
+            &self,
+            _: AgentId,
+            _: &str,
+            line: &str,
+            _: crossagents_core::NoticeClass,
+        ) -> Result<(), CoreError> {
             self.notices.lock().await.push(line.to_owned());
             Ok(())
         }
@@ -1141,7 +1155,9 @@ mod tests {
         assert_eq!(task.report.related_lessons[0].matched[0], "40101");
         let notices = f.host.notices.lock().await;
         assert!(
-            notices.iter().any(|n| n.contains("possibly related") && n.contains("l1")),
+            notices
+                .iter()
+                .any(|n| n.contains("possibly related") && n.contains("l1")),
             "{notices:?}"
         );
     }

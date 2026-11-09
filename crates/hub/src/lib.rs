@@ -28,6 +28,7 @@ pub mod refresh;
 pub mod replies;
 pub mod resume;
 pub mod retro;
+pub mod rounds;
 pub mod routing;
 pub mod rules;
 pub mod run_cost;
@@ -36,6 +37,7 @@ pub mod shadow;
 pub mod shims;
 pub mod snapshot;
 pub mod stream_rules;
+pub mod task_cost;
 pub mod terminal;
 pub mod trace;
 pub mod transcript;
@@ -132,7 +134,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     if config.event_log {
         bus = bus.with_sink(event_log::EventLog::spawn(paths.logs()) as Arc<dyn EventSink>);
     }
+    // Each turn's round (`agent.round`) is written from the events themselves (rounds.rs).
+    let (round_sink, rounds) = rounds::RoundSink::new();
+    bus = bus.with_sink(round_sink as Arc<dyn EventSink>);
     let bus = Arc::new(bus);
+    rounds::publish_rounds(Arc::downgrade(&bus), rounds);
     // Where this hub's events begin; the previous hub's are before.
     let start_seq = store.latest_event_seq().await?;
     let hosted = config.runtime_host.is_some();
@@ -183,7 +189,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let runtime = Arc::new(
         Runtime::new(bus.clone(), plugins)
             .with_setup(setup.clone())
-            .with_home(paths.home.clone()),
+            .with_home(paths.home.clone())
+            .with_notice_windows(config.notice_batch_quiet, config.notice_batch_max),
     );
     runtime.watch_moves();
     runtime.watch_replies();
@@ -290,9 +297,10 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     // Settle what runs spent while no hub was there (agents' replayed usage included) before
     // anything is dispatched: an over-budget run pauses first (docs/tasks/DOGFOOD.md §5).
     let budgets = Arc::new(
-        budget::Budgets::load(
+        budget::Budgets::load_with_prices(
             store.as_ref() as &dyn crossagents_core::Store,
             orchestrator.clone(),
+            crate::usage::price_table(&paths.home),
         )
         .await?,
     );

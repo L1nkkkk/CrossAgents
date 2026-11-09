@@ -357,19 +357,19 @@ impl WithSession {
             }
         }
         let mut text = prompt.text.clone();
-        // A batch file cannot take a newline in its arguments (Rust refuses to start it), so
-        // when the CLI is still behind one the message goes in a file like a long one does.
-        let through_batch = self.command.first().is_some_and(|program| {
-            let lower = program.to_ascii_lowercase();
-            lower.ends_with(".cmd") || lower.ends_with(".bat")
-        }) && text.contains(['\r', '\n']);
-        if through_batch || text.encode_utf16().count() > wire::PROMPT_ARG_LIMIT {
+        // `prompt_via_file` decides. with-cli's wrapper starts an `.exe` with
+        // `%*` (`shim = "batch-exe"`), not Cursor's version-picking
+        // `node.exe`/`index.js` pair. A command that is that pair is started
+        // directly, so a newline stays an argument; a leftover `.cmd` still
+        // gets a file.
+        if crate::argv::prompt_via_file(self.command.first().map(String::as_str), &text) {
             let path = self
                 .files
                 .dir
                 .join(format!("message-{}.md", uuid::Uuid::new_v4()));
             std::fs::write(&path, &text)
                 .map_err(|e| CoreError::Agent(format!("cannot write {}: {e}", path.display())))?;
+            self.emit(SessionEventKind::PromptViaFile);
             text = format!(
                 "The message cannot go on the command line, so it is in the attached file {}. \
                  Read all of it and treat it as the message itself.",
@@ -391,16 +391,12 @@ impl WithSession {
             images: &images,
             files: &files,
         });
-        let (program, extra) = self
-            .command
-            .split_first()
+        let (program, all_args) = crate::argv::launch_command(&self.command, args)
             .ok_or_else(|| CoreError::Agent("empty with-cli launch command".into()))?;
-        let mut all_args = extra.to_vec();
-        all_args.extend(args);
 
         self.emit(SessionEventKind::TurnStarted { turn_id: None });
         let launched = crate::launch::launch(LaunchSpec {
-            program: resolve_program(program),
+            program,
             args: all_args,
             cwd: self.cwd.clone(),
             env: self.env.clone(),

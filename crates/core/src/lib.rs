@@ -46,7 +46,8 @@ pub use driver::{
 pub use error::CoreError;
 pub use event::{
     AccountCandidate, DeliveryState, DeliveryStatus, DiffSource, EVENT_SCHEMA_VERSION, Envelope,
-    Event, EventKind, EventSink, MessageSource, QueuedReason,
+    CarriedNotice, Event, EventKind, EventSink, MessageSource, QueuedReason, RoundNotice,
+    RoundSource,
 };
 pub use expertise::{
     Candidate, CandidateOrigin, CandidateStatus, EntryKind, EntryStats, EntryStatus, Example,
@@ -62,15 +63,16 @@ pub use lesson::{
 };
 pub use model::{
     Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ChecksState, ContinuationState,
-    Health, HistoryTask, LandMode, Landing, LeadPlace, NameSource, PlannedTask, Retention, Role,
-    Run, RunConfig, RunHistory, RunMode, RunRecord, RunStatus, Scope, Task, TaskReport, TaskRun,
-    TaskRunOutcome, TaskSpec, Work, WorkspaceOwner, WorkspaceVcs, validate_agent_name,
-    validate_slug,
+    FindingAnswer, FindingStatus, Health, HistoryTask, LandMode, Landing, LeadPlace, NameSource,
+    PlannedTask, Retention, Role, Run, RunConfig, RunHistory, RunMode, RunRecord, RunStatus, Scope,
+    Task, TaskReport, TaskRun, TaskRunOutcome, TaskSpec, Work, WorkspaceOwner, WorkspaceVcs,
+    validate_agent_name, validate_slug,
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
-pub use notify::{Reminder, Watch, WatchOn, WatchTarget};
+pub use notify::{NoticeClass, PendingNotice, Reminder, Watch, WatchOn, WatchTarget};
 pub use policy::{
     ApprovalPolicy, AskPolicy, Budget, ContinuationPolicy, LandPolicy, PlanApproval, RunPolicy,
+    TaskBudget,
 };
 pub use state::TaskStatus;
 pub use store::{AgentKey, Store};

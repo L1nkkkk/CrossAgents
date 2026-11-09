@@ -339,7 +339,7 @@ export function transcript(a: Agent, turns: { turn: TranscriptTurn }[], used = 3
       used,
       size: 200_000,
       cost_usd: a.plugin === "claude" ? 0.4213 : null,
-      tokens: { input: used * 3, cached_input: used * 2, output: Math.round(used / 4), reasoning_output: Math.round(used / 10), total: used * 3 + Math.round(used / 4) },
+      tokens: { input: used * 3, cached_input: used * 2, cache_write_input: 0, requests: null, output: Math.round(used / 4), reasoning_output: Math.round(used / 10), total: used * 3 + Math.round(used / 4) },
       // Claude Code says what fills the window (get_context_usage); the others do not.
       ...(a.plugin === "claude" ? { parts: contextParts(used, 200_000) } : {}),
     },

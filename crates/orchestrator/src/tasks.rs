@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, ClaimRole, CoreError, EventKind, HandoffKind, HandoffOutcome,
-    PlannedTask, Role, Run, RunStatus, Task, TaskId, TaskReport, TaskRunOutcome, TaskSpec,
-    TaskStatus, UsageOutcome,
+    Agent, AgentId, AgentKey, ClaimRole, CoreError, EventKind, FindingAnswer, HandoffKind,
+    HandoffOutcome, PlannedTask, Role, Run, RunStatus, Task, TaskId, TaskReport, TaskRunOutcome,
+    TaskSpec, TaskStatus, UsageOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -126,13 +126,13 @@ impl Orchestrator {
         }
     }
 
-    fn worktree(task: &Task) -> Result<PathBuf, CoreError> {
+    pub(crate) fn worktree(task: &Task) -> Result<PathBuf, CoreError> {
         task.worktree.clone().ok_or_else(|| {
             CoreError::Conflict(format!("#{} has no worktree yet (not started)", task.key))
         })
     }
 
-    async fn store_task(&self, task: &mut Task) -> Result<(), CoreError> {
+    pub(crate) async fn store_task(&self, task: &mut Task) -> Result<(), CoreError> {
         task.updated_at = Utc::now();
         self.store.update_task(task).await
     }
@@ -640,7 +640,8 @@ impl Orchestrator {
         id: TaskId,
         summary: String,
     ) -> Result<(), CoreError> {
-        self.complete_with_result(caller, id, summary, None).await
+        self.complete_with_result(caller, id, summary, None, Vec::new())
+            .await
     }
 
     pub(crate) async fn complete_with_result(
@@ -649,11 +650,32 @@ impl Orchestrator {
         id: TaskId,
         summary: String,
         result: Option<Value>,
+        answers: Vec<FindingAnswer>,
     ) -> Result<(), CoreError> {
         let (run, _) = self.task_of(id).await?;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
         Self::require_assignee(&task, caller)?;
+        // Each answer names one finding of the last review; the hub refuses what it cannot place
+        // before anything changes.
+        for answer in &answers {
+            if !task.report.findings.iter().any(|f| f.id == answer.id) {
+                let known: Vec<&str> = task.report.findings.iter().map(|f| f.id.as_str()).collect();
+                return Err(CoreError::Conflict(if known.is_empty() {
+                    format!(
+                        "#{} has no findings to answer; answers is for a review's findings",
+                        task.key
+                    )
+                } else {
+                    format!(
+                        "answers: {:?} is not a finding of #{} (its findings are {})",
+                        answer.id,
+                        task.key,
+                        known.join(", ")
+                    )
+                }));
+            }
+        }
         if let Some(schema) = &task.spec.result_schema {
             let value = result
                 .as_ref()
@@ -690,6 +712,7 @@ impl Orchestrator {
         }
         task.report.summary = Some(summary);
         task.report.result = result;
+        task.report.answers = answers;
         task.report.failure = None;
         task.report.forced = None;
         task.report.interrupted = false;
@@ -698,6 +721,13 @@ impl Orchestrator {
         let token = uuid::Uuid::new_v4().to_string();
         task.report.verification = Some(token.clone());
         self.transition(&mut task, TaskStatus::Verifying).await?;
+        // A waiting task reported again: what the lead was asked to accept is being checked again.
+        self.settle_accept_notice(
+            task.issuer_or(run.planner),
+            &task,
+            &format!("#{} reported again and is being checked.", task.key),
+        )
+        .await;
         let this = self.clone();
         let worker = caller.id;
         tokio::spawn(async move { this.report_done(id, worker, token).await });
@@ -775,11 +805,13 @@ impl Orchestrator {
         let (base, _) = self.base_of(&run, &task).await?;
         let diff_stat = self.ws_for(&run).diff_stat(&dir, &base).await.ok();
         let unchecked = task.spec.acceptance.is_empty();
+        let started = std::time::Instant::now();
         let checks = if unchecked {
             Vec::new()
         } else {
             self.verifier.check(&dir, &task.spec.acceptance).await
         };
+        let check_ms = started.elapsed().as_millis() as u64;
         let related = self.related_to_checks(&run.repo, &checks).await;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
@@ -795,6 +827,13 @@ impl Orchestrator {
         task.report.related_lessons = related;
         self.transition(&mut task, TaskStatus::Passed).await?;
         if !checks.is_empty() {
+            self.publish(EventKind::TaskCheckTimed {
+                run_id: run.id,
+                id,
+                key: task.key.clone(),
+                duration_ms: check_ms,
+            })
+            .await;
             self.publish(EventKind::TaskChecked {
                 run_id: run.id,
                 id,
@@ -804,16 +843,9 @@ impl Orchestrator {
             })
             .await;
         }
-        let summary = task.report.summary.clone().unwrap_or_default();
-        let related = crate::lessons::related_text(&task.report.related_lessons)
-            .map(|t| format!("\n{t}"))
-            .unwrap_or_default();
-        self.relay(
-            task.issuer_or(run.planner),
-            worker,
-            format!("{}\n\n{}{related}", summary.trim(), brief::facts(&task)),
-            None,
-        );
+        // The lead is not handed the report: what the verified report sets going decides
+        // (review.rs, `after_verified`).
+        self.after_verified(&run, &mut task, worker).await;
         Ok(())
     }
 
@@ -871,17 +903,17 @@ impl Orchestrator {
         let Ok(run) = self.store.get_run(run_id).await else {
             return;
         };
-        let summary = task.report.summary.clone().unwrap_or_default();
-        self.relay(
+        let _ = worker;
+        self.notice(
             task.issuer_or(run.planner),
-            worker,
-            format!(
-                "{}\n\n{}\n\nNote: nothing verified this report - {why}. Accept it with force and a reason, verify it again (task_verify), rework it or drop it.",
-                summary.trim(),
-                brief::facts(&task)
+            &format!("task:{}:decide", task.id),
+            &format!(
+                "#{} is reported done, but nothing verified it: {why}. Decide: accept it with force and a reason, verify it again (task_verify), rework it (task_rework) or drop it (task_drop).",
+                task.key
             ),
-            None,
-        );
+            crossagents_core::NoticeClass::Decide,
+        )
+        .await;
     }
 
     /// Whether `task` still waits for the verification `token` (nothing else wrote it).
@@ -1232,12 +1264,21 @@ impl Orchestrator {
             )));
         }
         let dir = Self::worktree(&task)?;
+        let started = std::time::Instant::now();
         let checks = self.verifier.check(&dir, &task.spec.acceptance).await;
+        let check_ms = started.elapsed().as_millis() as u64;
         let passed = all_passed(&checks);
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(task.id).await?;
         task.report.checks = checks.clone();
         self.store_task(&mut task).await?;
+        self.publish(EventKind::TaskCheckTimed {
+            run_id: run.id,
+            id: task.id,
+            key: task.key.clone(),
+            duration_ms: check_ms,
+        })
+        .await;
         self.publish(EventKind::TaskChecked {
             run_id: run.id,
             id: task.id,
@@ -1297,109 +1338,109 @@ impl Orchestrator {
                 task.key, task.status
             )));
         }
-        let cwd = Self::worktree(&task)?;
-        self.ws_for(&run)
+        let reviewer = self
+            .open_review_locked(
+                &run,
+                &mut task,
+                template,
+                fresh,
+                a.restore,
+                a.focus.as_deref(),
+                caller.id,
+            )
+            .await?;
+        Ok(json!({ "task": task_json(&task), "reviewer": reviewer.name }))
+    }
+
+    /// Opens a review of `task` (passed) by `template`: a fresh session of it, or the template
+    /// itself with its conversation. The verified commit and the round are recorded on the task
+    /// (`reviewed_sha`, `review_attempt`), so the verdict can be bound to them; the brief carries
+    /// them, and the last round's findings with the worker's answers. The caller holds the run's
+    /// lock.
+    pub(crate) async fn open_review_locked(
+        &self,
+        run: &Run,
+        task: &mut Task,
+        template: AgentId,
+        fresh: bool,
+        restore: bool,
+        focus: Option<&str>,
+        from: AgentId,
+    ) -> Result<Agent, CoreError> {
+        let cwd = Self::worktree(task)?;
+        self.ws_for(run)
             .commit_all(&cwd, &format!("{}: {}", task.key, task.title))
             .await?;
         let reviewer = if fresh {
             self.fresh_agent(
-                &task,
+                task,
                 template,
-                &agent_name("r", &run, &task),
+                &agent_name("r", run, task),
                 Role::Reviewer,
                 &cwd,
             )
             .await?
         } else {
             let me = self.store.get_agent(&AgentKey::Id(template)).await?;
-            self.take_self(&run, &task, &me, ClaimRole::Reviewer, a.restore)
+            self.take_self(run, task, &me, ClaimRole::Reviewer, restore)
                 .await?;
             self.store.get_agent(&AgentKey::Id(template)).await?
         };
         task.reviewer = Some(reviewer.id);
-        self.transition(&mut task, TaskStatus::Reviewing).await?;
-        let focus = a
-            .focus
+        self.publish(EventKind::TaskReviewer {
+            run_id: run.id,
+            id: task.id,
+            key: task.key.clone(),
+            reviewer: reviewer.id,
+        })
+        .await;
+        task.report.reviewed_sha = task.report.verified_sha.clone();
+        task.report.review_attempt += 1;
+        task.report.review = None;
+        task.report.verdict = None;
+        self.transition(task, TaskStatus::Reviewing).await?;
+        // A task that waited to be accepted is in review now: its notice no longer says so.
+        self.settle_accept_notice(from, task, &format!("#{} is in review.", task.key))
+            .await;
+        let text = self.review_message(run, task, &reviewer, focus).await;
+        self.relay(reviewer.id, from, text, None);
+        Ok(reviewer)
+    }
+
+    /// The brief of a review round of `task` for `reviewer`: the commit it reads (`reviewed_sha`),
+    /// the round (`attempt`), the last round's findings with the worker's answers, the checklist,
+    /// and the task with its facts. Sent when the round opens, and again after a hub restart.
+    pub(crate) async fn review_message(
+        &self,
+        run: &Run,
+        task: &Task,
+        reviewer: &Agent,
+        focus: Option<&str>,
+    ) -> String {
+        let focus = focus
             .map(|f| format!("{}\n\n", f.trim()))
             .unwrap_or_default();
         // The judgements the reviewer is asked to answer pass/fail/na (EXPERTISE §6.3).
         let checklist = self
-            .checklist_for(&reviewer, &task)
+            .checklist_for(reviewer, task)
             .await
             .map(|text| format!("\n\n{text}"))
             .unwrap_or_default();
-        self.relay(
-            reviewer.id,
-            caller.id,
-            format!(
-                "{focus}Review branch {} against {} (your working directory has it checked out).\n\n{}{checklist}\n\n{}",
-                task.branch.as_deref().unwrap_or("?"),
-                run.branch,
-                brief::task(&task),
-                brief::facts(&task)
-            ),
-            None,
-        );
-        Ok(json!({ "task": task_json(&task), "reviewer": reviewer.name }))
-    }
-
-    pub(crate) async fn review(
-        &self,
-        caller: &Agent,
-        id: TaskId,
-        approve: bool,
-        notes: String,
-    ) -> Result<(), CoreError> {
-        let (run, _) = self.task_of(id).await?;
-        let _guard = self.lock(run.id).await;
-        let mut task = self.store.get_task(id).await?;
-        if task.reviewer != Some(caller.id) || task.status != TaskStatus::Reviewing {
-            return Err(CoreError::Conflict(
-                "you are not reviewing this task".into(),
-            ));
-        }
-        // Its review is in; the run lets go of the reviewer.
-        task.reviewer = None;
-        let _ = self
-            .let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
-            .await;
-        task.report.review = Some(notes.clone());
-        self.transition(&mut task, TaskStatus::Passed).await?;
-        // A review that says changes are needed sends the task back where its spec says
-        // (docs/research/multica.md §2.12); with none, the issuer decides, as before.
-        if !approve
-            && let Some(name) = self
-                .review_sent_back(&run, &mut task, &notes, caller)
-                .await?
-        {
-            self.relay(
-                task.issuer_or(run.planner),
-                caller.id,
-                format!(
-                    "Review of {}: changes needed; it went back to {name}\n{}",
-                    brief::task_ref(&task),
-                    notes.trim()
-                ),
-                None,
-            );
-            return Ok(());
-        }
-        self.relay(
-            task.issuer_or(run.planner),
-            caller.id,
-            format!(
-                "Review of {}: {}\n{}",
-                brief::task_ref(&task),
-                if approve {
-                    "approved"
-                } else {
-                    "changes needed"
-                },
-                notes.trim()
-            ),
-            None,
-        );
-        Ok(())
+        let before = crate::review::previous_round(&task.report);
+        let sha = task.report.reviewed_sha.clone().unwrap_or_default();
+        format!(
+            "{focus}Review branch {} against {} (your working directory has it checked out).\nreviewed_sha: {sha}\nattempt: {}\n\n{}{checklist}{}\n\n{}",
+            task.branch.as_deref().unwrap_or("?"),
+            run.branch,
+            task.report.review_attempt,
+            brief::task(task),
+            if before.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{before}")
+            },
+            brief::facts(task)
+        )
     }
 
     // -----------------------------------------------------------------------------------
@@ -1466,6 +1507,18 @@ impl Orchestrator {
         }
         if task.status == TaskStatus::Stalled {
             unchecked.push("it is stalled: its worker never reported".into());
+        }
+        // A task that was reviewed is accepted plainly only on the verdict its review gave the very
+        // commit it verified. A verdict on another commit, or one that is not a merge, takes force
+        // and a reason. A task never reviewed is accepted as it always was.
+        if task.report.review_attempt > 0 {
+            let approved = task.report.verdict
+                == Some(crossagents_core::model::ReviewVerdict::Merge)
+                && task.report.reviewed_sha.is_some()
+                && task.report.reviewed_sha == task.report.verified_sha;
+            if !approved {
+                unchecked.push("its review did not approve this commit".into());
+            }
         }
         let verified = task
             .report
@@ -1578,6 +1631,13 @@ impl Orchestrator {
         // Before the merge is announced, so whoever reads the run on that event sees it.
         self.sync_resolved(&mut run, &task).await?;
         self.transition(&mut task, TaskStatus::Merged).await?;
+        // The waiting-for-acceptance notice is done: it no longer wakes the lead.
+        self.settle_accept_notice(
+            task.issuer_or(run.planner),
+            &task,
+            &format!("#{} was accepted and merged.", task.key),
+        )
+        .await;
         // Where the workflow goes next (multica §2.12): the step `spec.next` names is
         // released, or opened for the teammate it names, before the schedule pass starts it.
         let next = self.after_accept(&run, &task).await?;
@@ -1614,6 +1674,39 @@ impl Orchestrator {
             "unverified": unchecked,
             "next_step": next.as_ref().map(crate::handoff::NextStep::json),
         }))
+    }
+
+    /// `task_accept` with `tasks`: each task is accepted on its own, with what a single accept
+    /// takes, and each outcome comes back in `results`, so one refusal does not hide the others.
+    pub(crate) async fn task_accept_all(
+        &self,
+        caller: &Agent,
+        input: Value,
+    ) -> Result<Value, CoreError> {
+        let Some(list) = input.get("tasks").cloned() else {
+            return self.task_accept(caller, input).await;
+        };
+        let refs: Vec<String> = serde_json::from_value(list).map_err(|err| {
+            CoreError::Conflict(format!("tasks must be a list of task keys or ids: {err}"))
+        })?;
+        if refs.is_empty() {
+            return Err(CoreError::Conflict(
+                "tasks is empty: name the tasks to accept".into(),
+            ));
+        }
+        let mut results = Vec::new();
+        for task in refs {
+            let mut one = input.clone();
+            if let Value::Object(fields) = &mut one {
+                fields.remove("tasks");
+                fields.insert("task".into(), json!(task));
+            }
+            match self.task_accept(caller, one).await {
+                Ok(value) => results.push(json!({ "task": task, "result": value })),
+                Err(err) => results.push(json!({ "task": task, "refused": err.to_string() })),
+            }
+        }
+        Ok(json!({ "results": results }))
     }
 
     pub(crate) async fn task_rework(
@@ -1673,6 +1766,12 @@ impl Orchestrator {
         task.report.related_lessons.clear();
         task.report.rework.push(a.notes.trim().to_owned());
         self.transition(&mut task, TaskStatus::Running).await?;
+        self.settle_accept_notice(
+            task.issuer_or(run.planner),
+            &task,
+            &format!("#{} went back to its worker.", task.key),
+        )
+        .await;
         // Where it goes back to (multica §2.12): `spec.on_reject` names a step or a teammate
         // whose fresh session takes it over; unset, or naming its own worker, it goes back to
         // its worker here, exactly as before.
@@ -1753,6 +1852,12 @@ impl Orchestrator {
         };
         crate::attempts::close_open(&mut task, TaskRunOutcome::Cancelled, a.reason.clone());
         self.transition(&mut task, to).await?;
+        self.settle_accept_notice(
+            task.issuer_or(run.planner),
+            &task,
+            &format!("#{} was dropped.", task.key),
+        )
+        .await;
         // What it used counts as dropped, requeued or not (EXPERTISE §4.6), and the drop
         // itself stands even when the profile cannot be updated.
         if let Err(err) = self.settle_usage(&task, UsageOutcome::Dropped).await {

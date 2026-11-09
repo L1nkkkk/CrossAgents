@@ -30,6 +30,16 @@ impl Directive {
     }
 }
 
+/// The commit a review brief names (`reviewed_sha:` line), which `{reviewed_sha}` in a
+/// directive stands for.
+pub fn reviewed_sha(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("reviewed_sha:")
+            .map(|v| v.trim().to_owned())
+    })
+}
+
 /// Values of `task_id:` and `attempt:` lines in a prompt.
 pub fn context(text: &str) -> (Option<String>, u32) {
     let mut task_id = None;

@@ -12,8 +12,37 @@ cost_usd: number,
 /**
  * Whether any agent in the group reported a cost.
  */
-cost_reported: boolean, 
+cost_reported: boolean, estimated_cost_usd: number | null, cache_write_input: number, requests: number | null, 
 /**
  * Largest context (tokens) any session in the group reached.
  */
-peak_context: number, };
+peak_context: number, 
+/**
+ * For `by task`: the run the task is in.
+ */
+run_id?: string, 
+/**
+ * Raw tokens the agents reported (`tokens.total`), and their kinds: input that missed the
+ * prompt cache, input served from it, and output (cache writes are `cache_write_input`).
+ */
+tokens?: number, new_input?: number, cached_input?: number, output?: number, 
+/**
+ * Times the task was sent back for rework.
+ */
+rework?: number | null, 
+/**
+ * Minutes from the task's first start to its end, or to now while it runs.
+ */
+minutes?: number | null, 
+/**
+ * Seconds its acceptance checks and commands took.
+ */
+check_seconds?: number | null, 
+/**
+ * For `by run`: the run's tasks, with their own figures.
+ */
+tasks?: Array<UsageRow>, 
+/**
+ * Caps that do not apply, and why (an unpriced model, no request counts).
+ */
+notes?: Array<string>, };

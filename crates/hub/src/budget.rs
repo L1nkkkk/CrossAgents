@@ -7,10 +7,14 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use crossagents_core::{
-    AgentId, AgentStatus, CoreError, Event, EventKind, RunId, RunStatus, Store,
+    AgentId, AgentStatus, CoreError, Event, EventKind, Run, RunId, RunStatus, Store, Task,
+    TaskBudget, TaskId,
 };
 use crossagents_orchestrator::Orchestrator;
 use tokio::sync::Mutex;
+
+use crate::task_cost::{Breach, TaskLedger};
+use crate::usage::Prices;
 
 /// Levels at which the orchestrator hears about a cap.
 const LEVELS: [u32; 2] = [80, 100];
@@ -30,10 +34,15 @@ pub struct Ledger {
     agents: HashMap<AgentId, Spend>,
     /// (run, cap, level) already reported.
     reported: HashSet<(RunId, &'static str, u32)>,
+    /// What each task spent.
+    pub tasks: TaskLedger,
+    /// (task, cap or hint) already reported to the lead.
+    reported_tasks: HashSet<(TaskId, &'static str)>,
 }
 
 impl Ledger {
     pub fn apply(&mut self, event: &Event) {
+        self.tasks.apply(event);
         match &event.kind {
             EventKind::AgentStatusChanged {
                 id,
@@ -99,7 +108,20 @@ impl Budgets {
         store: &dyn Store,
         orchestrator: Arc<Orchestrator>,
     ) -> Result<Self, CoreError> {
-        let mut ledger = Ledger::default();
+        Self::load_with_prices(store, orchestrator, Prices::new()).await
+    }
+
+    /// As [`Self::load`], pricing tasks by `prices` (the hub home's price table, see
+    /// [`crate::usage::price_table`]). Without prices a task's dollar cap says it cannot apply.
+    pub async fn load_with_prices(
+        store: &dyn Store,
+        orchestrator: Arc<Orchestrator>,
+        prices: Prices,
+    ) -> Result<Self, CoreError> {
+        let mut ledger = Ledger {
+            tasks: TaskLedger::new(prices),
+            ..Ledger::default()
+        };
         let mut after = 0;
         loop {
             let page = store.events_since(after, 1000).await?;
@@ -162,8 +184,54 @@ impl Budgets {
                     .await?;
             }
         }
+        self.check_tasks(store).await
+    }
+
+    /// Each running task's caps: the task is told once for each cap it is over, and once for
+    /// each figure that cannot be checked (the lead is told why the cap does not apply).
+    async fn check_tasks(&self, store: &dyn Store) -> Result<(), CoreError> {
+        let now = Utc::now();
+        for run in store.list_runs().await? {
+            if run.status != RunStatus::Running {
+                continue;
+            }
+            for task in store.list_tasks(run.id).await? {
+                if task.status.is_terminal() {
+                    continue;
+                }
+                let caps = task_caps(&run, &task);
+                if !caps.is_set() {
+                    continue;
+                }
+                let (breaches, hints) = {
+                    let mut ledger = self.ledger.lock().await;
+                    let breaches = ledger.tasks.breaches(task.id, &caps, now);
+                    let hints = ledger.tasks.hints(task.id, &caps);
+                    fresh_reports(&mut ledger.reported_tasks, task.id, breaches, hints)
+                };
+                for breach in breaches {
+                    self.orchestrator
+                        .task_budget_reached(run.id, task.id, breach.what, breach.used, breach.max)
+                        .await?;
+                }
+                for text in hints {
+                    self.orchestrator
+                        .task_budget_note(run.id, task.id, &text)
+                        .await?;
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// The caps a task is held to: its own `spec.budget`, field by field, else the run's `task_budget`.
+fn task_caps(run: &Run, task: &Task) -> TaskBudget {
+    task.spec
+        .budget
+        .clone()
+        .unwrap_or_default()
+        .with_default(&run.config.policy.task_budget.clone().unwrap_or_default())
 }
 
 fn pct(used: f64, max: f64) -> u32 {
@@ -223,5 +291,54 @@ mod tests {
         assert!((usd - 0.35).abs() < 1e-9);
         assert_eq!(ledger.spent(RunId::new()), (0, 0.0));
         assert_eq!(pct(80.0, 100.0), 80);
+    }
+}
+
+/// What a check has to tell the lead about one task, and only what has not been told before:
+/// each cap the task is over, and each hint, once. `reported` remembers what was told.
+fn fresh_reports(
+    reported: &mut HashSet<(TaskId, &'static str)>,
+    task: TaskId,
+    breaches: Vec<Breach>,
+    hints: Vec<(&'static str, String)>,
+) -> (Vec<Breach>, Vec<String>) {
+    let breaches = breaches
+        .into_iter()
+        .filter(|breach| reported.insert((task, breach.what)))
+        .collect();
+    let hints = hints
+        .into_iter()
+        .filter(|(what, _)| reported.insert((task, what)))
+        .map(|(_, text)| text)
+        .collect();
+    (breaches, hints)
+}
+
+#[cfg(test)]
+mod task_report_tests {
+    use super::*;
+
+    #[test]
+    fn each_cap_and_hint_is_reported_once() {
+        let task = TaskId::new();
+        let mut reported = HashSet::new();
+        let over = || {
+            vec![Breach {
+                what: "tokens",
+                used: 1200.0,
+                max: 1000.0,
+            }]
+        };
+        let hint = || vec![("usd_unpriced", "no price".to_owned())];
+
+        let (breaches, notes) = fresh_reports(&mut reported, task, over(), hint());
+        assert_eq!(breaches.len(), 1);
+        assert_eq!(notes, ["no price"]);
+        // The next check finds the same figures: nothing new to say.
+        let (breaches, notes) = fresh_reports(&mut reported, task, over(), hint());
+        assert!(breaches.is_empty() && notes.is_empty());
+        // Another task is told of its own.
+        let (breaches, _) = fresh_reports(&mut reported, TaskId::new(), over(), Vec::new());
+        assert_eq!(breaches.len(), 1);
     }
 }

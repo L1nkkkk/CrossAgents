@@ -13,9 +13,10 @@ use std::sync::Arc;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, Attachment, ClaimRole, CoreError, Envelope, EventBus,
-    EventKind, HandoffKind, LeadPlace, MessageId, MessageSource, PlannedTask, Role, Run, RunConfig,
-    RunId, RunMode, RunPolicy, RunStatus, StopReason, Store, Task, TaskId, TaskReport,
-    TaskRunOutcome, TaskStatus, WorkspaceVcs,
+    EventKind, HandoffKind, HumanItemKind, ISSUE_PREFIX, LeadPlace, MessageId, MessageSource,
+    NoteScope, NoticeClass, PlannedTask, Role, Run, RunConfig, RunId, RunMode, RunPolicy,
+    RunStatus, StopReason, Store, Task, TaskId, TaskReport, TaskRunOutcome, TaskStatus,
+    WorkspaceVcs,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -884,6 +885,17 @@ impl Orchestrator {
             env.as_ref(),
             &sessions,
         );
+        // A round the lead asked for starts from its previous round's handoff: the facts a new
+        // session starts from, read from the hub's records (brief::handoff).
+        if let Some((previous, _)) = source {
+            let handoff = match self.carryover(previous).await {
+                Ok(carry) => brief::handoff(&run.request, &carry),
+                Err(err) => format!(
+                    "\n\nHandoff: the hub could not read round {previous}'s records ({err}); look at it before you continue."
+                ),
+            };
+            kickoff_text.push_str(&handoff);
+        }
         // A checkout the hub could not prepare says so in the kickoff, not only in a log
         // (docs/tasks/TOOLCHAIN.md §7).
         if let Some(note) = setup.as_ref().and_then(crate::setup::Prepared::note) {
@@ -896,12 +908,55 @@ impl Orchestrator {
         };
         let host = self.host.clone();
         let lead = run.planner;
+        // A round the lead asked for opens a new session. The lead is idle when the round
+        // starts from a scheduled run_next; in the direct path the turn that asked is still
+        // running, so the renewal waits for it. Subscribed before the spawn, so no turn end is
+        // missed between the two.
+        let renewal = source.is_some().then(|| (self.bus.subscribe(), self.round_wait_limit()));
         tokio::spawn(async move {
+            if let Some((events, limit)) = renewal {
+                renew_for_round(host.as_ref(), events, lead, limit).await;
+            }
             if let Err(err) = host.send_envelope(lead, kickoff, false).await {
                 tracing::warn!(agent = %lead, error = %err, "cannot deliver the kickoff");
             }
         });
         Ok(run)
+    }
+
+    /// What a round handed on from `previous` carries (`brief::handoff`): its records, and the
+    /// team's constraints as the team note holds them.
+    async fn carryover(&self, previous: RunId) -> Result<brief::Carryover, CoreError> {
+        let previous = self.store.get_run(previous).await?;
+        let constraints = self
+            .store
+            .get_note(NoteScope::Team, None, brief::CONSTRAINTS_NOTE)
+            .await?
+            .map(|note| note.text);
+        let sorted = self.store.list_triage(previous.id).await?;
+        let issues = self
+            .store
+            .list_notes(NoteScope::Run, Some(previous.id), ISSUE_PREFIX)
+            .await?
+            .into_iter()
+            .filter(|note| !sorted.iter().any(|t| t.issue.key == note.key))
+            .map(|note| (note.key, note.text))
+            .collect();
+        // Open questions only: a notice is for reading, and nothing waits on it.
+        let waiting = self
+            .store
+            .list_human_items(true)
+            .await?
+            .into_iter()
+            .filter(|item| item.run_id == Some(previous.id) && item.kind == HumanItemKind::Question)
+            .map(|item| item.text)
+            .collect();
+        Ok(brief::Carryover {
+            previous,
+            constraints,
+            issues,
+            waiting,
+        })
     }
 
     /// Advisory snapshot: only claim_agent provides exclusion. Chat does not claim;
@@ -1503,8 +1558,13 @@ The person changed: {}",
                 changes.join("; ")
             ));
         }
-        self.notice(run.planner, &format!("run:{}", run.id), &text)
-            .await;
+        self.notice(
+            run.planner,
+            &format!("run:{}", run.id),
+            &text,
+            NoticeClass::Decide,
+        )
+        .await;
         self.schedule(run).await
     }
 
@@ -1679,6 +1739,7 @@ The person changed: {}",
                     run.id,
                     self.task_base_branch(run)
                 ),
+                NoticeClass::RunDone,
             )
             .await;
         }
@@ -1708,6 +1769,7 @@ The person changed: {}",
                 "Task {} did not start: {why}. It stays pending and is tried again when the run next moves on; or task_assign it (a new execution session by default, or someone else).",
                 brief::task_ref(task)
             ),
+            NoticeClass::Silent,
         )
         .await;
         Ok(format!("#{}: {why}", task.key))
@@ -1876,8 +1938,13 @@ The person changed: {}",
             Some(reason) => format!("{line}（{reason}）"),
             None => line,
         };
-        self.notice(to, &format!("task:{}:dispatch", task.id), &line)
-            .await;
+        self.notice(
+            to,
+            &format!("task:{}:dispatch", task.id),
+            &line,
+            NoticeClass::Silent,
+        )
+        .await;
     }
 
     /// An execution session cloned from a teammate is nobody's recruit: the clone copies the
@@ -2312,14 +2379,15 @@ The person changed: {}",
             task.issuer_or(run.planner),
             &format!("task:{}", task.id),
             &format!("Task {} failed: {reason}", brief::task_ref(task)),
+            NoticeClass::Decide,
         )
         .await;
         Box::pin(self.schedule(run)).await
     }
 
-    /// A line in an agent's notification digest.
-    pub(crate) async fn notice(&self, agent: AgentId, topic: &str, line: &str) {
-        if let Err(err) = self.host.notify(agent, topic, line).await {
+    /// A line in an agent's notification digest. `class` decides whether it wakes them.
+    pub(crate) async fn notice(&self, agent: AgentId, topic: &str, line: &str, class: NoticeClass) {
+        if let Err(err) = self.host.notify(agent, topic, line, class).await {
             tracing::warn!(%agent, error = %err, "cannot deliver a notice");
         }
     }
@@ -2451,6 +2519,7 @@ The person changed: {}",
                     "{name} ended its turn without a verdict on {} (still reviewing).",
                     brief::task_ref(&task)
                 ),
+                NoticeClass::Decide,
             )
             .await;
             return;
@@ -2473,6 +2542,12 @@ The person changed: {}",
                 continue;
             }
             for mut task in self.store.list_tasks(run.id).await? {
+                // A task waiting for its review or for acceptance is not stalled: its brief or its
+                // notice comes again (review.rs, `resume_waiting`).
+                if matches!(task.status, TaskStatus::Reviewing | TaskStatus::Passed) {
+                    self.resume_waiting(&run, &mut task).await?;
+                    continue;
+                }
                 if !matches!(
                     task.status,
                     TaskStatus::Running
@@ -2497,6 +2572,7 @@ The person changed: {}",
                             "The hub restarted while task {} was being verified, so nothing verified it. Look at it, then accept it with force and a reason, verify it again (task_verify), rework it or drop it.",
                             brief::task_ref(&task)
                         ),
+                        NoticeClass::Decide,
                     )
                     .await;
                     continue;
@@ -2532,6 +2608,7 @@ The person changed: {}",
                         "The hub restarted; task {} is stalled until you decide.",
                         brief::task_ref(&task)
                     ),
+                    NoticeClass::Decide,
                 )
                 .await;
             }
@@ -2606,6 +2683,49 @@ fn policy_changes(old: &RunPolicy, new: &RunPolicy) -> Vec<String> {
         });
     }
     out
+}
+
+/// Ends the lead's session for a round it asked for, so that the round's kickoff opens a new
+/// one. While a turn of the lead runs, this waits for the turn's end on the bus (no polling),
+/// for at most `limit`: a turn that asked for the round is one such turn. Past the limit the
+/// round starts in the session the lead has, and the hub says so in its log.
+async fn renew_for_round(
+    host: &dyn AgentHost,
+    mut events: tokio::sync::broadcast::Receiver<crossagents_core::Event>,
+    lead: AgentId,
+    limit: std::time::Duration,
+) {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        match host.renew_session(lead).await {
+            Ok(_) => return,
+            Err(CoreError::Busy(_)) => {}
+            Err(err) => {
+                tracing::warn!(agent = %lead, error = %err, "cannot end the lead's session for the new round");
+                return;
+            }
+        }
+        let ended = tokio::time::timeout_at(deadline, async {
+            loop {
+                match events.recv().await {
+                    Ok(event)
+                        if matches!(event.kind, EventKind::AgentTurnCompleted { id, .. } if id == lead) =>
+                    {
+                        return true;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                    // Events were missed, the turn's end may be one of them: look again now.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return true,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        if ended != Ok(true) {
+            tracing::warn!(agent = %lead, "the lead stayed busy past the round's wait; the round starts in its current session");
+            return;
+        }
+    }
 }
 
 pub(crate) fn first_line(text: &str, max: usize) -> String {

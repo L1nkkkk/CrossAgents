@@ -12,9 +12,11 @@ import {
 } from "./reviewFindings.ts";
 
 const finding = (severity: ReviewFinding["severity"], title: string): ReviewFinding => ({
+  id: `F-${title}`,
   severity,
   confidence: 0.5,
   title,
+  blocking: severity === "P0" || severity === "P1",
 });
 
 test("findings read most severe first and keep the reviewer's order within a severity", () => {
@@ -33,7 +35,7 @@ test("findings read most severe first and keep the reviewer's order within a sev
 });
 
 test("an unknown severity sorts last instead of vanishing", () => {
-  const unknown = { severity: "P9" as ReviewFinding["severity"], confidence: 0.5, title: "odd" };
+  const unknown = { id: "F-odd", severity: "P9" as ReviewFinding["severity"], confidence: 0.5, title: "odd", blocking: false };
   assert.deepEqual(
     sortFindings([unknown, finding("P3", "p3")]).map((f) => f.title),
     ["p3", "odd"],
