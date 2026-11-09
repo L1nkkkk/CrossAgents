@@ -13,6 +13,7 @@ CrossAgents 是一个分层的多 agent 编码编排器：**强模型（Opus / G
 - 设计：[docs/DESIGN.md](docs/DESIGN.md)
 - 各里程碑任务书：[docs/tasks/](docs/tasks/)
 - 可选的停滞恢复与持续推进：[docs/CONTINUATION.md](docs/CONTINUATION.md)
+- Mac 安装（不带 hub，连另一台电脑上的 hub）：[docs/INSTALL-MAC.md](docs/INSTALL-MAC.md)
 
 ## 准备
 
@@ -105,6 +106,8 @@ npm run electron:dev       # 开发（页面热重载）
 npm run preview:mock       # 不起 hub，在浏览器里用假数据看界面；右下角切场景
 npm run electron:build     # 产出 release/win-unpacked/CrossAgents.exe（免安装，未签名）
 ```
+
+Mac 没有现成的安装包：在 Mac 上用 `npm run electron:build:mac` 打 dmg / zip（不带 hub、ad-hoc 签名、不能自动更新），装好后连另一台电脑上的 hub，步骤见 [Mac 安装说明](docs/INSTALL-MAC.md)。
 
 令牌只在 Electron 主进程里使用，不会进入页面。详见 [V2 任务书](docs/tasks/V2-GUI.md)（外壳与安全）和 [V3 任务书](docs/tasks/V3-GUI.md)（对话式界面）；
 [V6 任务书](docs/tasks/V6-GUI.md)：mock 预览、视觉层次、按轮 diff 与工具列。
