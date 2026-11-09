@@ -1026,3 +1026,97 @@ async fn native_reused_checkout_schedules_while_gui_reports_busy() {
     assert_eq!(t.agent("Pia").await.cwd, checkout);
     assert!(w.output().contains("scheduled"), "{}", w.output());
 }
+
+/// A person's message that arrives while the lead's turn, the one calling run_next, still runs
+/// waits in the lead's queue. It is handled once, never withdrawn, and comes before the round's
+/// kickoff, whichever session takes it: the old one (it was queued before the switch) or the new.
+#[tokio::test]
+async fn a_persons_message_during_run_next_is_handled_once_before_the_kickoff() {
+    let repo = git_repo();
+    let sessions = tempfile::tempdir().unwrap();
+    let session_dir = sessions.path().to_str().unwrap().to_owned();
+    let t = TestHub::start_with(common::native_plugin_with(&[
+        "--mock-mobile-sessions",
+        &session_dir,
+    ]))
+    .await;
+    t.add_native("Pia", "planner", repo.path()).await;
+    let response = t
+        .post("/v1/works", json!({"title":"rounds", "lead":"Pia"}))
+        .await;
+    assert_eq!(response.status(), 201);
+    let work = response.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut w = t.watch().await;
+    let first = round(&t, &work, change("first.txt"), None).await;
+    completed(&mut w, &first).await;
+    let lead = t.agent("Pia").await;
+    let checkout = lead.cwd.clone();
+    let old = t
+        .hub
+        .bus
+        .store()
+        .last_session_id(lead.id)
+        .await
+        .unwrap()
+        .expect("the first round's session");
+
+    // The turn that calls run_next keeps running for a while after the call.
+    t.send(
+        "Pia",
+        &format!(
+            "{} [sleep 1500]",
+            call(
+                "run_next",
+                json!({"title":"second", "request":change("second.txt")}),
+            )
+        ),
+    )
+    .await;
+    let event = w
+        .until(
+            "next round",
+            |e| matches!(&e.kind, EventKind::RunCreated { run } if run.title == "second"),
+        )
+        .await;
+    let EventKind::RunCreated { run } = event.kind else {
+        unreachable!()
+    };
+    let second = serde_json::to_value(run).unwrap();
+    // Sent while that turn runs: it waits behind the turn.
+    t.send("Pia", "PERSON-WAITING-7f [sleep 10]").await;
+    completed(&mut w, &second).await;
+
+    let out = w.output();
+    assert_eq!(out.matches("PERSON-WAITING-7f").count(), 1, "handled once: {out}");
+    let person = out.find("PERSON-WAITING-7f").unwrap();
+    let kickoff = out
+        .find("run: second (run_id")
+        .unwrap_or_else(|| panic!("no kickoff in {out}"));
+    assert!(person < kickoff, "the person's message comes before the kickoff: {out}");
+    let events = t
+        .hub
+        .bus
+        .store()
+        .agent_events(lead.id, 0, 10_000)
+        .await
+        .unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::AgentInputWithdrawn { .. })),
+        "nothing waiting is withdrawn"
+    );
+    let new = t
+        .hub
+        .bus
+        .store()
+        .last_session_id(lead.id)
+        .await
+        .unwrap()
+        .expect("the second round's session");
+    assert_ne!(new, old);
+    assert_eq!(t.agent("Pia").await.cwd, checkout);
+}

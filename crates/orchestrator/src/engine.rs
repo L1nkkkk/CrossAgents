@@ -2708,6 +2708,8 @@ async fn renew_for_round(
                         return true;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                    // Events were missed, the turn's end may be one of them: look again now.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return true,
                     _ => {}
                 }
             }

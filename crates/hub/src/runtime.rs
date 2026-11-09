@@ -382,15 +382,31 @@ impl Inbox {
         self.waiting.lock().unwrap().iter().any(|(m, _)| *m == id)
     }
 
-    /// Pops the next message and marks a turn running. `None` when closed or nothing is waiting.
+    /// Pops the next message and marks a turn running, under the queue's lock: a closing
+    /// [`Self::close_if_idle`] sees the message still queued, or the turn running, never
+    /// neither. `None` when closed or nothing is waiting.
     fn pop_turn(&self) -> Option<(MessageId, Prompt)> {
+        let mut waiting = self.waiting.lock().unwrap();
         if self.closed.load(Ordering::SeqCst) {
             return None;
         }
-        let message = self.waiting.lock().unwrap().pop_front()?;
+        let message = waiting.pop_front()?;
         self.busy.store(true, Ordering::SeqCst);
         *self.running.lock().unwrap() = Some(message.0);
         Some(message)
+    }
+
+    /// Closes the queue unless a turn runs in it, decided under the queue's lock (see
+    /// [`Self::pop_turn`]). What waits stays queued, for the session that takes it over.
+    /// `false` when a turn runs: nothing is closed then.
+    fn close_if_idle(&self) -> bool {
+        let _waiting = self.waiting.lock().unwrap();
+        if self.busy.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.closed.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+        true
     }
 
     async fn wait_for_message(&self) {
@@ -404,6 +420,10 @@ impl Inbox {
     fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.notify.notify_one();
+    }
+
+    fn has_waiting(&self) -> bool {
+        !self.waiting.lock().unwrap().is_empty()
     }
 
     /// Takes over what `other` holds waiting, behind what this queue already holds.
@@ -832,8 +852,12 @@ impl Runtime {
 
     /// Takes back every message still waiting in a session that goes away.
     async fn withdraw_waiting(&self, id: AgentId, live: &Live) {
-        let waiting: Vec<MessageId> = live
-            .inbox
+        self.withdraw_queue(id, &live.inbox).await;
+    }
+
+    /// Takes back what waits in `queue`, the way [`Self::withdraw_waiting`] does.
+    async fn withdraw_queue(&self, id: AgentId, queue: &Inbox) {
+        let waiting: Vec<MessageId> = queue
             .waiting
             .lock()
             .unwrap()
@@ -843,6 +867,25 @@ impl Runtime {
         for message_id in waiting {
             publish(&self.bus, EventKind::AgentInputWithdrawn { id, message_id }).await;
         }
+    }
+
+    /// Takes back the queue carried to a renewed session that never opened: a stopped,
+    /// archived or deleted agent does not get its messages through a session it lost.
+    async fn withdraw_carried(&self, id: AgentId) {
+        let Some(queue) = self.carried.lock().await.remove(&id) else {
+            return;
+        };
+        queue.close();
+        self.withdraw_queue(id, &queue).await;
+    }
+
+    /// Whether messages wait in the queue carried to a renewed session that has not opened.
+    async fn carried_waiting(&self, id: AgentId) -> bool {
+        self.carried
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|queue| queue.has_waiting())
     }
 
     async fn agent_lock(&self, id: AgentId) -> Arc<Mutex<()>> {
@@ -1039,19 +1082,23 @@ impl Runtime {
         };
 
         // Only now that the new session is up: a start that failed says it again next time.
+        // Both marks are cleared once the new session is up. A renewed session (a round the lead
+        // chose to start) is not a loss of context: its handoff is in the kickoff, so no warning.
         if renewed {
             self.forget_mark(agent.id, NEW_SESSION).await;
         }
         if let Some(why) = lost {
             self.forget_lost_context(agent.id).await;
-            publish(
-                &self.bus,
-                EventKind::AgentWarning {
-                    id: agent.id,
-                    message: format!("这是新会话，没有带上之前的上下文：{why}"),
-                },
-            )
-            .await;
+            if !renewed {
+                publish(
+                    &self.bus,
+                    EventKind::AgentWarning {
+                        id: agent.id,
+                        message: format!("这是新会话，没有带上之前的上下文：{why}"),
+                    },
+                )
+                .await;
+            }
         }
 
         // Drivers that do not report what a turn changed get it worked out by the hub.
@@ -1089,6 +1136,13 @@ impl Runtime {
         }
         let lock = self.agent_lock(agent.id).await;
         let _guard = lock.lock().await;
+        // Messages waiting for a renewed session that has not opened: they go on there first.
+        if self.carried_waiting(agent.id).await {
+            return Err(CoreError::Busy(format!(
+                "messages are waiting for {}",
+                agent.name
+            )));
+        }
         let live = {
             let mut live = self.live.lock().await;
             match live.get(&agent.id) {
@@ -1316,11 +1370,17 @@ impl Runtime {
 
     /// Whether a turn runs or a message waits.
     pub async fn is_busy(&self, id: AgentId) -> bool {
-        self.live
+        let live = self
+            .live
             .lock()
             .await
             .get(&id)
-            .is_some_and(|live| !live.inbox.is_idle())
+            .map(|live| !live.inbox.is_idle());
+        match live {
+            Some(busy) => busy,
+            // Messages carried to a session that has not opened yet are waiting all the same.
+            None => self.carried_waiting(id).await,
+        }
     }
 
     /// What the agent's session does with messages now, from the same inbox the hub admits
@@ -1342,13 +1402,18 @@ impl Runtime {
             };
             return DeliveryStatus { state, queued };
         }
-        let inbox = self
+        let live = self
             .live
             .lock()
             .await
             .get(&agent.id)
             .filter(|live| !live.inbox.is_closed())
             .map(|live| live.inbox.clone());
+        // A renewed session that has not opened yet still holds what was sent to the agent.
+        let inbox = match live {
+            Some(inbox) => Some(inbox),
+            None => self.carried.lock().await.get(&agent.id).cloned(),
+        };
         match inbox {
             Some(inbox) => inbox.delivery(),
             None => DeliveryStatus {
@@ -2885,6 +2950,8 @@ impl Runtime {
         let _guard = lock.lock().await;
         // Nothing can repeat a send to a session that is gone.
         self.clients.lock().await.forget(agent.id);
+        // A renewed session that never opened goes with it, its waiting messages withdrawn.
+        self.withdraw_carried(agent.id).await;
         let Some(live) = self.live.lock().await.remove(&agent.id) else {
             // No session: what it does with messages did not change, so nothing is announced.
             set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
@@ -2906,31 +2973,25 @@ impl Runtime {
     /// after this call. `false` for an agent that runs outside the hub.
     pub async fn renew(&self, key: &AgentKey) -> Result<bool, CoreError> {
         let agent = self.store().get_agent(key).await?;
-        if agent.plugin == EXTERNAL_PLUGIN {
+        // An agent outside the hub keeps its session. An archived one gets no mark either: its
+        // next open would start fresh without a handoff, dropping its context on restore.
+        if agent.plugin == EXTERNAL_PLUGIN || agent.archived_at.is_some() {
             return Ok(false);
         }
         let lock = self.agent_lock(agent.id).await;
         let _guard = lock.lock().await;
-        let live = {
-            let mut lives = self.live.lock().await;
-            if lives
-                .get(&agent.id)
-                .is_some_and(|live| live.inbox.busy.load(Ordering::SeqCst))
-            {
+        let live = self.live.lock().await.get(&agent.id).cloned();
+        if let Some(live) = &live {
+            // Decided under the queue's lock, before any await: a turn that just began keeps
+            // its session, and a turn that just ended cannot take the next message any more.
+            if !live.inbox.close_if_idle() {
                 return Err(CoreError::Busy(format!(
                     "{} is in the middle of a turn",
                     agent.name
                 )));
             }
-            lives.remove(&agent.id)
-        };
-        // Written first: whatever opens the session next starts it fresh.
-        self.mark_new_session(agent.id).await?;
-        self.clients.lock().await.forget(agent.id);
-        if let Some(live) = live {
-            // Closed, so the old turn loop returns; what waits stays in the queue, which the
-            // new session takes over (install). Nothing is withdrawn: nothing is lost.
-            live.inbox.close();
+            // What waits is carried before anything else is written, so that a failing mark
+            // below cannot lose it. Nothing is withdrawn: nothing is lost.
             let mut carried = self.carried.lock().await;
             match carried.get(&agent.id) {
                 Some(queue) => queue.take_from(&live.inbox),
@@ -2938,13 +2999,18 @@ impl Runtime {
                     carried.insert(agent.id, live.inbox.clone());
                 }
             }
-            drop(carried);
+        }
+        // Written before the old session ends: whatever opens the session next starts it fresh.
+        let marked = self.mark_new_session(agent.id).await;
+        if let Some(live) = live {
+            self.live.lock().await.remove(&agent.id);
             let _ = live.session.interrupt().await;
             live.session.shutdown().await;
             let _ = live.control.send(Control::Stopped);
         }
         set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
         self.announce_delivery(agent.id).await;
+        marked?;
         Ok(true)
     }
 
@@ -3937,6 +4003,41 @@ fn tail(text: String, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queued(inbox: &Inbox) -> usize {
+        inbox.waiting.lock().unwrap().len()
+    }
+
+    #[test]
+    fn a_running_turn_keeps_the_queue_open_and_a_closed_one_hands_out_nothing() {
+        let inbox = Inbox::default();
+        inbox.push((MessageId::new(), Prompt::text("one")), false);
+        assert!(inbox.pop_turn().is_some(), "the first message starts a turn");
+        assert!(!inbox.close_if_idle(), "a running turn keeps the queue open");
+        assert!(!inbox.is_closed());
+        inbox.finish_turn();
+        inbox.push((MessageId::new(), Prompt::text("two")), false);
+        assert!(inbox.close_if_idle(), "idle again: the queue closes");
+        assert!(inbox.is_closed());
+        assert!(
+            inbox.pop_turn().is_none(),
+            "a closed queue starts no turn, so the message is not taken by the old session"
+        );
+        assert_eq!(queued(&inbox), 1, "what waits stays for the session that takes it over");
+    }
+
+    #[test]
+    fn a_queue_taken_over_is_reopened_with_its_messages() {
+        let old = Inbox::default();
+        let new = Inbox::default();
+        old.push((MessageId::new(), Prompt::text("waiting")), false);
+        assert!(old.close_if_idle());
+        new.take_from(&old);
+        assert_eq!(queued(&new), 1);
+        assert_eq!(queued(&old), 0);
+        new.closed.store(false, Ordering::SeqCst);
+        assert!(new.pop_turn().is_some(), "the new session starts with the carried message");
+    }
 
     const INCIDENT: &str = "400 model [deepseek-v4.1-flash-sg] service info not found (01a1b1fcef287ba683c3c502e76f1bb3/29fac42c-1b53-4461-8bab-4f8b3c92723f)\nCurrently supported models for your account:\n  - hy4free\n  - hy4std\n  - hy3\n  - hy3-x\n  - deepseek-v4.1-flash\n  - glm-5.3\n  - glm-5.3-flash\n  - glm-5.2\n  - space-bunny\n  - minimax-m3.1-flash\n  - minimax-m2.7\n  - kimi-k3.1-pro\n  - kimi-k3-1\n  - kimi-k2.8-preview\n  - deepseek-v4-pro\n  - step-5-preview\n  - mimo-v2.6-pro\nPlease use --model <model_id> to specify a valid model.";
 

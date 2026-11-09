@@ -123,7 +123,8 @@ pub fn handoff(request: &str, carry: &Carryover) -> String {
             crate::engine::first_line(text, 240)
         );
     }
-    if prev.landed.is_none() && matches!(prev.status, RunStatus::Completed) {
+    // A round that failed may still have left changes on its run branch: say where they are.
+    if prev.landed.is_none() && matches!(prev.status, RunStatus::Completed | RunStatus::Failed) {
         let _ = write!(
             out,
             "\n- changes not landed: the previous round's run branch {} still holds them",
@@ -818,6 +819,21 @@ mod tests {
         );
         assert!(
             text.contains("4. Open items:\n- changes not landed"),
+            "{text}"
+        );
+
+        // A failed round that did not land may still hold changes on its run branch.
+        let mut failed = bare.previous.clone();
+        failed.status = RunStatus::Failed;
+        let failed = Carryover {
+            previous: failed,
+            constraints: None,
+            issues: vec![],
+            waiting: vec![],
+        };
+        let text = handoff("next", &failed);
+        assert!(
+            text.contains("changes not landed: the previous round's run branch run-first"),
             "{text}"
         );
     }
