@@ -6,14 +6,23 @@ import type { WebPreferences } from "electron";
 
 /** The session every built-in browser tab runs in. Nothing else may use it. */
 export const BROWSER_PARTITION = "persist:browser";
-/** The attribute the page sets on each browser <webview>; without it the tag is refused. */
+/**
+ * A marker the page may set on each browser <webview>. Electron does not forward unknown
+ * attributes to will-attach-webview, so it is informational only and never required.
+ */
 export const BROWSER_MARK = "data-crossagents-browser";
 /** The scheme that serves local files to a browser tab (electron/browser.cts). */
 export const FILE_SCHEME = "crossagents-file";
 
-/** Whether a `<webview>` being attached is one of the built-in browser's tabs. */
-export function webviewAllowed(params: Readonly<Record<string, string | undefined>>): boolean {
-  return params.partition === BROWSER_PARTITION && params[BROWSER_MARK] === "1";
+/**
+ * Whether a `<webview>` being attached is one of the built-in browser's tabs: it must be on the
+ * browser partition, attached by the app's own page (`hostIsApp`), and start at a page the tab
+ * may show (empty or about:blank included). The main process decides `hostIsApp`.
+ */
+export function webviewAllowed(params: Readonly<Record<string, string | undefined>>, hostIsApp: boolean): boolean {
+  if (!hostIsApp || params.partition !== BROWSER_PARTITION) return false;
+  const src = params.src ?? "";
+  return src === "" || src === "about:blank" || navigationAllowed(src);
 }
 
 /**

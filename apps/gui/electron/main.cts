@@ -740,8 +740,9 @@ app.on("web-contents-created", (_event, contents) => {
     if (!url.startsWith(appUrl)) event.preventDefault();
   });
   // Only the built-in browser's tabs may attach; their settings are forced there.
+  // Unknown data-* attributes do not reach `params`, so the host page's URL decides instead.
   contents.on("will-attach-webview", (event, webPreferences, params) => {
-    if (!guardWebview(webPreferences, params)) event.preventDefault();
+    if (!guardWebview(webPreferences, params, contents.getURL().startsWith(appUrl))) event.preventDefault();
   });
   contents.on("did-attach-webview", (_event, guest) => attachGuest(guest, logLine));
 });

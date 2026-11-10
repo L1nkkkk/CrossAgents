@@ -3,13 +3,34 @@ import { test } from "node:test";
 import type { WebPreferences } from "electron";
 import { browserPermissionAllowed, browserProxy, enforceGuestPreferences, navigationAllowed, webviewAllowed } from "./browserPolicy.cjs";
 
-test("only the browser's own <webview> with its mark attaches", () => {
-  assert.equal(webviewAllowed({ partition: "persist:browser", "data-crossagents-browser": "1" }), true);
-  assert.equal(webviewAllowed({ partition: "persist:browser" }), false);
-  assert.equal(webviewAllowed({ partition: "persist:other", "data-crossagents-browser": "1" }), false);
-  assert.equal(webviewAllowed({ partition: "persist:browser", "data-crossagents-browser": "0" }), false);
-  assert.equal(webviewAllowed({ "data-crossagents-browser": "1" }), false);
-  assert.equal(webviewAllowed({}), false);
+test("a browser <webview> is the browser partition, attached by the app's page", () => {
+  // Electron does not forward data-* attributes, so the marker is not required.
+  assert.equal(webviewAllowed({ partition: "persist:browser" }, true), true);
+  assert.equal(webviewAllowed({ partition: "persist:browser", src: "https://example.com/" }, true), true);
+  // Partition wrong → refused.
+  assert.equal(webviewAllowed({ partition: "persist:other" }, true), false);
+  assert.equal(webviewAllowed({}, true), false);
+  // Host not the app → refused.
+  assert.equal(webviewAllowed({ partition: "persist:browser" }, false), false);
+  // Start page outside the allowed schemes → refused; empty and about:blank allowed.
+  assert.equal(webviewAllowed({ partition: "persist:browser", src: "file:///C:/secret.txt" }, true), false);
+  assert.equal(webviewAllowed({ partition: "persist:browser", src: "javascript:alert(1)" }, true), false);
+  assert.equal(webviewAllowed({ partition: "persist:browser", src: "about:blank" }, true), true);
+  assert.equal(webviewAllowed({ partition: "persist:browser", src: "" }, true), true);
+  assert.equal(webviewAllowed({ partition: "persist:browser", src: "crossagents-file://abc/index.html" }, true), true);
+});
+
+test("an allowed tab gets its preferences forced; a refused one is not touched", () => {
+  const asked = { preload: "/x.cjs", nodeIntegration: true, contextIsolation: false, sandbox: false } as WebPreferences;
+  // The same two steps guardWebview runs in browser.cts.
+  if (webviewAllowed({ partition: "persist:browser" }, true)) enforceGuestPreferences(asked);
+  assert.equal(asked.nodeIntegration, false);
+  assert.equal(asked.contextIsolation, true);
+  assert.equal(asked.sandbox, true);
+  assert.equal("preload" in asked, false);
+  const refused = { preload: "/x.cjs", nodeIntegration: true } as WebPreferences;
+  if (webviewAllowed({ partition: "persist:other" }, true)) enforceGuestPreferences(refused);
+  assert.equal(refused.nodeIntegration, true);
 });
 
 test("a browser tab's preferences are forced whatever the page asked for", () => {

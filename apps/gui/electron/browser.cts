@@ -49,8 +49,8 @@ function tabOf(contents: WebContents): BrowserTab {
  * Called when a `<webview>` is about to attach to the page's window. Returns false for anything
  * that is not a browser tab (the caller then refuses it); a browser tab's preferences are forced.
  */
-export function guardWebview(prefs: WebPreferences, params: Record<string, string>): boolean {
-  if (!webviewAllowed(params)) return false;
+export function guardWebview(prefs: WebPreferences, params: Record<string, string>, hostIsApp: boolean): boolean {
+  if (!webviewAllowed(params, hostIsApp)) return false;
   enforceGuestPreferences(prefs);
   return true;
 }
