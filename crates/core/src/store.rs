@@ -549,6 +549,12 @@ pub trait Store: Send + Sync {
         let _ = (task, outcome);
         Err(CoreError::Unsupported("expertise usage".into()))
     }
+    /// For every agent and expertise domain: on how many tasks an entry of that domain was
+    /// used and the task merged first try, as `(agent, domain, tasks)`; one query for the
+    /// whole agent list (its strengths).
+    async fn usage_merged_domains(&self) -> Result<Vec<(AgentId, String, u32)>, CoreError> {
+        Ok(Vec::new())
+    }
     /// Usage records of one entry and/or one task, oldest first.
     async fn usage_list(
         &self,

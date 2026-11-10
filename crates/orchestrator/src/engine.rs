@@ -882,6 +882,13 @@ impl Orchestrator {
         } else {
             MessageSource::Human
         };
+        // What each teammate did well, by its own and its sessions' merged tasks.
+        let strengths = match self.store.list_agents().await {
+            Ok(all) => crate::relations::strengths(self.store.as_ref(), &all)
+                .await
+                .unwrap_or_default(),
+            Err(_) => Default::default(),
+        };
         let mut kickoff_text = brief::kickoff(
             &run,
             &team,
@@ -889,6 +896,7 @@ impl Orchestrator {
             &crate::project::run_checks(&checkout),
             env.as_ref(),
             &sessions,
+            &strengths,
         );
         // A round the lead asked for starts from its previous round's handoff: the facts a new
         // session starts from, read from the hub's records (brief::handoff).
@@ -1954,24 +1962,40 @@ The person changed: {}",
 
     /// An execution session cloned from a teammate is nobody's recruit: the clone copies the
     /// template's config, recruiting marks included, and those would count it among the
-    /// run's or a conversation's recruits.
-    pub(crate) async fn unmark_recruit(&self, mut agent: Agent) -> Result<Agent, CoreError> {
+    /// run's or a conversation's recruits. It remembers instead the teammate it came from
+    /// (the root template: a clone of a clone points past the session in between) and the
+    /// task it was started for.
+    pub(crate) async fn unmark_recruit(
+        &self,
+        mut agent: Agent,
+        template: AgentId,
+        task_key: &str,
+    ) -> Result<Agent, CoreError> {
+        use crossagents_core::model::{CLONED_FOR, CLONED_FROM};
+        let root = match agent.cloned_from() {
+            Some(root) => root,
+            None => match self.store.get_agent(&AgentKey::Id(template)).await {
+                Ok(t) => t.cloned_from().unwrap_or(t.id),
+                Err(_) => template,
+            },
+        };
+        if !agent.config.is_object() {
+            agent.config = serde_json::json!({});
+        }
         let Some(map) = agent.config.as_object_mut() else {
             return Ok(agent);
         };
-        let had = map
-            .remove(crossagents_core::model::SPAWNED_BY_AGENT)
-            .is_some()
-            | map.remove("spawned_by_run").is_some();
-        if had {
-            self.store
-                .update_agent_config(agent.id, &agent.config)
-                .await?;
-            self.publish(EventKind::AgentUpdated {
-                agent: agent.clone(),
-            })
-            .await;
-        }
+        map.remove(crossagents_core::model::SPAWNED_BY_AGENT);
+        map.remove("spawned_by_run");
+        map.insert(CLONED_FROM.into(), root.to_string().into());
+        map.insert(CLONED_FOR.into(), task_key.into());
+        self.store
+            .update_agent_config(agent.id, &agent.config)
+            .await?;
+        self.publish(EventKind::AgentUpdated {
+            agent: agent.clone(),
+        })
+        .await;
         Ok(agent)
     }
 
@@ -1988,7 +2012,7 @@ The person changed: {}",
     ) -> Result<Agent, CoreError> {
         let name = self.free_name(name).await?;
         let agent = self.host.clone_agent(template, &name, role, cwd).await?;
-        let agent = self.unmark_recruit(agent).await?;
+        let agent = self.unmark_recruit(agent, template, &task.key).await?;
         let claim = if role == Role::Reviewer {
             ClaimRole::Reviewer
         } else {

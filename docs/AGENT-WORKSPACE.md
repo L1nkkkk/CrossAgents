@@ -183,7 +183,11 @@ run 不再嵌在来源聊天下。项目内全部 run（包括旧记录、无来
 - **自动组队**：`crates/orchestrator/src/engine.rs` 的 `gather_team` 与审批补 team 共三处 `role != Planner` 保留。它是「不把聊天会话塞进默认队友列表」的默认组合，不是资格——kickoff 的工作区会话一节仍列出全部会话，lead 可以点名任何一个。该文件不在本轮可改范围。
 - **展示与统计**：`hub/src/usage.rs` 的按角色分组、`accounts.rs` 的账号用途、界面的 role 标签与 `LeadFlag` 都保留，属于展示。
 
-**没做**：没有删 role 列，没有改 `CreateAgentRequest`（role 仍必填，旧客户端行为不变），没有改 `docs/TODO.md`。
+**没做**：没有删 role 列，没有改 `CreateAgentRequest`（role 仍必填，旧客户端行为不变），没有改 `docs/TODO.md`。（之后 §6.3 把 role 改成了可选。）
+
+### 6.3 role 弃用，身份看当前关系与擅长（2026-11-10）
+
+role 已弃用：`CreateAgentRequest.role` 和 CLI `--role` 改为可选（不给即 worker），`Agent.role` 缺省读作 worker，旧记录和旧客户端照常读写，新界面不再显示它。一个 agent 是谁，改由 `GET /v1/agents`（以及 MCP 的 `agent_list` / `whoami`）给出的三项事实表达：`now`（它此刻在哪个 run 里主导、做哪个任务或评审哪个任务，来自 claim，空闲为 null）、`session_of`（执行会话克隆自哪个队友、为哪个任务而开，来自 config 的 `cloned_from` / `cloned_for`；克隆的克隆指向最初的模板；记下这两项之前的旧会话为 null），和 `strengths`（它本人及其执行会话一次通过合并的任务所用经验条目的领域，最多三个、最好的在前）。kickoff 的队友名单也一样：只是旧角色词（worker、planner、reviewer、lead、coder、主导）的 title 当作没有 title，有擅长时加上 `good at: …`。
 
 ## 7. 实施顺序
 

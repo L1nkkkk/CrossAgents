@@ -39,8 +39,10 @@ pub struct AddArgs {
     /// Model, e.g. `opus` or `haiku`.
     #[arg(long)]
     pub model: Option<String>,
+    /// Deprecated: a label kept on the record for old clients (absent: worker); it decides
+    /// nothing.
     #[arg(long, value_enum)]
-    pub role: RoleArg,
+    pub role: Option<RoleArg>,
     /// Working directory; defaults to the current directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
@@ -96,7 +98,7 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
                 plugin: args.plugin,
                 driver: args.driver,
                 model: args.model,
-                role: args.role.into(),
+                role: args.role.map(Into::into),
                 cwd: cwd.display().to_string(),
                 config: match &args.account {
                     Some(account) => serde_json::json!({ "account": account }),

@@ -44,7 +44,7 @@ impl Orchestrator {
             .host
             .clone_agent_on(template, &name, Role::Worker, &cwd, account.as_deref())
             .await?;
-        let worker = self.unmark_recruit(worker).await?;
+        let worker = self.unmark_recruit(worker, template, &task.key).await?;
         self.claim(&worker, run.id, Some(task.id), ClaimRole::Worker, true)
             .await?;
         // How this dispatch chose its account, for `run trace` (magpie-lancer §2.8).

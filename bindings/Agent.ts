@@ -29,9 +29,10 @@ plugin: string,
  */
 driver: string | null, model: string | null, 
 /**
- * How the agent was made (a chat, a worker or a reviewer session). Kept for old clients
- * and for reading old records; nothing decides who may do what by it — the run's claims
- * do (docs/AGENT-WORKSPACE.md §6).
+ * Deprecated: how the agent was made (a chat, a worker or a reviewer session). Old
+ * records still read (absent: worker); nothing new should show it, and nothing decides who
+ * may do what by it — the run's claims do (docs/AGENT-WORKSPACE.md §6). Who an agent is
+ * shows by its current relation and strengths (`GET /v1/agents`).
  */
 role: Role, 
 /**

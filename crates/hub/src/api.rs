@@ -660,10 +660,28 @@ async fn list_agents(
             .await?,
         );
     }
+    // Who each one is now: its claim, the teammate a session came from, its strengths.
+    let relations =
+        crossagents_orchestrator::relations::Relations::of(state.store().as_ref(), &agents).await?;
+    let now = agents
+        .iter()
+        .map(|a| relations.now.get(&a.id).cloned())
+        .collect();
+    let session_of = agents
+        .iter()
+        .map(|a| relations.session_of.get(&a.id).cloned())
+        .collect();
+    let strengths = agents
+        .iter()
+        .map(|a| relations.strengths_of(a.id).to_vec())
+        .collect();
     Ok(Json(ListAgentsResponse {
         agents,
         unusable,
         unguarded,
+        now,
+        session_of,
+        strengths,
     }))
 }
 
@@ -902,7 +920,7 @@ async fn create_agent(
         plugin: req.plugin,
         driver: req.driver,
         model: req.model,
-        role: req.role,
+        role: req.role.unwrap_or_default(),
         cwd,
         config: req.config,
         status: AgentStatus::Stopped,

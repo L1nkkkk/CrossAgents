@@ -6,7 +6,7 @@ import { api, ApiError, errorText } from "../api";
 import { HeldFiles, useHeld } from "../attach";
 import { sendMessage } from "../outbox";
 import { navigate } from "../App";
-import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
+import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentLine, agentTitle, displayName, hueOf, relationText, sessionLabel, useAgents } from "../components";
 import { useHubData } from "../hub";
 import { useConnectionState } from "../lib/useConnection";
 import { t } from "../lib/i18n";
@@ -312,7 +312,7 @@ export function HomeView() {
       role,
       cwd: dir,
       config: permission === undefined ? configFor(choice, effort) : configWithPermission(configFor(choice, effort), permission),
-      profile: { display_name: null, title: role === "planner" ? t("home.leadTitle") : "Worker", avatar: null, avatar_image: null, color: null, persona: null },
+      profile: { display_name: null, title: null, avatar: null, avatar_image: null, color: null, persona: null },
     });
   }
 
@@ -557,8 +557,8 @@ export function HomeView() {
       (a): MenuItem => ({
         kind: "item",
         key: `a/${a.name}`,
-        label: displayName(a),
-        sub: `${agentTitle(a)} · ${a.model ?? a.plugin}`,
+        label: sessionLabel(a),
+        sub: [agentTitle(a), relationText(a)].filter(Boolean).join(" · "),
         icon: <Avatar agent={a} size={18} />,
         on: lead?.kind === "agent" && lead.name === a.name,
         onPick: () => choose({ kind: "agent", name: a.name }),
@@ -875,7 +875,7 @@ function AgentSelect({ agents, value, onChange, empty }: { agents: Agent[]; valu
       <option value="">{empty}</option>
       {agents.map((a) => (
         <option key={a.id} value={a.name}>
-          {displayName(a)} · {agentTitle(a)} · {a.model ?? a.plugin}
+          {agentLine(a)}
         </option>
       ))}
     </select>

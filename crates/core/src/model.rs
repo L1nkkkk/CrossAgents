@@ -11,11 +11,14 @@ use crate::error::CoreError;
 use crate::ids::{AgentId, RunId, TaskId};
 use crate::state::TaskStatus;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Deprecated as an identity: how a session was made, kept for old records and clients.
+/// What an agent is now is shown by its current relation (a claim) and its strengths.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Planner,
+    #[default]
     Worker,
     Reviewer,
 }
@@ -47,9 +50,11 @@ pub struct Agent {
     /// `None` means the plugin's default driver.
     pub driver: Option<String>,
     pub model: Option<String>,
-    /// How the agent was made (a chat, a worker or a reviewer session). Kept for old clients
-    /// and for reading old records; nothing decides who may do what by it — the run's claims
-    /// do (docs/AGENT-WORKSPACE.md §6).
+    /// Deprecated: how the agent was made (a chat, a worker or a reviewer session). Old
+    /// records still read (absent: worker); nothing new should show it, and nothing decides who
+    /// may do what by it — the run's claims do (docs/AGENT-WORKSPACE.md §6). Who an agent is
+    /// shows by its current relation and strengths (`GET /v1/agents`).
+    #[serde(default)]
     pub role: Role,
     /// The workspace the agent belongs to (docs/DESIGN.md §4.7): where it lives between
     /// executions, and what the sidebar groups it under. Empty in records from before homes,
@@ -89,6 +94,14 @@ pub enum NameSource {
 /// recruits carry `spawned_by_run` instead.
 pub const SPAWNED_BY_AGENT: &str = "spawned_by_agent";
 
+/// `config` key of an execution session: the teammate (template) it was cloned from. A clone
+/// of a clone names the root template, not the session in between.
+pub const CLONED_FROM: &str = "cloned_from";
+
+/// `config` key of an execution session: the key of the task it was started for, when the
+/// hub knew it.
+pub const CLONED_FOR: &str = "cloned_for";
+
 /// `config` key saying why the agent's next session cannot carry on its conversation (its
 /// driver resumes only in the directory the session ran in, and that went with a deleted
 /// run): the hub opens a new session and says so instead of resuming somewhere else
@@ -116,6 +129,19 @@ impl Agent {
             .get(SPAWNED_BY_AGENT)
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok())
+    }
+
+    /// The teammate this execution session was cloned from ([`CLONED_FROM`]).
+    pub fn cloned_from(&self) -> Option<AgentId> {
+        self.config
+            .get(CLONED_FROM)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+    }
+
+    /// The task key this execution session was started for ([`CLONED_FOR`]).
+    pub fn cloned_for(&self) -> Option<&str> {
+        self.config.get(CLONED_FOR).and_then(|v| v.as_str())
     }
 
     /// Who the agent is, said at the top of its instructions: its name (so it does not

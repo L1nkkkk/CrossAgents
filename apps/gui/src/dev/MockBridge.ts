@@ -10,6 +10,7 @@ import { importCandidates } from "../views/AccountImport.mock";
 import type { Account } from "@bindings/Account";
 import type { AgentCommandsResponse } from "@bindings/AgentCommandsResponse";
 import type { AgentExecution } from "@bindings/AgentExecution";
+import type { AgentRelations } from "../lib/relations";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
@@ -647,6 +648,24 @@ export class MockBridge implements CrossAgentsBridge {
     return this.state.agents.find((a) => a.id === k || a.name.toLowerCase() === k.toLowerCase());
   }
 
+  /** `now` as the hub would say it: the execution it runs, else a live run it leads, else idle. */
+  private relationsFor(agent: Agent): { now: AgentRelations["now"] } {
+    const x = this.state.executions?.[agent.id];
+    if (x) {
+      const kind = x.role === "lead" ? "lead" : x.role === "reviewer" ? "reviewing" : "working";
+      return { now: { kind, run_id: x.run_id, run_title: x.run_title, task_key: kind === "lead" ? null : x.task_key } };
+    }
+    const live: string[] = ["planning", "awaiting_approval", "running", "paused"];
+    const led = this.state.runs.find((d) => d.run.planner === agent.id && live.includes(d.run.status));
+    if (led) return { now: { kind: "lead", run_id: led.run.id, run_title: led.run.title, task_key: null } };
+    const task = this.state.runs.flatMap((d) => d.tasks.map((t) => ({ d, t }))).find(({ d, t }) => live.includes(d.run.status) && (t.assignee === agent.id || t.reviewer === agent.id) && ["running", "verifying", "retrying", "reviewing"].includes(t.status));
+    if (task) {
+      const reviewing = task.t.reviewer === agent.id && task.t.status === "reviewing";
+      return { now: { kind: reviewing ? "reviewing" : "working", run_id: task.d.run.id, run_title: task.d.run.title, task_key: task.t.key } };
+    }
+    return { now: null };
+  }
+
   /** `approval::unusable_for` as the preview acts it out: the agent's own permission, else the
    * run's approvals, decides what a guarded session gets; Cursor cannot run that on Windows. */
   private unusableFor(agent: Agent, policy?: RunDetail["run"]["config"]["policy"]): string | undefined {
@@ -780,7 +799,7 @@ export class MockBridge implements CrossAgentsBridge {
         const agents = s.agents.map((a) => {
           const why = this.unusableFor(a, found?.run.config.policy);
           const unguarded = this.unguardedFor(a, found?.run.config.policy);
-          return { ...a, unguarded, ...(why ? { unusable: why } : {}) };
+          return { ...this.relationsFor(a), ...a, unguarded, ...(why ? { unusable: why } : {}) };
         });
         return json(200, { agents });
       }
@@ -1077,6 +1096,7 @@ export class MockBridge implements CrossAgentsBridge {
         const agent: Agent = {
           id,
           ...req,
+          role: req.role ?? "worker", // like the hub: absent reads as worker
           name,
           name_source: req.name ? "chosen" : "generated",
           topic: req.topic ?? null,

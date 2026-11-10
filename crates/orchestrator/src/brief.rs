@@ -149,6 +149,7 @@ pub fn kickoff(
     checks: &Result<RunChecks, String>,
     env: Option<&RunEnv>,
     sessions: &str,
+    strengths: &Strengths,
 ) -> String {
     kickoff_with(
         run,
@@ -157,6 +158,7 @@ pub fn kickoff(
         checks,
         env,
         sessions,
+        strengths,
         &crate::machine::current(),
     )
 }
@@ -170,6 +172,7 @@ pub fn kickoff_with(
     checks: &Result<RunChecks, String>,
     env: Option<&RunEnv>,
     sessions: &str,
+    strengths: &Strengths,
     machine: &crate::machine::Machine,
 ) -> String {
     let mut out = run.request.trim().to_owned();
@@ -236,7 +239,7 @@ pub fn kickoff_with(
         let _ = write!(out, "\n{line}");
     }
     out.push_str(DISPATCH);
-    out.push_str(&roster(team, default_worker));
+    out.push_str(&roster(team, default_worker, strengths));
     if !team.iter().any(|a| a.id == default_worker) {
         // No worker was picked: tasks, if any, run on the lead's model.
         out.push_str(
@@ -324,17 +327,37 @@ pub fn verification(run: &Run) -> Option<String> {
     })
 }
 
+/// Titles that only repeat the deprecated role (or the old lead word): no title at all.
+const ROLE_WORDS: &[&str] = &["worker", "planner", "reviewer", "lead", "coder", "主导"];
+
+/// The agent's title, unless it is just a legacy role word.
+fn real_title(title: Option<&str>) -> Option<&str> {
+    let title = title?.trim();
+    let role_word = ROLE_WORDS.iter().any(|w| title.eq_ignore_ascii_case(w));
+    (!title.is_empty() && !role_word).then_some(title)
+}
+
+/// Expertise domains per agent (see [`crate::relations::strengths`]).
+pub type Strengths = std::collections::HashMap<AgentId, Vec<String>>;
+
 /// The team: who is good at what, for picking assignees.
-pub fn roster(team: &[Agent], default_worker: AgentId) -> String {
+pub fn roster(team: &[Agent], default_worker: AgentId, strengths: &Strengths) -> String {
     let line = |a: &Agent| {
-        let who = match (&a.profile.display_name, &a.profile.title) {
-            (Some(name), Some(title)) => format!("{name}, {title}"),
-            (Some(name), None) => name.clone(),
-            (None, Some(title)) => title.clone(),
-            (None, None) => "no title".to_owned(),
+        let title = real_title(a.profile.title.as_deref());
+        let who = match (&a.profile.display_name, title) {
+            (Some(name), Some(title)) => Some(format!("{name}, {title}")),
+            (Some(name), None) => Some(name.clone()),
+            (None, Some(title)) => Some(title.to_owned()),
+            (None, None) => None,
         };
         let model = a.model.as_deref().unwrap_or(&a.plugin);
-        let mut s = format!("- {} — {who} · {model}", a.name);
+        let mut s = match who {
+            Some(who) => format!("- {} — {who} · {model}", a.name),
+            None => format!("- {} — {model}", a.name),
+        };
+        if let Some(good) = strengths.get(&a.id).filter(|g| !g.is_empty()) {
+            let _ = write!(s, " · good at: {}", good.join(", "));
+        }
         if let Some(persona) = &a.profile.persona {
             let _ = write!(s, ". {}", first_sentence(persona, 160));
         }
@@ -616,6 +639,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn roster_lines_drop_role_titles_and_say_strengths() {
+        let rex = agent("Rex");
+        let mut bare = agent("pal");
+        bare.profile = crossagents_core::AgentProfile::default();
+        bare.model = Some("haiku".into());
+        let mut legacy = agent("leo");
+        legacy.profile.display_name = None;
+        legacy.profile.title = Some("Reviewer".into());
+        legacy.profile.persona = Some("Careful with migrations. Also other things.".into());
+        let mut lead = agent("max");
+        lead.profile.display_name = None;
+        lead.profile.title = Some("主导".into());
+        let mut strengths = Strengths::new();
+        strengths.insert(rex.id, vec!["rust".into(), "sqlite".into()]);
+        strengths.insert(bare.id, Vec::new());
+        let text = roster(
+            &[rex.clone(), bare.clone(), legacy, lead],
+            bare.id,
+            &strengths,
+        );
+        assert!(
+            text.contains("\n- Rex — Rex, builds things · claude · good at: rust, sqlite\n"),
+            "{text}"
+        );
+        assert!(text.contains("\n- pal — haiku (default)\n"), "{text}");
+        assert!(
+            text.contains("\n- leo — claude. Careful with migrations.\n"),
+            "{text}"
+        );
+        assert!(text.ends_with("\n- max — claude"), "{text}");
+        assert!(!text.contains("no title"), "{text}");
+    }
+
     fn card(kind: HandoffKind) -> Handoff {
         Handoff {
             id: HandoffId::new(),
@@ -690,6 +747,7 @@ mod tests {
                 &Err("test".into()),
                 None,
                 "\nsessions: test",
+                &Strengths::new(),
             );
             assert!(
                 text.starts_with("hello\nworld\n\n---\nrun: title (run_id: "),
@@ -704,14 +762,30 @@ mod tests {
             );
             // Under automatic approval nothing is added: the guide already covers it.
             run.config.policy.plan_approval = PlanApproval::Auto;
-            let auto = kickoff(&run, &[], worker, &Err("test".into()), None, "");
+            let auto = kickoff(
+                &run,
+                &[],
+                worker,
+                &Err("test".into()),
+                None,
+                "",
+                &Strengths::new(),
+            );
             assert!(!auto.contains("plan_submit"), "{auto}");
             run.config.policy.plan_approval = PlanApproval::Required;
         }
         // The dispatch protocol and the roster are fixed sections, in that order, whatever the
         // team is (multica §2.3).
         let team = vec![agent("Rex")];
-        let text = kickoff(&run, &team, worker, &Err("test".into()), None, "");
+        let text = kickoff(
+            &run,
+            &team,
+            worker,
+            &Err("test".into()),
+            None,
+            "",
+            &Strengths::new(),
+        );
         let dispatch = text
             .find("dispatch: you run the work by delegating")
             .unwrap_or_else(|| panic!("no dispatch protocol:\n{text}"));
@@ -724,7 +798,15 @@ mod tests {
         );
         assert!(text.contains("- Rex — Rex, builds things"), "{text}");
         // A run with nobody on the team still gets the protocol.
-        let alone = kickoff(&run, &[], worker, &Err("test".into()), None, "");
+        let alone = kickoff(
+            &run,
+            &[],
+            worker,
+            &Err("test".into()),
+            None,
+            "",
+            &Strengths::new(),
+        );
         assert!(alone.contains("dispatch: you run the work"), "{alone}");
     }
 

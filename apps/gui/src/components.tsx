@@ -57,6 +57,8 @@ import type { FileScope } from "./api";
 import { openFile } from "./FileViewer";
 import { useResolved } from "./fileResolve";
 import { prettyModel } from "./lib/models";
+import { isLeading, nowOf, relationKind, relationText, sessionLabel } from "./lib/relations";
+export { relationText, sessionLabel, strengthsOf, relationKind, isLeading } from "./lib/relations";
 import { full, when } from "./lib/time";
 
 /** How a status reads at a glance: a colour, and whether it is still moving. */
@@ -185,7 +187,8 @@ export function useAgents() {
 
 export function agentName(agents: Agent[] | undefined, id: string | null): string {
   if (!id) return "—";
-  return agents?.find((a) => a.id === id)?.name ?? id.slice(0, 8);
+  const found = agents?.find((a) => a.id === id);
+  return found ? sessionLabel(found) : id.slice(0, 8);
 }
 
 /** A conversation's link, by id so a rename does not break it (a name still opens it). */
@@ -614,7 +617,43 @@ export function Mark({ shape, tone, size = 10, title }: { shape: MarkShape; tone
   );
 }
 
-export const roleShape = (role: string): MarkShape => (role === "planner" || role === "reviewer" ? role : "worker");
+/** The mark for what an agent is doing now: leading a run, reviewing, or working (or idle). */
+export const relationShape = (agent: unknown): MarkShape => {
+  const kind = relationKind(agent);
+  return kind === "lead" ? "planner" : kind === "reviewing" ? "reviewer" : "worker";
+};
+
+/**
+ * What the agent is doing now, as a small chip: 「主导 …」/「在做 #key」/「在审 #key」/「空闲」.
+ * Nothing when the hub does not say (an older hub).
+ */
+export function RelationChip({ agent, className = "" }: { agent: Agent; className?: string }) {
+  const text = relationText(agent);
+  if (!text) return null;
+  const now = nowOf(agent);
+  const tone: Tone = now ? agentTone(agent.status) : { color: "off" };
+  const body = (
+    <>
+      <Mark shape={relationShape(agent)} tone={tone} size={9} />
+      <span className="relation-text">{text}</span>
+    </>
+  );
+  const title = now?.run_title && now.kind !== "lead" ? `${text} · ${now.run_title}` : text;
+  return now?.run_id ? (
+    <a className={`chip relation ${className}`} href={`#/runs/${now.run_id}`} title={title}>
+      {body}
+    </a>
+  ) : (
+    <span className={`chip relation ${className}`} title={title}>
+      {body}
+    </span>
+  );
+}
+
+/** 「Mira 2 · opus · 空闲」: who the session is, the model, and what it is doing now. */
+export function agentLine(agent: Agent): string {
+  return [sessionLabel(agent), agent.model ? prettyModel(agent.model) : vendorName(agent.plugin), relationText(agent)].filter(Boolean).join(" · ");
+}
 
 /** The logo in the same language: a planner fanning out to two workers. */
 export function BrandMark({ size = 22 }: { size?: number }) {
@@ -630,9 +669,6 @@ export function BrandMark({ size = 22 }: { size?: number }) {
 
 /** Avatar colours, matching `AgentProfile::COLORS` in the hub. */
 export const AVATAR_COLORS = ["indigo", "violet", "rose", "amber", "emerald", "teal", "sky", "slate"] as const;
-
-/** Each role in its own colour, wherever a role is shown. */
-export const ROLE_HUE: Record<string, (typeof AVATAR_COLORS)[number]> = { planner: "violet", worker: "sky", reviewer: "amber" };
 
 /** A stable colour from the palette for any text (a workspace path, an agent name). */
 export function hueOf(text: string): (typeof AVATAR_COLORS)[number] {
@@ -722,9 +758,8 @@ export const displayName = (agent: Agent) => agent.name;
 export const isAgent = (agent: Agent, key: string | null | undefined) =>
   !!key && (agent.id === key || agent.name.toLowerCase() === key.toLowerCase());
 
-/** Title if it has one, else the role. */
-/** What sits under an agent's name: its title, else the model it runs on (a chat has no role to speak of). */
-export const agentTitle = (agent: Agent) => agent.profile?.title || (agent.model ? prettyModel(agent.model) : agent.role);
+/** What sits under an agent's name: its note (title) when set, else the model it runs on, else the vendor. */
+export const agentTitle = (agent: Agent) => agent.profile?.title || (agent.model ? prettyModel(agent.model) : vendorName(agent.plugin));
 
 /**
  * The agent's face: its emoji or initials on its colour. With `status`, a small dot at the
@@ -744,7 +779,7 @@ export function Avatar({ agent, size = 20, status = false }: { agent: Agent; siz
     >
       {image ? <img className="avatar-img" src={image} alt="" draggable={false} /> : text}
       {status && tone.color !== "off" && <span className={`presence ${tone.color} ${tone.live ? "live" : ""}`} />}
-      {agent.role === "planner" && <LeadFlag size={size} />}
+      {isLeading(agent) && <LeadFlag size={size} />}
     </span>
   );
 }

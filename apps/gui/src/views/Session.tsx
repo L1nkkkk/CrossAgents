@@ -14,7 +14,7 @@ import { TurnFiles } from "../attach";
 import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
-import { AgentImageContext, Avatar, ErrorBox, FileScopeProvider, Icon, loadAgentImage, Mark, type ImageLoad, OneLine, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
+import { AgentImageContext, Avatar, ErrorBox, FileScopeProvider, Icon, loadAgentImage, type ImageLoad, OneLine, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, RelationChip, relationKind, sessionLabel, time, useAgents, useFileScope, vendorName } from "../components";
 import { Image as ImageIcon } from "lucide-react";
 import { extractToolImagePaths, extractToolImages } from "../lib/toolimages";
 import { ToolImages } from "../toolimages";
@@ -391,7 +391,11 @@ function ExecutionBar({ agent, execution: x, reload }: { agent: Agent; execution
       setBusy(false);
     }
   }
-  const doing = x.role === "lead" ? "正在主导" : x.role === "reviewer" ? "正在审查" : "正在执行";
+  // What the hub says the agent is doing now wins; the execution's own kind is the fallback.
+  const kind = relationKind(agent);
+  const leading = kind ? kind === "lead" : x.role === "lead";
+  const reviewing = kind ? kind === "reviewing" : x.role === "reviewer";
+  const doing = leading ? "正在主导" : reviewing ? "正在审查" : "正在执行";
   return (
     <div className="exec-bar" role="status">
       <Icon name="branch" size={14} />
@@ -505,10 +509,6 @@ function ResumePanel({ agent, onClose }: { agent: Agent; onClose: () => void }) 
 }
 
 
-/** A session's role as the topbar shows it: the usual ones in Chinese, any other as written. */
-const ROLE_WORDS: Record<string, string> = { worker: "执行者", lead: "协调者", planner: "协调者", reviewer: "审查者" };
-const roleWord = (role: string) => ROLE_WORDS[role.trim().toLowerCase()] ?? role;
-
 function Header({
   agent,
   capabilities,
@@ -563,10 +563,7 @@ function Header({
         <StatusChip status={agent.status} tone={agentTone(agent.status)} />
         {!rail && (
           <>
-            <span className="chip hide-narrow" title={`角色：${agent.role}`}>
-              <Mark shape={roleShape(agent.role)} tone={agentTone(agent.status)} size={9} />
-              {roleWord(agent.role)}
-            </span>
+            <RelationChip agent={agent} className="hide-narrow" />
             <span className="chip hide-narrow">
               <Vendor plugin={agent.plugin} model={agent.model} title={driver ? `${vendorName(agent.plugin)} · driver: ${driver}` : undefined} />
             </span>
@@ -787,10 +784,10 @@ function AgentName({ agent }: { agent: Agent }) {
         setValue(agent.name);
         setEditing(true);
       }}
-      title={generated ? "名字是自动起的，点一下改名" : "点一下改名"}
+      title={`${sessionLabel(agent) !== agent.name ? `@${agent.name} · ` : ""}${generated ? "名字是自动起的，点一下改名" : "点一下改名"}`}
     >
-      {displayName(agent)}
-      {generated && <span className="name-auto">自动命名</span>}
+      {sessionLabel(agent)}
+      {generated && sessionLabel(agent) === agent.name && <span className="name-auto">自动命名</span>}
     </button>
   );
 }
@@ -930,7 +927,7 @@ function Conversation({
             <div className="empty">
               <h1>和 {displayName(agent)} 开始对话</h1>
               <p>
-                {agent.role} · {agent.plugin}
+                {agent.plugin}
                 {agent.model ? `/${agent.model}` : ""} · <code>{agent.cwd}</code>
               </p>
             </div>

@@ -173,7 +173,7 @@ const zhCN = {
   "home.noModels": "hub 没有提供任何模型，先检查插件和账号。",
   "home.needWorkspace": "选一个工作区，agent 会在那里干活。",
   "home.options": "选项",
-  "home.worker": "默认 Worker",
+  "home.worker": "默认执行会话",
   "home.permission": "权限",
   "home.start": "发起 run",
   "home.startHint": "发起（Enter）",

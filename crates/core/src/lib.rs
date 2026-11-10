@@ -35,7 +35,7 @@ pub use account::{
 };
 pub use attachment::{Attachment, AttachmentKind, AttachmentSupport, Prompt};
 pub use bus::EventBus;
-pub use claim::{AgentClaim, ClaimRole};
+pub use claim::{AgentClaim, AgentNow, ClaimRole, NowKind, SessionOf};
 pub use cli::{CliSource, CliStatus, Located};
 pub use driver::{
     AgentCommand, AgentCommandKind, Capabilities, ContextPart, Driver, DriverKind, DriverSession,

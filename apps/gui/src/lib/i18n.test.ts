@@ -83,7 +83,8 @@ test("an unknown locale falls back to zh-CN", () => {
 
 test("terms stay untranslated", () => {
   assert.match(t("home.start"), /run/);
-  assert.match(t("home.worker"), /Worker$/);
+  // Role words are not shown: the default worker is named for what it is, an execution session.
+  assert.match(t("home.worker"), /执行会话$/);
 });
 
 test("the continuation keys are in the dictionary", () => {

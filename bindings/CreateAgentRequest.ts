@@ -12,7 +12,12 @@ name?: string,
 /**
  * A conversation's title (chat mode), e.g. its first message.
  */
-topic?: string, plugin: string, driver: string | null, model: string | null, role: Role, 
+topic?: string, plugin: string, driver: string | null, model: string | null, 
+/**
+ * Deprecated: absent means worker. It is kept on the record for old clients and decides
+ * nothing.
+ */
+role?: Role, 
 /**
  * The agent's working directory. Empty: a new one under the hub home (`chats/<name>`),
  * for a chat outside any project.

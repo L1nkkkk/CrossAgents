@@ -337,6 +337,10 @@ impl AgentHost for HubHost {
             }
             template.config["account"] = account.into();
         }
+        // It remembers where it came from: the root template, and no task yet (the
+        // orchestrator, which knows it, writes that).
+        let mut config = template.config.clone();
+        crossagents_orchestrator::relations::mark_session(&mut config, &template, None);
         let agent = Agent {
             id: AgentId::new(),
             name_source: crossagents_core::NameSource::Chosen,
@@ -349,7 +353,7 @@ impl AgentHost for HubHost {
             model: template.model,
             role,
             cwd: cwd.to_path_buf(),
-            config: template.config,
+            config,
             status: AgentStatus::Stopped,
             created_at: Utc::now(),
             // Every clone of "Ada the designer" is Ada the designer.

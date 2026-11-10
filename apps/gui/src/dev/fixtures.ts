@@ -12,6 +12,7 @@ import type { DriverKind } from "@bindings/DriverKind";
 import type { MessageSource } from "@bindings/MessageSource";
 import type { PlannedTask } from "@bindings/PlannedTask";
 import type { Role } from "@bindings/Role";
+import type { AgentNow, AgentRelations, SessionOf } from "../lib/relations";
 import type { Run } from "@bindings/Run";
 import type { RunStatus } from "@bindings/RunStatus";
 import type { Task } from "@bindings/Task";
@@ -97,10 +98,19 @@ type AgentInit = {
   topic?: string;
   /** The conversation that recruited it (chat mode). */
   recruitedBy?: string;
+  /** What it is good at (`GET /v1/agents` `strengths`). */
+  strengths?: string[];
+  /** For an execution session: the agent it runs for and the task (`session_of`). */
+  sessionOf?: SessionOf;
+  /** What it is doing now; left out, the mock hub works it out from runs and executions. */
+  now?: AgentNow | null;
 };
 
-export function agent(init: AgentInit): Agent {
+export function agent(init: AgentInit): Agent & AgentRelations {
   return {
+    ...(init.strengths ? { strengths: init.strengths } : {}),
+    ...(init.sessionOf ? { session_of: init.sessionOf } : {}),
+    ...(init.now !== undefined ? { now: init.now } : {}),
     id: uid(),
     // The name is what people read ("Ada"); routes and lookups go by id or by name, any case.
     name: init.profile?.display_name ?? init.name,
@@ -123,16 +133,17 @@ export function agent(init: AgentInit): Agent {
 /** The standing team in REPO: a planner, two workers, a reviewer. */
 export function team() {
   return {
-    ada: agent({ name: "ada", plugin: "claude", model: "claude-opus-4-1", role: "planner", profile: { display_name: "Ada", title: "架构师", color: "indigo" } }),
-    rex: agent({ name: "rex", plugin: "codex", model: "gpt-5-codex", role: "worker", profile: { display_name: "Rex", title: "Coder", color: "sky" } }),
-    mia: agent({ name: "mia", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", profile: { display_name: "Mia", title: "设计师", color: "rose" } }),
+    ada: agent({ name: "ada", plugin: "claude", model: "claude-opus-4-1", role: "planner", strengths: ["拆任务", "Rust"], profile: { display_name: "Ada", title: "架构师", color: "indigo" } }),
+    rex: agent({ name: "rex", plugin: "codex", model: "gpt-5-codex", role: "worker", strengths: ["后端", "测试"], profile: { display_name: "Rex", title: null, color: "sky" } }),
+    mia: agent({ name: "mia", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", strengths: ["前端", "视觉"], profile: { display_name: "Mia", title: "设计师", color: "rose" } }),
     sam: agent({ name: "sam", plugin: "claude", model: "claude-opus-4-1", role: "reviewer", profile: { display_name: "Sam", title: "安全审核专员", color: "amber" } }),
   };
 }
 
 /** A task's worker: a fresh clone of a teammate, as the orchestrator makes them. */
 export function clone(of: Agent, suffix: string, status: AgentStatus, cwd: string): Agent {
-  return { ...agent({ name: `${of.name}-${suffix}`, plugin: of.plugin as AgentInit["plugin"], model: of.model ?? undefined, role: of.role, status, cwd, createdMinutesAgo: 40 }), profile: { ...of.profile } };
+  const made = agent({ name: `${of.name}-${suffix}`, plugin: of.plugin as AgentInit["plugin"], model: of.model ?? undefined, role: of.role, status, cwd, createdMinutesAgo: 40, sessionOf: { id: of.id, name: of.name, task_key: suffix } });
+  return { ...made, profile: { ...of.profile } };
 }
 
 // ---- Devices ------------------------------------------------------------------------------

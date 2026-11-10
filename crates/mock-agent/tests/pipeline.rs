@@ -127,6 +127,25 @@ async fn the_planner_accepts_what_workers_report() {
         run_status_is(&id, RunStatus::AwaitingApproval),
     )
     .await;
+    // Who each one is shows by what it does now, not by a role: boss leads the run.
+    let agents: Value = t.get("/v1/agents").await.json().await.unwrap();
+    let by_name = |agents: &Value, name: &str| -> Value {
+        agents["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {name} in {agents}"))
+    };
+    let boss = by_name(&agents, "boss");
+    assert_eq!(boss["now"]["kind"], "lead", "{boss}");
+    assert_eq!(boss["now"]["run_id"], id.as_str());
+    assert!(boss["now"]["run_title"].is_string(), "{boss}");
+    assert!(boss["now"]["task_key"].is_null(), "{boss}");
+    assert!(boss["session_of"].is_null(), "{boss}");
+    assert_eq!(boss["strengths"], json!([]));
+    assert!(by_name(&agents, "coder")["now"].is_null());
     let resp = t.post(&format!("/v1/runs/{id}/approve"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     // The lead is not handed the reports: it accepts each once it waits for it.
@@ -189,6 +208,18 @@ async fn the_planner_accepts_what_workers_report() {
             .collect()
     };
     assert_eq!(names(&listed), ["boss", "coder"]);
+    // Each session remembers the teammate it was cloned from and its task; none is busy.
+    let mut tasks: Vec<String> = archived
+        .iter()
+        .map(|a| {
+            assert_eq!(a["session_of"]["name"], "coder", "{a}");
+            assert!(a["now"].is_null(), "{a}");
+            a["session_of"]["task_key"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    tasks.sort();
+    assert_eq!(tasks, ["a", "b"]);
+    assert!(listed.iter().all(|a| a["now"].is_null()), "{listed:?}");
     let archived = names(&archived);
     assert_eq!(archived.len(), 2, "{archived:?}");
     assert!(archived.iter().all(|n| n.starts_with("w-")), "{archived:?}");
@@ -592,10 +623,7 @@ async fn planner_assigns_tasks_by_specialty() {
         kickoff.contains("- sec — Rex, Security engineer · opus. You harden code."),
         "{kickoff}"
     );
-    assert!(
-        kickoff.contains("- coder — no title · haiku (default)"),
-        "{kickoff}"
-    );
+    assert!(kickoff.contains("- coder — haiku (default)"), "{kickoff}");
     assert!(
         !kickoff.contains("- boss"),
         "planners are not teammates: {kickoff}"
@@ -693,7 +721,7 @@ team (name one as a task's assignee or reviewer):"
         "{kickoff}"
     );
     assert!(
-        kickoff.contains("- pal — no title · haiku") && kickoff.contains("- leo — no title · opus"),
+        kickoff.contains("- pal — haiku") && kickoff.contains("- leo — opus"),
         "{kickoff}"
     );
 }

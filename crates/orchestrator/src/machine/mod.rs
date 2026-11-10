@@ -388,6 +388,7 @@ mod tests {
             &Err("test".into()),
             None,
             "",
+            &Default::default(),
             &machine,
         );
         assert!(kickoff.contains(&line), "{kickoff}");

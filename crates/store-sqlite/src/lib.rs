@@ -1639,6 +1639,22 @@ impl Store for SqliteStore {
         Ok(rows.len())
     }
 
+    async fn usage_merged_domains(&self) -> Result<Vec<(AgentId, String, u32)>, CoreError> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT json_extract(u.data, '$.agent') AS agent, e.domain, COUNT(DISTINCT u.task_id)
+             FROM expertise_usage u JOIN expertise_entries e ON e.id = u.entry_id
+             WHERE u.outcome = 'merged_first_try' AND json_extract(u.data, '$.agent') IS NOT NULL
+             GROUP BY agent, e.domain",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(agent, domain, n)| Some((agent.parse().ok()?, domain, n as u32)))
+            .collect())
+    }
+
     async fn usage_list(
         &self,
         entry: Option<&str>,

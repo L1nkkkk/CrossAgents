@@ -51,3 +51,40 @@ impl AgentClaim {
         }
     }
 }
+
+/// What an agent is doing now, from its claim (`GET /v1/agents` `now`): who it is to the
+/// person, instead of the deprecated role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NowKind {
+    Lead,
+    Working,
+    Reviewing,
+}
+
+impl From<ClaimRole> for NowKind {
+    fn from(role: ClaimRole) -> Self {
+        match role {
+            ClaimRole::Lead => Self::Lead,
+            ClaimRole::Worker => Self::Working,
+            ClaimRole::Reviewer => Self::Reviewing,
+        }
+    }
+}
+
+/// An agent's current relation to a run: leading it, or working on or reviewing a task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentNow {
+    pub kind: NowKind,
+    pub run_id: RunId,
+    pub run_title: String,
+    pub task_key: Option<String>,
+}
+
+/// The teammate an execution session was cloned from, and the task it was started for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionOf {
+    pub id: AgentId,
+    pub name: String,
+    pub task_key: Option<String>,
+}

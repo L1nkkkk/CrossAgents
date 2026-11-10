@@ -22,6 +22,7 @@ import {
   OneLine,
   Prose,
   StatusChip,
+  agentLine,
   agentName,
   agentTitle,
   ago,
@@ -29,7 +30,9 @@ import {
   displayName,
   firstSentence,
   isAgent,
+  relationText,
   runTone,
+  sessionLabel,
   sessionHref,
   taskTone,
   time,
@@ -787,9 +790,9 @@ export function PlanTasks({ run, pick }: { run: Run; pick?: (task: PlannedTask) 
               ) : worker ? (
                 <Who agent={worker} />
               ) : (
-                <span className="who-chip default" title="未指定，交给默认 Worker">
+                <span className="who-chip default" title="未指定，交给默认执行会话">
                   {fallback ? <Avatar agent={fallback} size={18} /> : null}
-                  {fallback ? displayName(fallback) : (task.assignee ?? "默认")}
+                  {fallback ? sessionLabel(fallback) : (task.assignee ?? "默认")}
                   <span className="muted">· 默认</span>
                 </span>
               )}
@@ -806,14 +809,14 @@ export function PlanTasks({ run, pick }: { run: Run; pick?: (task: PlannedTask) 
   );
 }
 
-/** A teammate as a small chip: avatar, name, title. */
+/** A teammate as a small chip: avatar, name, what it is doing now (else its note or model). */
 function Who({ agent, label }: { agent: Agent; label?: string }) {
   return (
-    <a className="who-chip" href={sessionHref(agent)} title={`${displayName(agent)} · ${agentTitle(agent)} · ${agent.model ?? agent.plugin}`}>
+    <a className="who-chip" href={sessionHref(agent)} title={[agentLine(agent), agent.profile?.title].filter(Boolean).join(" · ")}>
       {label && <span className="who-label">{label}</span>}
       <Avatar agent={agent} size={18} />
-      {displayName(agent)}
-      <span className="muted">{agentTitle(agent)}</span>
+      {sessionLabel(agent)}
+      <span className="muted">{relationText(agent) || agentTitle(agent)}</span>
     </a>
   );
 }
@@ -827,8 +830,8 @@ function TaskOwner({ task, agents, fallback }: { task: Task; agents?: Agent[]; f
   return (
     <>
       <Avatar agent={who} size={16} />
-      <span>{displayName(who)}</span>
-      <span className="muted">{agentTitle(who)}</span>
+      <span>{sessionLabel(who)}</span>
+      <span className="muted">{relationText(who) || agentTitle(who)}</span>
     </>
   );
 }
@@ -838,7 +841,7 @@ function TeamStack({ ids, agents }: { ids: string[]; agents?: Agent[] }) {
   const team = ids.map((id) => agents?.find((a) => a.id === id)).filter((a): a is Agent => !!a);
   if (!team.length) return null;
   return (
-    <span className="row" style={{ gap: 6 }} title={team.map((a) => `${displayName(a)} · ${agentTitle(a)}`).join("\n")}>
+    <span className="row" style={{ gap: 6 }} title={team.map((a) => agentLine(a)).join("\n")}>
       <span className="stack">
         {team.slice(0, 6).map((a) => (
           <Avatar key={a.id} agent={a} size={20} />
@@ -1011,10 +1014,10 @@ export function usePlanApproval(run: Run, busy: boolean) {
     if (c) {
       parts.push(t(sessionStateKey(c.state)));
       if (c.last_execution) parts.push(c.last_execution);
-    }
+    } else if (relationText(a)) parts.push(relationText(a));
     return parts.join(" · ");
   };
-  const autoLabel = `自动${fallback ? ` · ${displayName(fallback)}` : ""}`;
+  const autoLabel = `自动${fallback ? ` · ${sessionLabel(fallback)}` : ""}`;
   /** Why the hub says this session cannot take work in this run, if it says so. */
   const whyOf = (a: Agent | undefined) => (a ? unusableOf(candidates.data?.find((s) => s.agent.id === a.id)) : undefined);
   /** `SessionCandidate.unguarded`: it was set to bypass, so this guard run lets it act unchecked. */
@@ -1055,7 +1058,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
         key: `agent:${a.id}`,
         label: (
           <span title={why}>
-            {displayName(a)}
+            {sessionLabel(a)}
             {unguardedOf(a) && <> {unguardedMark}</>}
           </span>
         ),
@@ -1119,7 +1122,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
     ) : fallback ? (
       <Avatar agent={fallback} size={16} />
     ) : undefined;
-    const label = chosen ? displayName(chosen) : model ? model.plugin === "cursor" ? `${prettyModel(cursorMode(model.model).base)} · Cursor` : (option ? workerModelLabel(option, workerOptions, accounts) : prettyModel(model.model)) : autoLabel;
+    const label = chosen ? sessionLabel(chosen) : model ? model.plugin === "cursor" ? `${prettyModel(cursorMode(model.model).base)} · Cursor` : (option ? workerModelLabel(option, workerOptions, accounts) : prettyModel(model.model)) : autoLabel;
     const chosenWhy = whyOf(template);
     // The hub's reason for refusing this task, read off the failed approval's message.
     const refusal = refused[task.key];
@@ -1269,14 +1272,14 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
           </div>
           <h3 style={{ marginTop: 10 }}>{task.title}</h3>
           <dl className="kv small">
-            <dt>Worker</dt>
+            <dt>执行</dt>
             <dd>
               {task.assignee ? <a href={sessionHref(task.assignee)}>{agentName(agents.data, task.assignee)}</a> : "—"}
               {isEscalated(task) && <span className="chip warn" style={{ marginLeft: 6 }}>已升级</span>}
             </dd>
             {task.reviewer && (
               <>
-                <dt>Reviewer</dt>
+                <dt>审查</dt>
                 <dd>
                   <a href={sessionHref(task.reviewer)}>{agentName(agents.data, task.reviewer)}</a>
                 </dd>

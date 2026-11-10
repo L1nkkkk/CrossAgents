@@ -234,6 +234,9 @@ impl Orchestrator {
             ),
             None => (Value::Null, Vec::new(), Vec::new()),
         };
+        let everyone = self.store().list_agents().await?;
+        let relations = crate::relations::Relations::of(self.store().as_ref(), &everyone).await?;
+        let mine = relations.json(caller.id);
         Ok(json!({
             "name": caller.name,
             "display_name": caller.profile.display_name,
@@ -246,6 +249,9 @@ impl Orchestrator {
             "run": run_json,
             "tasks_assigned": assigned,
             "tasks_issued": issued,
+            "now": mine["now"],
+            "session_of": mine["session_of"],
+            "strengths": mine["strengths"],
             "tools": tools,
         }))
     }
@@ -278,8 +284,10 @@ impl Orchestrator {
             .map(|(run, _)| run)
             .filter(|run| !run.status.is_terminal());
         let about = |id: AgentId| sessions.iter().find(|s| s.agent.id == id).map(|s| s.json());
+        let everyone = self.store().list_agents().await?;
+        let relations = crate::relations::Relations::of(self.store().as_ref(), &everyone).await?;
         let mut agents: Vec<Value> = Vec::new();
-        for a in self.store().list_agents().await? {
+        for a in everyone {
             if a.archived_at.is_some() {
                 continue;
             }
@@ -288,6 +296,7 @@ impl Orchestrator {
                 None => None,
             };
             let session = about(a.id);
+            let rel = relations.json(a.id);
             agents.push({
                 json!({
                     "name": a.name,
@@ -306,6 +315,9 @@ impl Orchestrator {
                     "state": if held.is_some() { "busy" } else { "idle" },
                     "busy_with": held,
                     "last_execution": session.and_then(|s| s["last_execution"].as_str().map(str::to_owned)),
+                    "now": rel["now"],
+                    "session_of": rel["session_of"],
+                    "strengths": rel["strengths"],
                 })
             });
         }
@@ -329,6 +341,9 @@ impl Orchestrator {
                 &s.agent,
                 run.as_ref().map(|r| &r.config.policy)
             ));
+            let rel = relations.json(s.agent.id);
+            entry["session_of"] = rel["session_of"].clone();
+            entry["strengths"] = rel["strengths"].clone();
             entry["note"] = json!("archived: assign with fresh: false and restore: true to use it");
             agents.push(entry);
         }

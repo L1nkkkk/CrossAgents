@@ -10,13 +10,13 @@ import {
   ErrorBox,
   Field,
   Prose,
-  ROLE_HUE,
   StatusChip,
   Vendor,
   VendorMark,
-  agentTitle,
+  RelationChip,
   agentTone,
-  displayName,
+  sessionLabel,
+  strengthsOf,
   sessionHref,
   useAgents,
 } from "../components";
@@ -505,6 +505,22 @@ function TeamNotes() {
   );
 }
 
+/** What the agent is doing now and what it is good at; nothing when the hub says neither. */
+function MemberTags({ agent }: { agent: Agent }) {
+  const strengths = strengthsOf(agent);
+  return (
+    <div className="member-tags">
+      <RelationChip agent={agent} />
+      {strengths.length > 0 && <span className="muted small">擅长</span>}
+      {strengths.map((s) => (
+        <span key={s} className="chip small strength" title={`擅长：${s}`}>
+          {s}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function MemberCard({
   agent,
   runIds,
@@ -531,9 +547,9 @@ function MemberCard({
         <Avatar agent={agent} size={40} status />
         <div className="member-who">
           <a className="member-name" href={sessionHref(agent)} title={unusable}>
-            {displayName(agent)}
+            {sessionLabel(agent)}
           </a>
-          <span className="member-title">{agentTitle(agent)}</span>
+          {agent.profile.title && <span className="member-title muted">{agent.profile.title}</span>}
         </div>
         <StatusChip status={agent.status} tone={agentTone(agent.status)} />
       </div>
@@ -555,9 +571,8 @@ function MemberCard({
           )}
         </p>
       )}
-      <p className={`member-persona ${agent.profile.persona ? "" : "muted"}`}>{agent.profile.persona || "还没有设定人设。"}</p>
+      <MemberTags agent={agent} />
       <div className="member-foot">
-        <span className={`chip hue av-${ROLE_HUE[agent.role] ?? "slate"}`}>{agent.role}</span>
         {runId && runIds.has(runId) && (
           <a className="chip accent" href={`#/runs/${runId}`} title="由 run 的 lead 招来的队友">
             run 招募
@@ -651,8 +666,8 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
             <Field label={agent.name_source === "generated" ? "名字（自动起的，可以改）" : "名字"}>
               <input value={name} onChange={(e) => setName(e.target.value)} maxLength={32} placeholder="Luna" />
             </Field>
-            <Field label="头衔">
-              <input value={profile.title ?? ""} onChange={(e) => set({ title: e.target.value })} placeholder="设计师" />
+            <Field label="备注（可选）">
+              <input value={profile.title ?? ""} onChange={(e) => set({ title: e.target.value })} placeholder="比如：管前端" />
             </Field>
             <Field label="头像（emoji 或两个字母）">
               <input value={profile.avatar ?? ""} onChange={(e) => set(e.target.value.trim() ? { avatar: e.target.value, avatar_image: null } : { avatar: e.target.value })} placeholder="🎨" maxLength={8} />
@@ -680,7 +695,7 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
         </div>
       </div>
 
-      <Field label="人设（专长与工作方式，会加入它的开场说明）">
+      <Field label="给模型的开场说明（专长与工作方式）">
         <textarea rows={4} value={profile.persona ?? ""} onChange={(e) => set({ persona: e.target.value })} placeholder="不填也行；主导它的 agent 招人时会自己写。" />
       </Field>
 
@@ -714,8 +729,8 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
         />
       </div>
       <p className="muted small" style={{ margin: 0 }}>
-        @{agent.name} · {agent.role} · {agent.plugin}
-        {agent.driver ? ` · ${agent.driver}` : ""} · 新的人设在它下次开会话时生效；模型从下一轮起生效。
+        @{agent.name} · {agent.plugin}
+        {agent.driver ? ` · ${agent.driver}` : ""} · 新的开场说明在它下次开会话时生效；模型从下一轮起生效。
       </p>
 
       <ErrorBox error={error ?? plugins.error} />

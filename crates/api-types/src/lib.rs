@@ -191,7 +191,11 @@ pub struct CreateAgentRequest {
     pub driver: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
-    pub role: Role,
+    /// Deprecated: absent means worker. It is kept on the record for old clients and decides
+    /// nothing.
+    #[serde(default)]
+    #[ts(optional)]
+    pub role: Option<Role>,
     /// The agent's working directory. Empty: a new one under the hub home (`chats/<name>`),
     /// for a chat outside any project.
     #[serde(default)]
@@ -235,12 +239,23 @@ pub struct UploadAvatarsResponse {
 #[derive(Debug, Clone, PartialEq, TS)]
 #[ts(export)]
 pub struct ListAgentsResponse {
-    #[ts(type = "Array<import('./Agent').Agent & { unusable?: string, unguarded: boolean }>")]
+    #[ts(
+        type = "Array<import('./Agent').Agent & { unusable?: string, unguarded: boolean, now?: { kind: 'lead' | 'working' | 'reviewing', run_id: string, run_title: string, task_key: string | null } | null, session_of?: { id: string, name: string, task_key: string | null } | null, strengths?: Array<string> }>"
+    )]
     pub agents: Vec<Agent>,
     #[ts(skip)]
     pub unusable: Vec<Option<String>>,
     #[ts(skip)]
     pub unguarded: Vec<bool>,
+    /// What each agent is doing now (its claim), `None` when idle.
+    #[ts(skip)]
+    pub now: Vec<Option<crossagents_core::AgentNow>>,
+    /// The teammate each execution session was cloned from.
+    #[ts(skip)]
+    pub session_of: Vec<Option<crossagents_core::SessionOf>>,
+    /// Up to three expertise domains each agent did well in, best first.
+    #[ts(skip)]
+    pub strengths: Vec<Vec<String>>,
 }
 
 impl<'de> Deserialize<'de> for ListAgentsResponse {
@@ -253,25 +268,35 @@ impl<'de> Deserialize<'de> for ListAgentsResponse {
             unusable: Option<String>,
             #[serde(default)]
             unguarded: bool,
+            #[serde(default)]
+            now: Option<crossagents_core::AgentNow>,
+            #[serde(default)]
+            session_of: Option<crossagents_core::SessionOf>,
+            #[serde(default)]
+            strengths: Vec<String>,
         }
         #[derive(Deserialize)]
         struct Response {
             agents: Vec<Entry>,
         }
         let entries = Response::deserialize(deserializer)?.agents;
-        let mut agents = Vec::new();
-        let mut unusable = Vec::new();
-        let mut unguarded = Vec::new();
+        let mut out = Self {
+            agents: Vec::new(),
+            unusable: Vec::new(),
+            unguarded: Vec::new(),
+            now: Vec::new(),
+            session_of: Vec::new(),
+            strengths: Vec::new(),
+        };
         for e in entries {
-            agents.push(e.agent);
-            unusable.push(e.unusable);
-            unguarded.push(e.unguarded);
+            out.agents.push(e.agent);
+            out.unusable.push(e.unusable);
+            out.unguarded.push(e.unguarded);
+            out.now.push(e.now);
+            out.session_of.push(e.session_of);
+            out.strengths.push(e.strengths);
         }
-        Ok(Self {
-            agents,
-            unusable,
-            unguarded,
-        })
+        Ok(out)
     }
 }
 
@@ -285,6 +310,15 @@ impl Serialize for ListAgentsResponse {
                 value["unusable"] = serde_json::Value::String(reason.clone());
             }
             value["unguarded"] = self.unguarded.get(i).copied().unwrap_or(false).into();
+            value["now"] = match self.now.get(i) {
+                Some(Some(now)) => serde_json::to_value(now).map_err(S::Error::custom)?,
+                _ => serde_json::Value::Null,
+            };
+            value["session_of"] = match self.session_of.get(i) {
+                Some(Some(of)) => serde_json::to_value(of).map_err(S::Error::custom)?,
+                _ => serde_json::Value::Null,
+            };
+            value["strengths"] = self.strengths.get(i).cloned().unwrap_or_default().into();
             agents.push(value);
         }
         #[derive(Serialize)]
@@ -3204,12 +3238,71 @@ mod tests {
             agents: vec![agent.clone(), agent],
             unusable: vec![Some("unavailable".into()), None],
             unguarded: vec![true, false],
+            now: vec![
+                Some(crossagents_core::AgentNow {
+                    kind: crossagents_core::NowKind::Reviewing,
+                    run_id: crossagents_core::RunId::new(),
+                    run_title: "Login".into(),
+                    task_key: Some("auth".into()),
+                }),
+                None,
+            ],
+            session_of: vec![
+                None,
+                Some(crossagents_core::SessionOf {
+                    id: crossagents_core::AgentId::new(),
+                    name: "Ada".into(),
+                    task_key: None,
+                }),
+            ],
+            strengths: vec![vec!["rust".into(), "gui".into()], Vec::new()],
         };
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(value["agents"][0]["unusable"], "unavailable");
         assert!(value["agents"][1].get("unusable").is_none());
+        assert_eq!(value["agents"][0]["now"]["kind"], "reviewing");
+        assert_eq!(value["agents"][0]["now"]["task_key"], "auth");
+        assert!(value["agents"][1]["now"].is_null());
+        assert!(value["agents"][0]["session_of"].is_null());
+        assert_eq!(value["agents"][1]["session_of"]["name"], "Ada");
+        assert!(value["agents"][1]["session_of"]["task_key"].is_null());
+        assert_eq!(
+            value["agents"][0]["strengths"],
+            serde_json::json!(["rust", "gui"])
+        );
+        assert_eq!(value["agents"][1]["strengths"], serde_json::json!([]));
         let restored: ListAgentsResponse = serde_json::from_value(value).unwrap();
         assert_eq!(restored, response);
+    }
+
+    /// Role is deprecated: requests and records without it still read, as a worker.
+    #[test]
+    fn role_may_be_left_out() {
+        let request: CreateAgentRequest =
+            serde_json::from_value(serde_json::json!({ "plugin": "claude" })).unwrap();
+        assert_eq!(request.role, None);
+        let request: CreateAgentRequest =
+            serde_json::from_value(serde_json::json!({ "plugin": "claude", "role": "reviewer" }))
+                .unwrap();
+        assert_eq!(request.role, Some(Role::Reviewer));
+        let old = serde_json::json!({
+            "id": crossagents_core::AgentId::new(),
+            "name": "Ada",
+            "plugin": "claude",
+            "driver": null,
+            "model": null,
+            "cwd": "/tmp",
+            "config": {},
+            "status": "idle",
+            "created_at": "2026-01-01T00:00:00Z",
+        });
+        let agent: Agent = serde_json::from_value(old).unwrap();
+        assert_eq!(agent.role, Role::Worker);
+        // An old record with its role reads it too.
+        let mut with = serde_json::to_value(&agent).unwrap();
+        with["role"] = "planner".into();
+        let agent: Agent = serde_json::from_value(with).unwrap();
+        assert_eq!(agent.role, Role::Planner);
     }
 
     /// Core types are not `#[ts(export)]` themselves; export them (and everything they

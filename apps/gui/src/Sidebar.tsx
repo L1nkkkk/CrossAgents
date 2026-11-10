@@ -11,7 +11,7 @@ import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
-import { Avatar, BrandMark, Icon, ModelMark, ago, displayName, isAgent, sessionHref } from "./components";
+import { Avatar, BrandMark, Icon, ModelMark, ago, displayName, isAgent, relationText, sessionHref, sessionLabel } from "./components";
 import { useConnectionStatus, onHubEvent, useHubData } from "./hub";
 import { RunModeMark, RunModeTag, leadsInPlace, modeWords } from "./runmode";
 import { runState } from "./lib/taskState";
@@ -108,7 +108,7 @@ function useArchiveNote() {
   return { note, archive, undo, close: () => show(null) };
 }
 const sessionKey = (a: Agent) => "s:" + a.id;
-const labelOf = (a: Agent) => displayName(a);
+const labelOf = (a: Agent) => sessionLabel(a);
 /** How many of a project's work groups show before 「更多」 reveals the rest. */
 const WORKS_PER_PROJECT = 3;
 /** The fold of the work groups no project claims. */
@@ -777,9 +777,10 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
       flash={justDone}
       peek={peek}
       title={
-        displayName(agent) +
+        sessionLabel(agent) +
         " · " +
         status +
+        (relationText(agent) ? " · " + relationText(agent) : "") +
         (fresh || failed ? " · " + t("sidebar.unread") : "") +
         (agent.model ? " · " + agent.model : "") +
         (mode ? " · " + mode.label : "") +
@@ -803,7 +804,7 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
       }
       label={
         <span className="member-top">
-          <span className={"member-name " + (flagged ? "strong" : "")}>{displayName(agent)}</span>
+          <span className={"member-name " + (flagged ? "strong" : "")}>{sessionLabel(agent)}</span>
           <ModelMark plugin={agent.plugin} model={agent.model} />
           {work.lead && <RunModeMark run={work.lead.run} className="row-mode" />}
           {compact ? <span className="member-inline" data-crawl="">{summary}</span> : <span className="member-gap" />}

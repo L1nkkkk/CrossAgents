@@ -422,7 +422,7 @@ export function toolImagePathsSession(): { state: MockState; script: Step[]; rou
  * is the hub's; there is no step total, so no percentage or bar is drawn.
  */
 export function liveTaskSession(): { state: MockState; script: Step[]; route: string } {
-  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "reviewer", status: "running", cwd: `${REPO}/.crossagents/worktrees/b`, topic: "审查 #b 登录页 OAuth 按钮", profile: { display_name: "Nova", title: "审查", color: "violet" } });
+  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "reviewer", status: "running", cwd: `${REPO}/.crossagents/worktrees/b`, topic: "审查 #b 登录页 OAuth 按钮", sessionOf: { id: "nova-home", name: "Nova 2", task_key: "b" }, strengths: ["代码审查", "前端"], profile: { display_name: "Nova", title: "审查", color: "violet" } });
   const rex = agent({ name: "rex", plugin: "codex", model: "gpt-5-codex", role: "worker", status: "running", cwd: `${REPO}/.crossagents/worktrees/a`, topic: "回调与令牌交换", profile: { display_name: "Rex", title: "Coder", color: "sky" } });
   const state: MockState = { ...emptyState(), agents: [nova, rex], plugins: plugins(), quota: quota() };
   const plan = [

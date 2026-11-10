@@ -198,7 +198,7 @@ pub async fn run(ctx: &Context, args: SetupArgs) -> Result<()> {
                     plugin: "codex".into(),
                     driver: None,
                     model: (!model.is_empty()).then_some(model.clone()),
-                    role,
+                    role: Some(role),
                     cwd: repo.clone(),
                     config: serde_json::json!({ "account": account.id }),
                     profile: Default::default(),

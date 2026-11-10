@@ -4,14 +4,12 @@
 
 import { useState, type FormEvent } from "react";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
-import type { Role } from "@bindings/Role";
 import { api, errorText } from "../api";
 import { ErrorBox, Field } from "../components";
 
 export function ConnectExternal({ onDone }: { onDone: () => void }) {
   const [name, setName] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [role, setRole] = useState<Role>("worker");
   const [cwd, setCwd] = useState("");
   const [info, setInfo] = useState<ConnectInfo>();
   const [error, setError] = useState<string>();
@@ -27,7 +25,7 @@ export function ConnectExternal({ onDone }: { onDone: () => void }) {
         plugin: "external",
         driver: null,
         model: null,
-        role,
+        role: "worker",
         cwd: cwd.trim(),
         config: {},
         profile: { display_name: displayName.trim() || null, title: null, avatar: null, avatar_image: null, color: null, persona: null },
@@ -52,13 +50,6 @@ export function ConnectExternal({ onDone }: { onDone: () => void }) {
         </Field>
         <Field label="显示名">
           <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="我的 Claude" />
-        </Field>
-        <Field label="角色">
-          <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
-            <option value="worker">worker</option>
-            <option value="reviewer">reviewer</option>
-            <option value="planner">planner</option>
-          </select>
         </Field>
       </div>
       <Field label="它工作的目录（git 仓库）">

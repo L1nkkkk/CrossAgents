@@ -706,7 +706,12 @@ a.button.primary:hover { background: var(--accent-hover); }
 .member-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .member-who { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .member-name { font-weight: 600; font-size: 15px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.member-title { font-size: 12.5px; color: var(--text-2); }
+.member-title { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; min-height: 22px; }
+.member-tags:empty { display: none; }
+.chip.relation { max-width: 100%; min-width: 0; gap: 5px; }
+.chip.relation .relation-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.chip.strength { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .member-persona {
   margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--text-2);
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; min-height: 3.1em;
@@ -718,7 +723,7 @@ a.button.primary:hover { background: var(--accent-hover); }
    editable — changing the model or permission is how the person fixes it. */
 .member.unusable { background: color-mix(in srgb, var(--surface) 60%, var(--page)); }
 .member.unusable .member-head,
-.member.unusable .member-persona { opacity: 0.55; }
+.member.unusable .member-tags { opacity: 0.55; }
 .member.unusable .member-name { color: var(--muted); }
 .member-unusable { margin: 0; display: flex; align-items: flex-start; gap: 6px; font-size: 12px; line-height: 1.45; color: var(--danger-text); }
 .member-unusable .chip { flex: none; }
