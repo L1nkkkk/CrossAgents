@@ -330,14 +330,14 @@ function TaskBoard({ run, tasks, agents, selectedTask }: { run: Run; tasks: Task
   );
 }
 
-/** "2/4 merged", while the rail beside the conversation shows the tasks anyway. */
+/** "已合并 2/4", while the rail beside the conversation shows the tasks anyway. */
 function ProgressChip({ tasks }: { tasks: Task[] }) {
   const { narrow } = useSideSlot();
   if (narrow || !tasks.length) return null;
   const done = tasks.filter((t) => t.status === "merged").length;
   return (
     <span className="chip">
-      {done}/{tasks.length} merged
+      已合并 {done}/{tasks.length}
     </span>
   );
 }

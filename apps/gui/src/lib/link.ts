@@ -77,18 +77,29 @@ export function entranceWords(status: LinkStatus | undefined): EntranceWords {
         word: "连接中继中",
         tone: "warn",
         detail: status.proxy
-          ? `正在经代理 ${status.proxy} 连接中继。一直停在这里，多半是代理不通或中继被墙，可以换代理或填自建中继。`
-          : "正在连接中继。国内网络连 n0 的公共中继常常要代理：hub 用系统代理或 HTTPS_PROXY；一直停在这里，就开系统代理后点「重新开启」，或填自建中继。",
+          ? "一直停在这里，多半是代理不通或中继被墙：换个代理后点「重新开启」，或在「详情」里填自建中继。"
+          : "国内网络连公共中继常常要代理：一直停在这里，就开系统代理后点「重新开启」，或在「详情」里填自建中继。",
       };
     case "online":
-      return {
-        word: "在线",
-        tone: "ok",
-        detail: `别的电脑现在可以用配对码连进来。中继：${status.custom_relay ? "自建 " : ""}${hostOf(status.relay)}${status.proxy ? ` · 经代理 ${status.proxy}` : ""}`,
-      };
+      return { word: "在线", tone: "ok", detail: "别的电脑现在可以用配对码连进来。" };
     case "failed":
       return { word: "没有开起来", tone: "danger", detail: status.error ?? "内置打洞没有开起来。" };
   }
+}
+
+/** The technical side of the entrance (relay, proxy, endpoint id), for the folded 详情. */
+export type LinkDetail = { label: string; value: string; mono?: boolean; title?: string };
+
+export function linkDetails(status: LinkStatus | undefined): LinkDetail[] {
+  if (!status) return [];
+  const rows: LinkDetail[] = [];
+  const relay = status.relay ? `${status.custom_relay ? "自建 · " : ""}${hostOf(status.relay)}` : status.custom_relay ? `自建 · ${hostOf(status.custom_relay)}` : "";
+  if (relay) rows.push({ label: "中继", value: `${relay}${status.state === "online" || status.relay_connected ? "" : "（未连上）"}`, mono: true });
+  else if (status.state !== "off") rows.push({ label: "中继", value: "n0 的公共中继" });
+  rows.push({ label: "代理", value: status.proxy ?? "没有（直连；hub 用系统代理或 HTTPS_PROXY）", mono: !!status.proxy });
+  if (status.endpoint)
+    rows.push({ label: "节点 id", value: status.endpoint, mono: true, title: "这台中心的 id（公钥）：配对码里带着它，别的电脑凭它找到这里" });
+  return rows;
 }
 
 function hostOf(url: string | undefined): string {

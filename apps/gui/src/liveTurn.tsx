@@ -105,6 +105,45 @@ export function TurnLive({ agentId, since, items, task, siblings }: LiveTurn) {
 }
 
 /**
+ * What the session's live line under the running turn adds to its own `••• 2m 31s · 运行命令`:
+ * the output speed, and the task this session works on for a run with that run's counts — the
+ * facts the header once repeated in a bar of its own, now said once, where the turn is.
+ */
+export function LiveExtras({ agentId, task, siblings }: Pick<LiveTurn, "agentId" | "task" | "siblings">) {
+  const now = useNow();
+  const rate = useTokenRate(agentId, now);
+  const run = task && siblings?.length ? progress(siblings) : "";
+  const checks = task ? checksPassed(task.report.checks) : "";
+  if (!rate && !task) return null;
+  return (
+    <>
+      {rate && (
+        <span className="live-rate" title="最近约 10 秒的输出速度">
+          · {rate}
+        </span>
+      )}
+      {task && (
+        <a className="chip live-task" href={`#/runs/${task.run_id}/tasks/${task.id}`} title={task.title}>
+          <code className="bare">#{task.key}</code>
+          <StateWord state={taskState(task, siblings)} />
+        </a>
+      )}
+      {task?.progress && (
+        <span className="live-note" title={task.progress}>
+          {task.progress}
+        </span>
+      )}
+      {run && (
+        <a className="live-run" href={`#/runs/${task!.run_id}`} title="这个 run 的进度">
+          {run}
+        </a>
+      )}
+      {checks && <span className="live-checks">{checks}</span>}
+    </>
+  );
+}
+
+/**
  * A sidebar row's suffix: `2m 31s · 运行命令`, or, once quiet, just `5 分钟没动静` — the number
  * worth noticing when someone wonders whether a session is stuck. The title carries all three.
  */
@@ -131,8 +170,12 @@ export function RowElapsed({ agentId, since, at, items }: { agentId?: string; si
   return (
     <span className={`member-elapsed ${p.quietText ? "quiet" : ""}`} title={[p.elapsed, rate, p.activity, p.quietText].filter(Boolean).join(" · ")}>
       <i className="working-dot" />
-      {rate && !p.quietText && <span className="member-rate">{rate}</span>}
-      {p.quietText ?? p.elapsed}
+      {/* Time first in the markup, drawn right to left: a row short of room wraps the speed out
+          of sight and keeps the time (sidebar.css). */}
+      <span className="member-elapsed-facts">
+        <span className="member-elapsed-time">{p.quietText ?? p.elapsed}</span>
+        {rate && !p.quietText && <span className="member-rate">{rate}</span>}
+      </span>
     </span>
   );
 }

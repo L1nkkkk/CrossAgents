@@ -6,6 +6,7 @@ import { extensionOfTab, type ExtTab } from "./tabs";
 import type { CardRegistration, ExtensionPanelContext } from "./host";
 import { extensionHost, useExtensionTabs, useExtensions } from "./defaults";
 import { ExtensionBoundary, safeElement, type ExtensionFailureHandlers } from "./boundary";
+import { explainedText } from "./page/model";
 import { parseToolJson, type ToolCallItem } from "./toolcards";
 
 function handlersFor(extension: string, label?: string): ExtensionFailureHandlers {
@@ -43,7 +44,7 @@ export function ExtensionTabBody({ tab, follow }: { tab: ExtTab; follow?: string
       : !view || view.status === "loading"
         ? `扩展 ${name} 正在加载…`
         : view.status === "failed"
-          ? `扩展 ${name} 加载失败：${view.error ?? "原因未知"}`
+          ? `扩展 ${name} 加载失败：${view.error ? explainedText(view.error) : "原因未知"}`
           : `扩展 ${name} 已停用。`;
   return <p className="muted small tool-blank">{text}</p>;
 }

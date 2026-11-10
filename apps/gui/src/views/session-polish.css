@@ -1,0 +1,46 @@
+/* The session page's header menu, live line and message-map spacing (views/Session.tsx,
+   liveTurn.tsx, turnmap.tsx). styles.css loads after this file: each rule that overrides one of
+   its rules is scoped one step deeper. */
+
+/* ── The header's 更多 menu: 中断本轮 / 停止进程 / 终端恢复 / 提交图. ── */
+.topbar .more-anchor { position: relative; display: inline-flex; flex-shrink: 0; }
+.topbar .more-toggle.on { background: var(--hover); color: var(--text); }
+.more-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
+  width: max-content; min-width: 220px; max-width: min(320px, calc(100vw - 32px));
+  padding: 4px; display: flex; flex-direction: column; gap: 1px;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-float);
+}
+.more-menu > button {
+  display: flex; align-items: flex-start; gap: 9px; width: 100%;
+  padding: 7px 10px; border: none; border-radius: 6px; background: none;
+  color: var(--text); text-align: left; font-size: 13px; line-height: 1.35;
+}
+.more-menu > button .icon { margin-top: 2px; flex-shrink: 0; color: var(--text-2); }
+.more-menu > button:hover:not(:disabled), .more-menu > button:focus-visible { background: var(--hover); outline: none; }
+.more-menu > button:focus-visible { box-shadow: inset 0 0 0 2px var(--focus); }
+.more-menu > button.danger, .more-menu > button.danger .icon { color: var(--danger-text); }
+.more-menu .more-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.more-menu .more-text small { color: var(--muted); font-size: 11.5px; line-height: 1.4; white-space: normal; }
+.more-menu kbd { font: inherit; font-size: 10.5px; padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); }
+.more-menu .more-sep { height: 1px; margin: 3px 6px; background: var(--border); }
+
+/* ── The live line under the running turn: also the output speed and the run task. ── */
+.live-turn .working-row { flex-wrap: wrap; row-gap: 4px; }
+.live-turn .live-rate { color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 12px; }
+.live-turn .live-task { flex-shrink: 0; }
+.live-turn .live-note, .live-turn .live-run, .live-turn .live-checks {
+  min-width: 0; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-size: 12px;
+}
+.live-turn a.live-run { color: var(--accent-text); text-decoration: none; }
+.live-turn a.live-run:hover { text-decoration: underline; }
+
+/* ── The message map (turnmap.tsx) keeps clear of the scrollbar: a gap between the two, and a
+   gutter on the conversation's right so the ticks never sit on a bubble. On a wide pane the
+   centred column's own margin is that gutter already. ── */
+.convo-wrap .turn-map { right: 22px; }
+.pane.with-rail .convo-wrap .turn-map { right: 278px; }
+.pane.with-rail.run-side .convo-wrap .turn-map { right: 348px; }
+.convo-wrap .convo-inner { padding-right: clamp(24px, calc(48px - (100% - 780px) / 2), 48px); }

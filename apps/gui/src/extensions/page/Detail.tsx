@@ -26,6 +26,7 @@ import {
   badges,
   disableBlockedReason,
   enableState,
+  explainedText,
   seenAfter,
   serviceStateText,
   shortFingerprint,
@@ -147,7 +148,7 @@ function ExtensionBody({ info, page, reload }: { info: ExtensionInfo; page?: Ext
         </div>
         {info.error && (
           <div className="error small" role="alert">
-            源目录有问题，hub 没法为它做快照：{info.error}
+            源目录有问题，hub 没法为它做快照：{explainedText(info.error)}
             {info.enabled && info.current ? "（正在运行的版本照旧，调用不受影响。）" : ""}
           </div>
         )}
@@ -158,7 +159,7 @@ function ExtensionBody({ info, page, reload }: { info: ExtensionInfo; page?: Ext
           <h2>正在运行的一版</h2>
           {!info.current && <span className="muted small">还没有批准过任何版本</span>}
         </div>
-        {info.service && <p className="ext-service-status">服务状态：{serviceStateText(info.service.state)} · 重启次数：{info.service.restarts} · 最近退出原因：{info.service.last_exit ?? "暂无"}</p>}
+        {info.service && <p className="ext-service-status">服务状态：{serviceStateText(info.service.state)} · 重启次数：{info.service.restarts} · 最近退出原因：{info.service.last_exit ? explainedText(info.service.last_exit) : "暂无"}</p>}
         {info.current ? <VersionCard version={info.current} /> : <p className="muted small">批准一次之后，调用和界面才用得上它。</p>}
       </section>
 

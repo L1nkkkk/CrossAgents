@@ -64,6 +64,32 @@ const BRIEF = (key: string, title: string) =>
   `Task ${key}: ${title}\n\n你在自己的 worktree 里工作：${REPO}/.crossagents/worktrees/${key}\n做完调用 task_complete 写总结；不清楚就 task_ask。`;
 
 /** The plan waits for approval (`plan`), or the run is under way (`running`). */
+/**
+ * A run's trace as the hub folds it from events alone: each task's assignee joins its lane when
+ * the task starts, and a task past running has handed in (`verifying`) and had its checks run.
+ */
+function startedTrace(detail: RunDetail): RunTrace {
+  const empty = () => ({ agents: [] as string[], turns: [], commands: [], spent: { tokens: 0, cost_usd: 0 } });
+  const tasks: RunTrace["tasks"] = detail.tasks.map((t) => {
+    const lane = empty();
+    const statuses: NonNullable<RunTrace["tasks"][number]["statuses"]> = [];
+    const checks: RunTrace["tasks"][number]["checks"] = [];
+    const who = t.assignee;
+    if (who && t.status !== "pending") {
+      lane.agents.push(who);
+      statuses.push({ at: t.created_at, from: "pending", to: "running", agent: who });
+      if (!["running", "waiting_answer", "stalled"].includes(t.status)) {
+        const handedIn = t.report.checks.length ? ago(28) : t.updated_at;
+        statuses.push({ at: handedIn, from: "running", to: "verifying", agent: who });
+        if (t.report.checks.length) checks.push({ at: ago(27), passed: t.report.checks.every((c) => c.passed), checks: t.report.checks });
+        statuses.push({ at: t.updated_at, from: "verifying", to: t.status, agent: who });
+      }
+    }
+    return { task_id: t.id, key: t.key, title: t.title, status: t.status, failure: t.report.failure, lane, checks, rerouted: [], handoffs: t.handoffs ?? [], first_failure: null, statuses };
+  });
+  return { run_id: detail.run.id, lead: { ...empty(), agents: [detail.run.planner] }, tasks, spent: { tokens: 0, cost_usd: 0 } };
+}
+
 export function oauthRun(phase: "plan" | "running"): { state: MockState; script: Step[]; route: string } {
   const { ada, rex, mia, sam } = team();
   const r = run({ title: "OAuth 登录", request: REQUEST, planner: ada, worker: rex, team: [rex, mia, sam], status: phase === "plan" ? "awaiting_approval" : "running", plan: PLAN, minutesAgo: phase === "plan" ? 6 : 48 });
@@ -119,6 +145,10 @@ export function oauthRun(phase: "plan" | "running"): { state: MockState; script:
     });
     const detail: RunDetail = { run: r, tasks: [ta, tb, tc, td] };
     state.runs.push(detail);
+    // The hub's trace puts each assignee on its task's lane as the task starts
+    // (`task.status_changed` with an assignee); without it the swimlane said nobody had begun
+    // while the task list showed two running.
+    state.traces.set(r.id, startedTrace(detail));
 
     // Ada hears from the orchestrator: approved, c passed, d failed.
     const orch = (taskId?: string) => ({ kind: "orchestrator" as const, run_id: r.id, ...(taskId ? { task_id: taskId } : {}) });

@@ -7,6 +7,7 @@
 import { extensionHost, useExtensions } from "../defaults";
 import type { ExtensionsSnapshot } from "../host";
 import { RegisteredBody, type HandlersFor } from "./panels.ts";
+import { explainedText } from "./model.ts";
 
 /** How a block an extension registered reports a throw: its own log, and a 停用 that works. */
 export const handlersFor: HandlersFor = (extension, label) => ({
@@ -26,7 +27,7 @@ function missingPageText(extension: string, snapshot: ExtensionsSnapshot): strin
   const view = snapshot.records.get(extension);
   if (!view) return snapshot.listed ? `扩展 ${extension} 不在 hub 的列表里：可能被删掉了。` : "正在等 hub 的扩展列表…";
   if (view.status === "loading") return `扩展 ${extension} 正在加载…`;
-  if (view.status === "failed") return `扩展 ${extension} 加载失败：${view.error ?? "原因未知"}`;
+  if (view.status === "failed") return `扩展 ${extension} 加载失败：${view.error ? explainedText(view.error) : "原因未知"}`;
   if (view.status === "disabled") {
     // "disabled" here is the host's word for "nothing to load", which also covers an enabled
     // extension whose version has no panel entry: only the hub's own list says which it is.

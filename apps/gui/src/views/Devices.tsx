@@ -114,7 +114,7 @@ function DeviceRow({ device, refused, onRevoke, now, thisWindow }: { device: Dev
         {!device.os && <div className="setting-hint">{OS_UNKNOWN_HINT}</div>}
         <div className="device-times">
           {!revoked && (
-            <span className="setting-hint presence" data-online={isOnline(device, now)}>
+            <span className="setting-hint device-presence" data-online={isOnline(device, now)}>
               <span className={`dot ${isOnline(device, now) ? "ok" : ""}`} />
               {isOnline(device, now) ? "在线" : device.last_seen_at ? `离线 · ${when(device.last_seen_at)}` : "离线 · 从未连接"}
             </span>

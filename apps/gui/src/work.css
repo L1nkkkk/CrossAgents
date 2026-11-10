@@ -334,3 +334,55 @@
     display: none;
   }
 }
+
+/* The header's panel buttons (各轮 n, 任务 n/m) when the window is narrow: the icon and the
+   words side by side, never wrapping under each other. */
+.topbar button.side-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.topbar button.side-toggle svg {
+  flex: none;
+}
+
+/* ---- 关联工作 above a conversation (views/Session.tsx's work context) -------------------- */
+/* The same chevron as the other folds, not the browser's text triangle, and room around it. */
+
+.app .session-work-context {
+  padding: 8px 20px 6px;
+}
+.app .session-work-context summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  list-style: none;
+  padding: 2px 6px 2px 2px;
+  border-radius: 6px;
+  color: var(--text-2);
+}
+.app .session-work-context summary:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.app .session-work-context summary::-webkit-details-marker {
+  display: none;
+}
+.app .session-work-context summary::before {
+  content: "";
+  flex: none;
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+  transition: transform 0.12s;
+}
+.app .session-work-context details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.app .session-work-context .session-work-list {
+  margin-top: 4px;
+}

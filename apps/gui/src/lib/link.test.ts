@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { LinkStatus } from "@bindings/LinkStatus";
-import { CODE_STEPS, codeFailure, codeStepIndex, countdown, entranceWords, pathWords, previewCode } from "./link.ts";
+import { CODE_STEPS, codeFailure, codeStepIndex, countdown, entranceWords, linkDetails, pathWords, previewCode } from "./link.ts";
 
 const now = new Date("2026-11-10T10:00:00Z");
 const code = (fields: Record<string, unknown> = {}) =>
@@ -34,10 +34,11 @@ test("the entrance says what to do in each state", () => {
   assert.equal(entranceWords(undefined).word, "读取中");
   assert.equal(entranceWords({ ...base, enabled: false }).word, "未开启");
   assert.match(entranceWords({ ...base, state: "starting" }).detail, /代理/);
-  assert.match(entranceWords({ ...base, state: "starting", proxy: "http://127.0.0.1:7890" }).detail, /127\.0\.0\.1:7890/);
+  // Relay, proxy and id are folded into 详情, not spelled out in the status line.
+  assert.doesNotMatch(entranceWords({ ...base, state: "starting", proxy: "http://127.0.0.1:7890" }).detail, /127\.0\.0\.1/);
   const online = entranceWords({ ...base, state: "online", relay: "https://aps1-1.relay.example./", relay_connected: true });
   assert.equal(online.tone, "ok");
-  assert.match(online.detail, /aps1-1\.relay\.example/);
+  assert.doesNotMatch(online.detail, /relay/);
   assert.deepEqual(entranceWords({ ...base, state: "failed", error: "boom" }), { word: "没有开起来", tone: "danger", detail: "boom" });
 });
 
@@ -50,4 +51,17 @@ test("path words and what a failure means", () => {
   assert.equal(codeFailure("找不到 crossagents-link（x）：这个安装包里缺少打洞程序").title, "这个安装包缺少打洞程序");
   assert.equal(codeFailure("找不到中心：中心不在线\ncannot reach the hub: No addressing information available").title, "连不上中心");
   assert.equal(codeFailure("something else").title, "配对没有完成");
+});
+
+test("the folded 详情 lists relay, proxy and id", () => {
+  const base: LinkStatus = { enabled: true, state: "online", relay_connected: true, pending_invites: 0 };
+  assert.deepEqual(linkDetails(undefined), []);
+  const rows = linkDetails({ ...base, relay: "https://aps1-1.relay.example./", proxy: "http://127.0.0.1:7890", endpoint: "ab".repeat(32) });
+  assert.deepEqual(rows.map((r) => r.label), ["中继", "代理", "节点 id"]);
+  assert.equal(rows[0].value, "aps1-1.relay.example.");
+  assert.equal(rows[1].value, "http://127.0.0.1:7890");
+  assert.equal(rows[2].value, "ab".repeat(32));
+  const own = linkDetails({ ...base, state: "starting", relay_connected: false, custom_relay: "https://relay.mine.example/" });
+  assert.equal(own[0].value, "自建 · relay.mine.example（未连上）");
+  assert.match(own[1].value, /没有/);
 });

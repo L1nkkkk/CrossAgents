@@ -14,6 +14,8 @@ import { ApprovalPanel, ExtensionRow, SettingsBlocks } from "./page/panels.ts";
 import {
   AUTO_TRUST_HINT,
   accessText,
+  explainError,
+  explainedText,
   approvalView,
   approveBlockedReason,
   approveFingerprint,
@@ -112,7 +114,7 @@ test("the approval screen submits exactly the fingerprint it shows", () => {
   assert.equal(approveFingerprint(view), target.pending!.version.fingerprint);
   // The version's own facts, the diff and the access change are all on this one card.
   assert.ok(html.includes("standup__report") || html.includes("report"));
-  assert.ok(html.includes("access 变了"));
+  assert.ok(html.includes("权限变了"));
   assert.ok(html.includes("extension.toml"));
   for (const value of ["report.mjs", "run.landed", "notify.mjs", "server.mjs"]) assert.ok(html.includes(value));
   assert.ok(html.includes("二进制"));
@@ -275,4 +277,14 @@ test("version facts name the access and what it allows", () => {
   assert.equal(facts.guiEntry, "gui/index.js");
   assert.match(accessText("write").detail, /能读也能改/);
   assert.match(accessText("read").detail, /只能读/);
+  assert.equal(accessText("read").label, "只读");
+  assert.equal(accessText("write").label, "可写");
+});
+
+test("English errors get a Chinese lead and keep the original", () => {
+  assert.deepEqual(explainError("extension exceeds 50 MB"), { text: "扩展目录超过 50 MB 的上限，hub 不给它做快照", raw: "extension exceeds 50 MB" });
+  assert.equal(explainError("exit code 1").text, "进程退出了，退出码 1");
+  assert.equal(explainError("something odd").text, "出错了，原文如下");
+  assert.deepEqual(explainError("源目录不见了"), { text: "源目录不见了" });
+  assert.equal(explainedText("exit code 2"), "进程退出了，退出码 2（原文：exit code 2）");
 });

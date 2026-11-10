@@ -99,12 +99,31 @@ export const agentTone = (s: AgentStatus) => AGENT_TONE[s] ?? { color: "" };
 export const runTone = (s: RunStatus) => RUN_TONE[s] ?? { color: "" };
 export const taskTone = (s: TaskStatus) => TASK_TONE[s] ?? { color: "" };
 
+// Every status of an agent, a run and a task, in the words the sidebar and the task list use.
 const LABELS: Record<string, string> = {
+  // agents
+  starting: "启动中",
+  idle: "空闲",
+  stopped: "已停止",
+  error: "出错",
+  // runs
+  planning: "规划中",
   awaiting_approval: "待审批",
-  waiting_answer: "等回答",
+  running: "进行中",
   paused: "已暂停",
-  stalled: "停了 · 未上报",
+  completed: "已完成",
+  // tasks
+  pending: "等待",
+  waiting_answer: "等回答",
+  verifying: "检查中",
+  retrying: "重试中",
+  escalated: "已上报",
+  reviewing: "审查中",
   passed: "待检查",
+  merged: "已合并",
+  failed: "失败",
+  cancelled: "已取消",
+  stalled: "停了 · 未上报",
 };
 
 export const statusLabel = (s: string) => LABELS[s] ?? s.replace(/_/g, " ");

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { shortcut, shortcutPlatform } from "../lib/shortcuts";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
@@ -41,7 +41,8 @@ import { useSidebar } from "../titlebar";
 import { planWaitsForPerson } from "../lib/policy";
 import { runState, taskState } from "../lib/taskState";
 import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, workGroups, type ActionTool, type Step } from "../lib/workGroups";
-import { TurnLive, type LiveTurn } from "../liveTurn";
+import { LiveExtras, type LiveTurn } from "../liveTurn";
+import { Ellipsis } from "lucide-react";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, turnExtras, type TranscriptItem, type TranscriptTurn } from "../session";
 import { reasonText } from "../lib/delivery";
@@ -49,6 +50,7 @@ import { dismissNotice, useNotices } from "../notices";
 import { QuestionCards, pending, useQuestions } from "../questions";
 import { executorOf } from "../lib/projectView";
 import "./sessiontools.css";
+import "./session-polish.css";
 import { workDecisions, type WorkDecision } from "../lib/workNotes";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
@@ -264,8 +266,8 @@ export function SessionView({
   const poisoned = moderationTurn(turns, agent.status, transcript.error);
   const led = ledRuns.data ?? [];
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
-  // The turn running now, and (when it works a task for a run) that task's counts: both are in
-  // the header as well as on the live line under the turn (docs/TODO.md §四 ②).
+  // The turn running now, and (when it works a task for a run) that task's counts: both are on
+  // the live line under the turn, the one place it is shown (docs/TODO.md §四 ②).
   const runningTurn = turns.findLast((turn) => !!turn.started_at && !turn.completed_at);
   const workingTask = tasks
     .filter(({ task }) => taskState(task).bucket === "active")
@@ -287,16 +289,18 @@ export function SessionView({
   return (
     <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
       <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)} onFocusCapture={() => focusSession(name)}>
-        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} live={live} rail={rail} onClose={onClose} />}
+        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
         <WorkContext name={name} agent={agent} tasks={tasks} led={led} agents={everyone} execution={execution.data?.execution} />
         <ExecutionBar agent={agent} execution={execution.data?.execution} reload={execution.reload} />
         <NoticeBar agent={agent} />
+        <LiveInfo.Provider value={live}>
         <Conversation agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top} rounds={rounds}>
           {outgoing.map((m) => (
             <Sending key={m.key} message={m} agent={agent} />
           ))}
           {bottom}
         </Conversation>
+        </LiveInfo.Provider>
         {rail && side && (
           <aside className="rail rail-run" aria-label={sideLabel}>
             {side}
@@ -501,13 +505,16 @@ function ResumePanel({ agent, onClose }: { agent: Agent; onClose: () => void }) 
 }
 
 
+/** A session's role as the topbar shows it: the usual ones in Chinese, any other as written. */
+const ROLE_WORDS: Record<string, string> = { worker: "执行者", lead: "协调者", planner: "协调者", reviewer: "审查者" };
+const roleWord = (role: string) => ROLE_WORDS[role.trim().toLowerCase()] ?? role;
+
 function Header({
   agent,
   capabilities,
   usage,
   driver,
   tasks,
-  live,
   rail,
   onClose,
 }: {
@@ -516,8 +523,6 @@ function Header({
   usage: TranscriptUsage | null;
   driver: string | null;
   tasks: { run: Run; task: RunDetail["tasks"][number] }[];
-  /** The turn running now, shown under the title as well as on its live line below. */
-  live?: LiveTurn;
   /** The info rail is showing the model, context and tasks: the header leaves them out. */
   rail: boolean;
   onClose?: () => void;
@@ -558,9 +563,9 @@ function Header({
         <StatusChip status={agent.status} tone={agentTone(agent.status)} />
         {!rail && (
           <>
-            <span className="chip hide-narrow">
+            <span className="chip hide-narrow" title={`角色：${agent.role}`}>
               <Mark shape={roleShape(agent.role)} tone={agentTone(agent.status)} size={9} />
-              {agent.role}
+              {roleWord(agent.role)}
             </span>
             <span className="chip hide-narrow">
               <Vendor plugin={agent.plugin} model={agent.model} title={driver ? `${vendorName(agent.plugin)} · driver: ${driver}` : undefined} />
@@ -586,52 +591,22 @@ function Header({
             </span>
           </button>
         )}
-        {agent.status === "running" && capabilities?.interrupt !== false && (
-          <button disabled={busy} onClick={() => run(() => api.cancelAgent(agent.id))} title="中断本轮（Esc）">
-            <span className="row" style={{ gap: 5 }}>
-              <Icon name="stop" size={13} />
-              中断
-            </span>
-          </button>
-        )}
-        {agent.status !== "stopped" && (
-          <button
-            className={stop.armed ? "danger armed" : "ghost"}
-            disabled={busy}
-            onClick={() => stop.click(() => run(() => api.stopAgent(agent.id)))}
-            title="停止进程；下次发消息会重新启动"
-          >
-            {stop.armed ? "再点一次停止" : "停止"}
-          </button>
-        )}
-        <button
-          className={`ghost small resume-toggle ${resume ? "on" : ""}`}
-          onClick={() => setResume(!resume)}
-          title="复制原生恢复命令：在终端里用同一个 session id 接着聊"
-          aria-label="终端恢复"
-          aria-expanded={resume}
-        >
-          <span className="row" style={{ gap: 5 }}>
-            <Icon name="terminal" size={13} />
-            <span className="topbar-label">终端恢复</span>
-          </span>
-        </button>
-        {agent.plugin !== "external" && (
-          <button className="ghost small graph-toggle" onClick={() => openTool("graph", { agent: agent.name })} title="在右侧工具列看这个会话检出的提交图：HEAD 和本地分支" aria-label="提交图">
-            <span className="row" style={{ gap: 5 }}>
-              <Icon name="branch" size={13} />
-              <span className="topbar-label">提交图</span>
-            </span>
-          </button>
-        )}
         <ToolsToggle />
+        <MoreMenu
+          busy={busy}
+          stopArmed={stop.armed}
+          resume={resume}
+          interrupt={agent.status === "running" && capabilities?.interrupt !== false ? () => run(() => api.cancelAgent(agent.id)) : undefined}
+          stop={agent.status !== "stopped" ? (close) => stop.click(() => { close(); void run(() => api.stopAgent(agent.id)); }) : undefined}
+          toggleResume={() => setResume(!resume)}
+          graph={agent.plugin !== "external" ? () => openTool("graph", { agent: agent.name }) : undefined}
+        />
         {onClose && (
           <button className="ghost icon" onClick={onClose} title="关闭这一栏" aria-label="关闭这一栏">
             <Icon name="close" size={15} />
           </button>
         )}
       </div>
-      {live && <TurnLive {...live} />}
       {profile && (
         <div className="profile-pop">
           <ProfileEditor agent={agent} onDone={() => setProfile(false)} />
@@ -645,6 +620,123 @@ function Header({
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * The header's less frequent actions, behind one `⋯` so the name keeps its room on any width.
+ * 中断本轮 and 停止进程 are not the same thing, and each item says how (runtime.rs `cancel` /
+ * `stop`): the first interrupts the running turn only — the process, its context and the
+ * messages waiting behind it stay; the second ends the process and withdraws what still waits,
+ * and the next message starts it again. Stopping asks for a second click, like before.
+ */
+function MoreMenu({
+  busy,
+  stopArmed,
+  resume,
+  interrupt,
+  stop,
+  toggleResume,
+  graph,
+}: {
+  busy: boolean;
+  stopArmed: boolean;
+  resume: boolean;
+  interrupt?: () => void;
+  /** Called with `close`, which the second (confirming) click uses. */
+  stop?: (close: () => void) => void;
+  toggleResume: () => void;
+  graph?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const close = useCallback((focus = true) => {
+    setOpen(false);
+    if (focus) button.current?.focus();
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    // The first item takes focus, so the menu is usable from the keyboard at once.
+    ref.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    const away = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) close(false);
+    };
+    window.addEventListener("mousedown", away);
+    return () => window.removeEventListener("mousedown", away);
+  }, [open, close]);
+  function onKey(e: ReactKeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      return;
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+    const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [])];
+    if (!items.length) return;
+    e.preventDefault();
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : (at + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    items[next].focus();
+  }
+  const pick = (action: () => void) => () => {
+    close();
+    action();
+  };
+  return (
+    <span className="more-anchor" ref={ref} onKeyDown={open ? onKey : undefined}>
+      <button
+        ref={button}
+        className={`ghost icon more-toggle ${open ? "on" : ""}`}
+        onClick={() => setOpen(!open)}
+        title="更多：中断本轮、停止进程、终端恢复、提交图"
+        aria-label="更多操作"
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <Ellipsis size={16} strokeWidth={1.75} absoluteStrokeWidth aria-hidden="true" className="icon" />
+      </button>
+      {open && (
+        <div className="more-menu" role="menu" aria-label="更多操作">
+          {interrupt && (
+            <button role="menuitem" disabled={busy} onClick={pick(interrupt)} title="同输入框的停止键、Esc">
+              <Icon name="stop" size={13} />
+              <span className="more-text">
+                <span>中断本轮 <kbd>Esc</kbd></span>
+                <small>停下正在跑的这一轮；进程、上下文和排队的消息都留着</small>
+              </span>
+            </button>
+          )}
+          {stop && (
+            <button role="menuitem" className={stopArmed ? "danger armed" : undefined} disabled={busy} onClick={() => stop(() => close())}>
+              <Icon name="close" size={13} />
+              <span className="more-text">
+                <span>{stopArmed ? "再点一次，停止进程" : "停止进程…"}</span>
+                <small>结束 agent 进程，撤回还在排队的消息；下次发消息会重新启动</small>
+              </span>
+            </button>
+          )}
+          {(interrupt || stop) && <div className="more-sep" role="separator" />}
+          <button role="menuitem" onClick={pick(toggleResume)}>
+            <Icon name="terminal" size={13} />
+            <span className="more-text">
+              <span>{resume ? "收起终端恢复" : "终端恢复"}</span>
+              <small>复制原生恢复命令，在终端里用同一个 session id 接着聊</small>
+            </span>
+          </button>
+          {graph && (
+            <button role="menuitem" onClick={pick(graph)}>
+              <Icon name="branch" size={13} />
+              <span className="more-text">
+                <span>提交图</span>
+                <small>在右侧工具列看这个会话检出的提交：HEAD 和本地分支</small>
+              </span>
+            </button>
+          )}
+        </div>
+      )}
+    </span>
   );
 }
 
@@ -774,6 +866,12 @@ function WaitingTurn({ turn, agent }: { turn: TranscriptTurn; agent: Agent }) {
  * (the live line under a running turn, once its timer has something new to say) uses this, since
  * only the conversation itself is re-rendered when a transcript item arrives.
  */
+/**
+ * The running turn's extra facts (output speed, the task it works on) for its live line: the one
+ * place a running turn is shown in the session, so nothing above the conversation repeats it.
+ */
+const LiveInfo = createContext<LiveTurn | undefined>(undefined);
+
 const Follow = createContext<{ el: RefObject<HTMLDivElement | null>; stick: RefObject<boolean> } | null>(null);
 
 function Conversation({
@@ -1365,6 +1463,7 @@ function LiveLine({ since, items }: { since: string; items: TranscriptItem[] }) 
     if (el && follow?.stick.current) el.scrollTop = el.scrollHeight;
   });
   const shown = useContext(ShownLive);
+  const info = useContext(LiveInfo);
   const last = items[items.length - 1];
   // A running step whose command and output are already on screen (the open steps at the end of
   // the turn): the status row says enough; repeating it here would write the same output twice.
@@ -1381,6 +1480,7 @@ function LiveLine({ since, items }: { since: string; items: TranscriptItem[] }) 
         </span>
         <span className="muted small">{duration(now - new Date(since).getTime())}</span>
         <span>· {liveActivity(items)}</span>
+        {info && <LiveExtras agentId={info.agentId} task={info.task} siblings={info.siblings} />}
       </div>
       {current && (
         <div className="working-now" title={current.title}>

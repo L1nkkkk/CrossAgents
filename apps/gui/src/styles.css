@@ -198,6 +198,33 @@ input, select, textarea {
 }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--focus); }
 input[type="radio"], input[type="checkbox"] { width: auto; padding: 0; margin: 0; flex: none; accent-color: var(--accent); }
+input[type="checkbox"], input[type="radio"] { width: 14px; height: 14px; cursor: pointer; vertical-align: -2px; }
+input[type="checkbox"]:disabled, input[type="radio"]:disabled { cursor: default; }
+/* Every <select> is drawn here, not by the system: the inputs' surface, border and focus, and a
+   chevron made of two gradients in --muted, so it follows every theme without an image. Never
+   set `background:` (the shorthand) on a select elsewhere: it would wipe the chevron. Selects
+   that sit among chips (.select-pill, the 权限 pick, 用量's 来源, Git's 项目) take the chip's
+   28px pill. */
+select {
+  appearance: none; -webkit-appearance: none; cursor: pointer; min-height: 30px; line-height: 1.3;
+  padding-right: 28px; text-overflow: ellipsis; white-space: nowrap;
+  background-color: var(--surface);
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 52%, calc(100% - 11px) 52%;
+  background-size: 4px 4px, 4px 4px; background-repeat: no-repeat;
+}
+select:hover:not(:disabled) { border-color: color-mix(in srgb, var(--border-strong) 55%, var(--text) 30%); }
+select:disabled { opacity: 0.5; cursor: default; }
+select option, select optgroup { background-color: var(--surface); color: var(--text); }
+select.select-pill, .permission-compact select, .usage-controls select, select.git-project {
+  width: auto; height: 28px; min-height: 28px; padding: 0 26px 0 11px; border-radius: 999px;
+  border-color: var(--border); background-color: transparent; color: var(--text-2); font-size: 12.5px;
+}
+select.select-pill:hover:not(:disabled), .permission-compact select:hover:not(:disabled),
+.usage-controls select:hover:not(:disabled), select.git-project:hover:not(:disabled) {
+  background-color: var(--hover); border-color: var(--border); color: var(--text);
+}
+select.select-pill:focus, .permission-compact select:focus, .usage-controls select:focus, select.git-project:focus { border-color: var(--focus); }
 textarea { resize: vertical; }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
@@ -452,7 +479,7 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 /* The compact 权限 pick (src/permissionPicks.tsx): a chip-sized select in a composer or on a
    planned task, with the reason written out when Cursor cannot guard on Windows. */
 .permission-compact { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
-.permission-compact select { width: auto; max-width: 170px; height: 26px; padding: 0 6px; font-size: 12px; border-radius: var(--radius); }
+.permission-compact select { max-width: 170px; }
 .permission-compact .setting-hint { font-size: 11.5px; }
 .permission-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .who-pick-menu.menu { min-width: 280px; max-width: min(380px, calc(100vw - 16px)); }
@@ -1185,7 +1212,7 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 .diff-file.focus { border-color: var(--text-2); }
 .changes-pane { display: flex; flex-direction: column; gap: 8px; }
 .turn-picker { display: flex; align-items: center; gap: 4px; }
-.turn-picker select { flex: 1; min-width: 0; font-size: 12.5px; padding: 4px 6px; }
+.turn-picker select { flex: 1; min-width: 0; font-size: 12.5px; padding: 4px 26px 4px 8px; }
 .turn-picker .tool-whose { margin-right: 4px; }
 .turn-files { display: flex; gap: 6px; align-items: center; }
 .events-pane { display: flex; flex-direction: column; gap: 8px; }
@@ -2021,6 +2048,7 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .ext-row-desc { font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
 .ext-row-meta { overflow-wrap: anywhere; }
 .ext-row-error { color: var(--danger-text); background: var(--danger-bg); border-radius: var(--radius); padding: 4px 8px; overflow-wrap: anywhere; }
+.ext-error-raw { display: block; margin-top: 2px; opacity: 0.75; font-family: var(--font-mono); font-size: 11px; }
 .ext-row-actions { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
 .ext-link { font-size: 12.5px; color: var(--accent-text); white-space: nowrap; }
 .ext-link:hover { text-decoration: underline; }
@@ -2118,6 +2146,33 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .code-input { width: 100%; box-sizing: border-box; font-size: 11.5px; word-break: break-all; min-height: 52px; }
 .code-box { display: flex; gap: 8px; align-items: flex-start; }
 .code-box .code-input { flex: 1; min-width: 0; }
+/* The centre's three steps (Connection.tsx HostGuide): text left, buttons in one right-hand
+   column of one size, so 开启 / 重新开启 / 关闭 / 生成配对码 / 再生成一个 line up. */
+.host-steps .guide-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+.host-steps .guide-actions { justify-content: flex-end; flex-wrap: nowrap; gap: 8px; }
+.host-steps .guide-actions button { height: 30px; min-width: 88px; padding: 0 14px; font-size: 13px; white-space: nowrap; }
+@media (max-width: 560px) {
+  .host-steps .guide-line { grid-template-columns: minmax(0, 1fr); }
+  .host-steps .guide-actions { justify-content: flex-start; }
+}
+.link-details { display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
+.link-details > summary { cursor: pointer; color: var(--text-2); width: max-content; user-select: none; }
+.link-details > summary:hover { color: var(--text); }
+.link-details[open] > summary { margin-bottom: 6px; }
+.link-details > * + * { margin-top: 6px; }
+.link-detail-rows { margin: 0; display: grid; gap: 4px; padding: 8px 10px; border-radius: var(--radius); background: var(--surface-sunk); }
+.link-detail-rows > div { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 8px; }
+.link-detail-rows dt { color: var(--muted); }
+.link-detail-rows dd { margin: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.link-detail-rows dd.mono { font-family: var(--font-mono); font-size: 11.5px; }
+/* The pairing code: one truncated line until 显示全部. */
+.code-box { align-items: center; }
+.code-box.open { align-items: flex-start; }
+.code-line {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px;
+  padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-sunk); color: var(--text-2);
+}
+.code-box > button, .code-box .copy { flex: none; white-space: nowrap; height: 30px; padding: 0 12px; font-size: 12.5px; }
 .code-preview.ok { color: var(--ok-text, var(--text-2)); }
 .code-preview.bad { color: var(--danger-text); }
 
@@ -2145,7 +2200,7 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .machine-body { min-width: 0; padding-left: 10px; box-sizing: border-box; }
 .os-icon { color: var(--muted); vertical-align: -2px; }
 .os-line { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.presence { display: inline-flex; align-items: center; gap: 5px; }
+.device-presence { display: inline-flex; align-items: center; gap: 5px; }
 .hub-row { background: var(--hover); }
 .ts-peer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ts-peer .ts-addr { min-width: 0; overflow-wrap: anywhere; }

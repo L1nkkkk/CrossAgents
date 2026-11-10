@@ -1,0 +1,23 @@
+/* Sidebar polish (Sidebar.tsx). styles.css loads after this file, so each rule here is scoped one
+   step deeper than the rule it overrides. */
+
+/* A member row short of room: the name keeps its room first; the time, the output speed and the
+   other trailing facts give way (the row's tooltip still says all of them). */
+.sidebar .member-top .member-name { flex-shrink: 0; max-width: 62%; }
+.sidebar .member-top .member-time { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sidebar .member-top .member-elapsed { flex-shrink: 1; }
+/* The speed goes before the time does: one line drawn right to left, time first, and what does
+   not fit beside it wraps onto a second line that is never shown (liveTurn.tsx RowElapsed). */
+.member-elapsed .member-elapsed-facts {
+  display: flex; flex-direction: row-reverse; flex-wrap: wrap; align-items: center; column-gap: 4px;
+  /* Never narrower than its widest fact: the time always has room. */
+  min-width: min-content; height: 15px; line-height: 15px; overflow: hidden;
+}
+.member-elapsed .member-elapsed-facts > * { white-space: nowrap; }
+
+/* The footer's hub line: when the words would be cut ("hub 已…"), only the dot stays, with the
+   words as its tooltip and accessible name. */
+.sidebar .foot { container-type: inline-size; container-name: sidebar-foot; }
+@container sidebar-foot (max-width: 195px) {
+  .connection .text { display: none; }
+}

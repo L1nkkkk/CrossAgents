@@ -13,14 +13,7 @@
 .usage-controls {
   margin: 0 0 16px;
 }
-.usage-controls select {
-  width: auto;
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  padding: 7px 10px;
-}
+/* .usage-controls select is styled as a pill with the other selects in styles.css. */
 .usage-controls .segmented:last-child {
   margin-left: auto;
 }

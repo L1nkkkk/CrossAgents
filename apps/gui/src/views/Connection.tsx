@@ -11,7 +11,7 @@ import type { ConnectionState, CrossAgentsBridge, PairStep, RemoteTarget } from 
 import { ApiError, api, errorText } from "../api";
 import { CopyButton, ErrorBox, Field } from "../components";
 import { PAIR_STEPS, connectionWords, pairFailure, stepIndex, stepWords, targetWords, type PairFailure } from "../lib/connection";
-import { CODE_STEPS, codeFailure, codeStepIndex, countdown, entranceWords, pathWords, previewCode, type CodeFailure } from "../lib/link";
+import { CODE_STEPS, codeFailure, codeStepIndex, countdown, entranceWords, linkDetails, pathWords, previewCode, type CodeFailure } from "../lib/link";
 import { useConnectionState } from "../lib/useConnection";
 import { useFeatureSupport } from "../lib/features";
 import { useArmed } from "../parts";
@@ -494,6 +494,8 @@ function HostGuide() {
   const [busy, setBusy] = useState(false);
   const [relay, setRelay] = useState("");
   const [advanced, setAdvanced] = useState(false);
+  const [details, setDetails] = useState(false);
+  const [showCode, setShowCode] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const relayTouched = useRef(false);
 
@@ -502,7 +504,10 @@ function HostGuide() {
       (s) => {
         setStatus(s);
         if (!relayTouched.current) setRelay(s.custom_relay ?? "");
-        if (s.custom_relay) setAdvanced(true);
+        if (s.custom_relay) {
+          setAdvanced(true);
+          setDetails(true);
+        }
       },
       (e) => setError(errorText(e)),
     );
@@ -547,12 +552,14 @@ function HostGuide() {
       () => api.createLinkInvite(),
       (made) => {
         setInvite(made);
+        setShowCode(false);
         setNow(new Date());
         void load();
       },
     );
 
   const words = entranceWords(status);
+  const detailRows = linkDetails(status);
   const on = !!status?.enabled;
   const running = status?.state === "online" || status?.state === "starting";
   const left = invite ? countdown(new Date(invite.expires_at), now) : "";
@@ -564,9 +571,7 @@ function HostGuide() {
       <div className="settings-head">
         <h2>让别的电脑连进来</h2>
       </div>
-      <p className="settings-lead">
-        内置打洞：两台电脑先经中继找到对方，再尽量直接连通；打不通也能经中继用。不开端口、不用 SSH、不用装 Tailscale。连进来的电脑凭一次性配对码换到自己的设备 token。
-      </p>
+      <p className="settings-lead">不开端口、不用 SSH：开启内置打洞，生成一次性配对码，在另一台电脑上粘贴即可。</p>
       <ErrorBox error={error} />
       <div className="setting-card">
         <ol className="guide-steps host-steps">
@@ -577,13 +582,8 @@ function HostGuide() {
                   开启内置打洞 <span className={`chip small ${tone}`} data-role="entrance">{words.word}</span>
                 </div>
                 {words.detail && <div className="setting-hint">{words.detail}</div>}
-                {status?.endpoint && (
-                  <div className="setting-hint mono" title="这台中心的 id（公钥）：配对码里带着它，别的电脑凭它找到这里">
-                    id {status.endpoint.slice(0, 16)}…
-                  </div>
-                )}
               </div>
-              <div className="row">
+              <div className="row guide-actions">
                 {!on ? (
                   <button className="primary" type="button" data-action="link-on" disabled={busy || !status} onClick={() => void turnOn()}>
                     开启
@@ -593,33 +593,46 @@ function HostGuide() {
                     <button type="button" data-action="link-restart" disabled={busy} onClick={() => void turnOn()} title="用现在的代理和中继设置重新开启">
                       重新开启
                     </button>
-                    <button type="button" className="ghost small" data-action="link-off" disabled={busy} onClick={() => void turnOff()}>
+                    <button type="button" data-action="link-off" disabled={busy} onClick={() => void turnOff()}>
                       关闭
                     </button>
                   </>
                 )}
               </div>
             </div>
-            <label className="field-check">
-              <input type="checkbox" checked={advanced} onChange={(e) => setAdvanced(e.target.checked)} disabled={busy} />
-              高级：自建中继
-            </label>
-            {advanced && (
-              <Field label="中继地址（留空用 n0 的公共中继）">
-                <input
-                  data-field="relay"
-                  value={relay}
-                  onChange={(e) => {
-                    relayTouched.current = true;
-                    setRelay(e.target.value);
-                  }}
-                  placeholder="https://relay.example.com"
-                  disabled={busy}
-                  autoComplete="off"
-                />
-              </Field>
-            )}
-            {advanced && <div className="setting-hint">国内的云服务器上跑一个 iroh-relay，填在这里后点「{on ? "重新开启" : "开启"}」。生成的配对码会带上它，连进来的电脑也走它。</div>}
+            <details className="link-details" open={details} onToggle={(e) => setDetails(e.currentTarget.open)}>
+              <summary>详情</summary>
+              {detailRows.length > 0 && (
+                <dl className="link-detail-rows">
+                  {detailRows.map((row) => (
+                    <div key={row.label} title={row.title}>
+                      <dt>{row.label}</dt>
+                      <dd className={row.mono ? "mono" : undefined}>{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              <label className="field-check">
+                <input type="checkbox" checked={advanced} onChange={(e) => setAdvanced(e.target.checked)} disabled={busy} />
+                自建中继
+              </label>
+              {advanced && (
+                <Field label="中继地址（留空用 n0 的公共中继）">
+                  <input
+                    data-field="relay"
+                    value={relay}
+                    onChange={(e) => {
+                      relayTouched.current = true;
+                      setRelay(e.target.value);
+                    }}
+                    placeholder="https://relay.example.com"
+                    disabled={busy}
+                    autoComplete="off"
+                  />
+                </Field>
+              )}
+              {advanced && <div className="setting-hint">在国内的云服务器上跑一个 iroh-relay，填好后点「{on ? "重新开启" : "开启"}」；配对码会带上它。</div>}
+            </details>
           </li>
           <li className={!running ? "" : invite && !expired ? "done" : "now"}>
             <div className="setting-line guide-line">
@@ -629,27 +642,37 @@ function HostGuide() {
                   {!running
                     ? "先开启上一步。"
                     : status?.state === "starting"
-                      ? "中继还没连上：现在生成的码只带局域网地址，同一局域网的电脑能连，外网的要等中继连上。"
-                      : "一个码只能配对一台电脑，30 分钟内有效；中心的 hub 重启后作废。"}
+                      ? "中继还没连上：现在的码只能在同一局域网里用。"
+                      : "一码一台，30 分钟内有效；hub 重启后作废。"}
                 </div>
               </div>
-              <button className={running && (!invite || expired) ? "primary" : ""} type="button" data-action="link-invite" disabled={busy || !running} onClick={() => void makeCode()}>
-                {invite ? "再生成一个" : "生成配对码"}
-              </button>
+              <div className="row guide-actions">
+                <button className={running && (!invite || expired) ? "primary" : ""} type="button" data-action="link-invite" disabled={busy || !running} onClick={() => void makeCode()}>
+                  {invite ? "再生成一个" : "生成配对码"}
+                </button>
+              </div>
             </div>
           </li>
           <li className={invite && !expired ? "now" : ""}>
             <div className="guide-step-title">在另一台电脑上粘贴</div>
             {invite && !expired ? (
               <>
-                <div className="code-box" data-role="invite">
-                  <textarea className="mono code-input" readOnly value={invite.code} rows={3} onFocus={(e) => e.currentTarget.select()} aria-label="配对码" />
+                <div className={`code-box ${showCode ? "open" : ""}`} data-role="invite">
+                  {showCode ? (
+                    <textarea className="mono code-input" readOnly value={invite.code} rows={3} onFocus={(e) => e.currentTarget.select()} aria-label="配对码" />
+                  ) : (
+                    <code className="mono code-line" title={invite.code} aria-label="配对码">
+                      {invite.code}
+                    </code>
+                  )}
                   <CopyButton className="copy" text={invite.code} label="复制" title="复制配对码" />
+                  <button type="button" className="ghost small" data-action="code-toggle" onClick={() => setShowCode((v) => !v)}>
+                    {showCode ? "收起" : "显示全部"}
+                  </button>
                 </div>
                 <div className="setting-hint">
-                  还剩 <strong>{left}</strong> 过期，只能用一次。在那台电脑上：打开 CrossAgents → 设置 →「连接」→「连到别的电脑上的中心」→「配对码」，粘贴后点「连接」。
+                  还剩 <strong>{left}</strong> 过期，只能用一次。在那台电脑上：设置 →「连接」→「连到别的电脑上的中心」→「配对码」，粘贴后点「连接」。只发给你自己的电脑。
                 </div>
-                <div className="setting-hint">配对码等于一把一次性的钥匙：只发给你自己的电脑，别贴到群里。</div>
               </>
             ) : (
               <div className="setting-hint">{expired ? "刚才的配对码已经过期，重新生成一个。" : "生成配对码后，在这里复制。"}</div>
@@ -657,9 +680,7 @@ function HostGuide() {
           </li>
         </ol>
       </div>
-      <div className="notice">
-        连进来的电脑会出现在「设备」页：它拿到的是 write（读写）设备。在那里吊销它，它的连接立刻被拒绝。不想再让任何电脑连进来，就点「关闭」，没用掉的配对码也随之作废。
-      </div>
+      <div className="notice">连进来的电脑会出现在「设备」页（write 读写级别），在那里可以吊销。点「关闭」后谁都连不进来，没用掉的配对码也作废。</div>
     </section>
   );
 }

@@ -145,7 +145,7 @@ export const SCENARIOS: Scenario[] = [
       { at: 650, act: () => [...document.querySelectorAll<HTMLButtonElement>(".menu-item")].find((b) => b.querySelector(".menu-label")?.textContent === "Thinking")?.click() },
       { at: 900, act: () => document.querySelector<HTMLButtonElement>('[data-task="b"] button[title="推理强度"]')?.click() },
       { at: 1150, act: () => [...document.querySelectorAll<HTMLButtonElement>(".menu-item")].find((b) => b.querySelector(".menu-label")?.textContent === "高")?.click() },
-      { at: 2100, act: () => [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.includes("Approve · 开工"))?.click() },
+      { at: 2100, act: () => [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.includes("批准并开工"))?.click() },
       { at: 2600, act: () => {
         const made = state.agents.filter((a) => !originalIds.has(a.id));
         if (!made.some((a) => a.plugin === "cursor" && a.model === "claude-opus-5-thinking-high")) throw new Error("Cursor task mode was not saved");
@@ -927,6 +927,18 @@ export const SCENARIOS: Scenario[] = [
       script: [
         { at: 600, act: () => document.querySelector<HTMLButtonElement>('[data-action="link-on"]')?.click() },
         { at: 3200, act: () => document.querySelector<HTMLButtonElement>('[data-action="link-invite"]')?.click() },
+      ],
+      route: "#/settings/connection",
+    };
+  } },
+  { key: "connection-host-details", label: "连接：当中心（详情与完整配对码）", hint: "在线、生成过配对码后：展开「详情」看中继、代理和节点 id，点「显示全部」看完整配对码", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: {}, link: { enabled: true, startMs: 0, proxy: "http://127.0.0.1:7890" } },
+      script: [
+        { at: 600, act: () => document.querySelector<HTMLButtonElement>('[data-action="link-invite"]')?.click() },
+        { at: 900, act: () => document.querySelector<HTMLDetailsElement>(".link-details")?.setAttribute("open", "") },
+        { at: 1000, act: () => document.querySelector<HTMLButtonElement>('[data-action="code-toggle"]')?.click() },
       ],
       route: "#/settings/connection",
     };

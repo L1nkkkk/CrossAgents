@@ -31,17 +31,37 @@
 .turn .bubble-foot .msg-copy { margin-left: auto; }
 .copy-row { display: flex; justify-content: flex-end; min-width: 0; margin-top: 2px; }
 
-/* Quiet until looked at: faded at rest, clear on hover and on keyboard focus, and it keeps its
-   place either way (opacity, not visibility), so nothing shifts and Tab always reaches it. */
+/* Hidden until looked at: it appears while the message is hovered and whenever the button (or
+   anything in the message) has keyboard focus, and it keeps its place either way (opacity, not
+   visibility or display), so nothing shifts and Tab always reaches it. A screen without hover
+   (touch) shows it faded, as it cannot be hovered into view. */
 .turn .msg-copy {
   display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px;
   border-color: transparent; background: none; color: var(--muted);
   font-size: 11.5px; line-height: 1.6;
-  opacity: 0.45; transition: opacity 0.12s, color 0.12s, background-color 0.12s;
+  opacity: 0; transition: opacity 0.12s, color 0.12s, background-color 0.12s;
 }
+.turn .bubble:hover .msg-copy, .turn .agent-text:hover .msg-copy, .turn .peer-body:hover .msg-copy,
+.turn .bubble:focus-within .msg-copy, .turn .agent-text:focus-within .msg-copy, .turn .peer-body:focus-within .msg-copy { opacity: 0.7; }
+@media (hover: none) { .turn .msg-copy { opacity: 0.45; } }
 .turn .msg-copy:hover:not(:disabled), .turn .msg-copy:focus-visible { opacity: 1; background: var(--hover); color: var(--text-2); }
 .turn .msg-copy:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .turn .msg-copy .copy-state { padding: 0; background: none; color: inherit; font-size: inherit; }
 .turn .msg-copy.copied { opacity: 1; color: var(--ok-text); }
 /* The clipboard refused: say so in the danger colour, never in the success one. */
 .turn .msg-copy.failed { opacity: 1; color: var(--danger-text); }
+
+/* Out of the flow while hidden, so a message carries no empty row for a control nobody sees:
+   a bubble whose foot holds only the copy button gets it beside its bottom-left corner, in the
+   room the right-aligned bubble leaves; a reply gets it just under its right end, on its own
+   background when shown. Both stay inside their message, so hovering onto them keeps them shown. */
+.turn .bubble { position: relative; }
+.turn .bubble:not(.system) > .bubble-foot:has(> .msg-copy:only-child) {
+  position: absolute; right: 100%; bottom: 0; margin: 0 4px 0 0; white-space: nowrap;
+}
+.turn .agent-text { position: relative; }
+.turn .agent-text > .copy-row {
+  position: absolute; right: 0; top: 100%; z-index: 1; margin: 0;
+}
+.turn .agent-text > .copy-row .msg-copy { background: var(--canvas); }
+.turn .agent-text > .copy-row .msg-copy:hover:not(:disabled), .turn .agent-text > .copy-row .msg-copy:focus-visible { background: linear-gradient(var(--hover), var(--hover)), var(--canvas); }

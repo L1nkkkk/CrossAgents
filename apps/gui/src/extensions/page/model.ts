@@ -66,9 +66,9 @@ export function badges(info: ExtensionInfo, ctx: { safeMode: boolean; page?: Pag
     });
   }
   if (info.error) {
-    out.push({ key: "failed", label: "失败", tone: "danger", title: `源目录有问题：${info.error}` });
+    out.push({ key: "failed", label: "失败", tone: "danger", title: `源目录有问题：${explainedText(info.error)}` });
   } else if (ctx.page?.status === "failed") {
-    out.push({ key: "load-failed", label: "加载失败", tone: "danger", title: ctx.page.error ?? "页面没能加载这个扩展的入口" });
+    out.push({ key: "load-failed", label: "加载失败", tone: "danger", title: ctx.page.error ? explainedText(ctx.page.error) : "页面没能加载这个扩展的入口" });
   }
   if (pending && info.enabled) {
     out.push({
@@ -134,7 +134,7 @@ export function approveBlockedReason(info: ExtensionInfo, view: ApprovalView): s
     case "gone":
       return "那条待批准的记录已经不在了（被新的一版顶掉，或者已经批准过）。";
     case "ready":
-      return info.error ? `源目录有问题，hub 没法为它做快照：${info.error}` : undefined;
+      return info.error ? `源目录有问题，hub 没法为它做快照：${explainedText(info.error)}` : undefined;
   }
 }
 
@@ -173,14 +173,46 @@ export const AUTO_TRUST_HINT =
   "打开后，这个扩展的源目录一变，hub 就自己生成新快照并切换，不再逐次确认；打开时如果正有等待批准的版本，会一并批准并启用它。";
 
 export function autoTrustBlockedReason(info: ExtensionInfo): string | undefined {
-  return info.error ? `源目录现在有问题，hub 做不出快照，改好之后才能打开自动信任：${info.error}` : undefined;
+  return info.error ? `源目录现在有问题，hub 做不出快照，改好之后才能打开自动信任：${explainedText(info.error)}` : undefined;
 }
 
 /** What a version's `access` lets it do, in the page's words. */
 export function accessText(access: ExtensionAccess): { label: string; detail: string } {
   return access === "write"
-    ? { label: "write", detail: "它调 hub 时能读也能改：可以替你做写操作（会话、任务、笔记等）。" }
-    : { label: "read", detail: "它调 hub 时只能读，改不了任何东西。" };
+    ? { label: "可写", detail: "它调 hub 时能读也能改：可以替你做写操作（会话、任务、笔记等）。" }
+    : { label: "只读", detail: "它调 hub 时只能读，改不了任何东西。" };
+}
+
+/** An error as the hub or a process wrote it, with a Chinese lead when the original is English.
+ *  `raw` is the original, kept for searching and reporting; absent when `text` already is it. */
+export type ExplainedError = { text: string; raw?: string };
+
+const ERROR_LEADS: [RegExp, (m: RegExpMatchArray) => string][] = [
+  [/exceeds\s+(\d+(?:\.\d+)?)\s*([KMG]B)/i, (m) => `扩展目录超过 ${m[1]} ${m[2].toUpperCase()} 的上限，hub 不给它做快照`],
+  [/exit(?:ed)?\s+(?:with\s+)?(?:code|status)\s+(-?\d+)/i, (m) => `进程退出了，退出码 ${m[1]}`],
+  [/signal\s*:?\s*(\w+)/i, (m) => `进程被信号 ${m[1]} 结束`],
+  [/\b(?:toml|parse|invalid|expected|unknown field|missing field)\b/i, () => "extension.toml 或清单写得不对"],
+  [/\b(?:not found|no such file|enoent|cannot find)\b/i, () => "找不到要用的文件或程序"],
+  [/\b(?:permission denied|eacces|eperm|access is denied)\b/i, () => "没有权限读写或运行"],
+  [/\btimed?\s*out\b/i, () => "超时了"],
+  [/\b(?:econnrefused|connection refused)\b/i, () => "连接被拒绝"],
+];
+
+export function explainError(message: string): ExplainedError {
+  const raw = message.trim();
+  // Already in Chinese (the hub's own words): show as it is.
+  if (!raw || /[一-鿿]/.test(raw)) return { text: raw };
+  for (const [pattern, lead] of ERROR_LEADS) {
+    const m = raw.match(pattern);
+    if (m) return { text: lead(m), raw };
+  }
+  return { text: "出错了，原文如下", raw };
+}
+
+/** The same, on one line: 中文说明（原文：…）. */
+export function explainedText(message: string): string {
+  const e = explainError(message);
+  return e.raw ? `${e.text}（原文：${e.raw}）` : e.text;
 }
 
 /** One version's facts, as the approval screen and the running-version card show them. */
@@ -240,7 +272,7 @@ export function pluginRequestDraft(want: string): { title: string; text: string 
       "1. 先调 extension_api，看接口版本、事件、group 和 GUI 插槽；",
       "2. 写在 ~/.crossagents/extensions/<名字>/ 下：extension.toml，工具脚本，要面板就加 gui/index.js；",
       "3. 写完用 extension_check 静态校验，再用 extension_request_enable 建一条待批准记录。",
-      "不要自己想办法启用它：启用和自动信任只有我能点，我会在「扩展」页里看这一版的工具、说明、面板和 access，再决定。",
+      "不要自己想办法启用它：启用和自动信任只有我能点，我会在「扩展」页里看这一版的工具、说明、面板和权限（access），再决定。",
     ].join("\n"),
   };
 }

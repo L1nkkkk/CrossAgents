@@ -272,7 +272,11 @@ export function Composer({
           ) : (
             <ModelEffortPicks agent={agent} />
           )}
-          {capabilities?.resume && <span className="chip" title="会话可挂起后恢复">resumable</span>}
+          {capabilities?.resume && (
+            <span className="chip" tabIndex={0} title="可恢复：这个会话的进程停了或 hub 重启后，下次发消息会用同一个 session id 接着聊，上下文还在" aria-label="可恢复：进程停止后，下次发消息会接着同一个会话，上下文还在">
+              可恢复
+            </span>
+          )}
           <div className="spacer" />
           {agent.plugin !== "external" && files.picker}
           {/* One button: stop while it works and nothing is typed, else send (which queues). */}
@@ -365,13 +369,13 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
           ) : (
             <>
               <button className="primary" disabled={busy || !choices.ready} onClick={approve}>
-                <kbd>1</kbd> Approve · 开工
+                <kbd>1</kbd> 批准并开工
               </button>
               <button disabled={busy} onClick={() => setRejecting(true)}>
                 <kbd>2</kbd> 驳回并说明
               </button>
               <button className="ghost" onClick={onReply}>
-                <kbd>3</kbd> 先回复 Planner
+                <kbd>3</kbd> 先回复协调者
               </button>
             </>
           )}

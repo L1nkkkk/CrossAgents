@@ -35,6 +35,7 @@ import { useQuota } from "./views/Quota";
 import { markWords } from "./lib/connection";
 import { useConnectionState } from "./lib/useConnection";
 import { OsIcon } from "./osIcon";
+import "./sidebar.css";
 import { CHATS, selectWorkspace, useWorkspaces, wsHref, wsKey } from "./workspace";
 
 const Confirmed = createContext(true);
@@ -1220,7 +1221,7 @@ function Connection() {
         : t("hub.offline", { reason: status.replace(/^offline: /, "") });
   return (
     <div className="connection" title={info?.home}>
-      <span className={`dot ${color} ${status === "connecting" ? "pulse" : ""}`} />
+      <span className={`dot ${color} ${status === "connecting" ? "pulse" : ""}`} role="img" aria-label={text} title={text} />
       <span className="text" title={text}>
         {text}
       </span>

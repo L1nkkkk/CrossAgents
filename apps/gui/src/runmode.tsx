@@ -33,8 +33,8 @@ export function modeWords(run: Pick<Run, "mode" | "in_place">): { label: string;
     };
   }
   return {
-    label: "worktree",
-    title: "worktree：主导在 hub 建的集成工作区里改，每轮一个分支，落地时合进基线；跑完工作区保留，下一轮在同一个工作区接着干。",
+    label: "独立工作区",
+    title: "独立工作区（git worktree）：主导在 hub 建的集成工作区里改，每轮一个分支，落地时合进基线；跑完工作区保留，下一轮在同一个工作区接着干。",
   };
 }
 

@@ -15,6 +15,7 @@ import { ExtensionBoundary, safeElement, type ExtensionFailureHandlers } from ".
 import type { PageRegistration, SettingsRegistration } from "../host";
 import {
   accessText,
+  explainError,
   approveBlockedReason,
   approveFingerprint,
   badges,
@@ -34,6 +35,12 @@ import {
 } from "./model.ts";
 
 const html = htm.bind(createElement);
+
+/** An error with its Chinese lead first and the original kept, faint, after it. */
+function errorLine(message: string) {
+  const e = explainError(message);
+  return e.raw ? html`${e.text}<span className="ext-error-raw">原文：${e.raw}</span>` : e.text;
+}
 
 /** How an extension's block reports a throw; the page builds these (Host.tsx, ui.tsx). */
 export type HandlersFor = (extension: string, label?: string) => ExtensionFailureHandlers;
@@ -65,7 +72,7 @@ export function VersionCard({ version }: { version: ExtensionVersion }) {
         <dd>api ${facts.api}</dd>
       </div>
       <div>
-        <dt>access</dt>
+        <dt>权限</dt>
         <dd>
           <span className=${`chip small ${version.access === "write" ? "warn" : ""}`}>${access.label}</span>
           <span className="muted small"> ${access.detail}</span>
@@ -193,7 +200,7 @@ export function ApprovalPanel({
     <${VersionCard} version=${version} />
     ${diff?.access_changed
       ? html`<div className="ext-access-change" role="note">
-          <strong>access 变了：</strong>
+          <strong>权限变了：</strong>
           ${info.current ? `${accessText(info.current.access).label} → ` : ""}${accessText(version.access).label}。${accessText(version.access).detail}
         </div>`
       : null}
@@ -217,7 +224,7 @@ export function ApprovalPanel({
                       </li>`,
                     )}
                   </ul>`
-                : html`<p className="muted small">文件内容没有变（可能只改了 access 或说明）。</p>`}
+                : html`<p className="muted small">文件内容没有变（可能只改了权限或说明）。</p>`}
               ${diff.diff ? html`<pre className="ext-diff-text">${diff.diff}</pre>` : null}
               ${diff.truncated ? html`<p className="muted small">差异太长，hub 只给到这里；上面的文件清单还是完整的。</p>` : null}
             </div>`}
@@ -319,9 +326,9 @@ export function ExtensionRow({
       <div className="ext-row-meta small muted">
         ${info.current ? `正在运行 ${shortFingerprint(info.current.fingerprint)}` : "没有批准过任何版本"}${pending
           ? ` · 待批准 ${shortFingerprint(pending.version.fingerprint)}`
-          : ""}${access ? ` · access ${accessText(access).label}` : ""}
+          : ""}${access ? ` · 权限：${accessText(access).label}` : ""}
       </div>
-      ${info.error ? html`<div className="ext-row-error small" role="alert">${info.error}</div>` : null}
+      ${info.error ? html`<div className="ext-row-error small" role="alert">${errorLine(info.error)}</div>` : null}
     </div>
     <div className="ext-row-actions">
       <a className="ext-link" href=${`#/extensions/${encodeURIComponent(info.name)}`} data-action="review">
