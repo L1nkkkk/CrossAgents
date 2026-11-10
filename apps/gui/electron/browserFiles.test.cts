@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createFileRegistry, isWithin, mimeFor } from "./browserFiles.cjs";
+import { ROOTS_LIMIT, createFileRegistry, decodeRoots, encodeRoots, isWithin, mimeFor, rootIdOf, type RootEntry } from "./browserFiles.cjs";
 
 const posixReg = () => createFileRegistry("linux");
 
@@ -68,4 +68,60 @@ test("a served file's type follows its extension", () => {
   assert.equal(mimeFor("/x.d/logo"), "application/octet-stream");
   assert.equal(mimeFor("C:\\x.d\\logo.webp"), "image/webp");
   assert.equal(mimeFor("/x/data.bin"), "application/octet-stream");
+});
+
+test("saved folders read back only when their id matches and the folder still exists", () => {
+  const site = "/home/u/site";
+  const other = "/home/u/other";
+  const entries: RootEntry[] = [
+    [rootIdOf("linux", site), site],
+    [rootIdOf("linux", other), other],
+  ];
+  const text = encodeRoots(entries);
+  // Both folders are restored, in the order they were saved.
+  assert.deepEqual(decodeRoots("linux", text, () => true), entries);
+  // A folder that is gone is dropped.
+  assert.deepEqual(decodeRoots("linux", text, (dir) => dir !== other), [entries[0]]);
+  // An id that is not the hash of its folder is dropped.
+  const forged = JSON.stringify({ version: 1, roots: [{ id: "0".repeat(32), dir: site }] });
+  assert.deepEqual(decodeRoots("linux", forged, () => true), []);
+  // A relative folder, or junk, is dropped; no file means nothing restored.
+  assert.deepEqual(decodeRoots("linux", JSON.stringify({ roots: [{ id: rootIdOf("linux", "site"), dir: "site" }] }), () => true), []);
+  assert.deepEqual(decodeRoots("linux", "{not json", () => true), []);
+  assert.deepEqual(decodeRoots("linux", JSON.stringify({ roots: "x" }), () => true), []);
+  assert.deepEqual(decodeRoots("linux", null, () => true), []);
+});
+
+test("saved folders are capped at the newest 200, the oldest go first", () => {
+  const many: RootEntry[] = Array.from({ length: ROOTS_LIMIT + 5 }, (_, i) => {
+    const dir = `/home/u/site${i}`;
+    return [rootIdOf("linux", dir), dir];
+  });
+  const kept = decodeRoots("linux", encodeRoots(many), () => true);
+  assert.equal(kept.length, ROOTS_LIMIT);
+  assert.deepEqual(kept[0], many[5]);
+  assert.deepEqual(kept[ROOTS_LIMIT - 1], many[ROOTS_LIMIT + 4]);
+});
+
+test("a restored registry serves the files of its folders again", () => {
+  const dir = "/home/u/site";
+  const saved = encodeRoots([[rootIdOf("linux", dir), dir]]);
+  const reg = createFileRegistry("linux", decodeRoots("linux", saved, () => true));
+  const root = rootIdOf("linux", dir);
+  assert.equal(reg.resolve(`crossagents-file://${root}/css/a.css`).path, "/home/u/site/css/a.css");
+});
+
+test("the registry reports its folders after each registration and drops the oldest past the cap", () => {
+  const seen: RootEntry[][] = [];
+  const reg = createFileRegistry("linux", [], (entries) => seen.push(entries));
+  reg.register("/home/u/site/index.html");
+  reg.register("/home/u/other/a.html");
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[1].map(([, dir]) => dir), ["/home/u/site", "/home/u/other"]);
+
+  const capped = createFileRegistry("linux", []);
+  for (let i = 0; i < ROOTS_LIMIT + 3; i++) capped.register(`/home/u/d${i}/a.html`);
+  // The first folders are no longer registered; the newest still are.
+  assert.throws(() => capped.resolve(`crossagents-file://${rootIdOf("linux", "/home/u/d0")}/a.html`), /没有登记/);
+  assert.equal(capped.resolve(`crossagents-file://${rootIdOf("linux", `/home/u/d${ROOTS_LIMIT + 2}`)}/a.html`).root, `/home/u/d${ROOTS_LIMIT + 2}`);
 });

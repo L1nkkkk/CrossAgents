@@ -5,14 +5,14 @@
 // browserPolicy.cts, browserFiles.cts and browserCdp.cts.
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { copyFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { BrowserWindow, dialog, ipcMain, net, session, webContents, type DownloadItem, type IpcMainInvokeEvent, type Session, type WebContents, type WebPreferences } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, session, webContents, type DownloadItem, type IpcMainInvokeEvent, type Session, type WebContents, type WebPreferences } from "electron";
 import { BrowserTab } from "./browserDriver.cjs";
-import { createFileRegistry, isWithin, mimeFor } from "./browserFiles.cjs";
+import { createFileRegistry, decodeRoots, encodeRoots, isWithin, mimeFor, type FileRegistry } from "./browserFiles.cjs";
 import {
   BROWSER_PARTITION,
   FILE_SCHEME,
@@ -27,7 +27,38 @@ import {
 export const OPEN_TAB_CHANNEL = "browser:open-tab";
 
 const browserSession = (): Session => session.fromPartition(BROWSER_PARTITION);
-const fileRoots = createFileRegistry(process.platform);
+/** Where the registered local-file folders are saved, so a restored file tab still reads them. */
+const ROOTS_FILE = "browser-file-roots.json";
+let rootsLog: (line: string) => void = () => undefined;
+let fileRootsRegistry: FileRegistry | null = null;
+
+/** The folder registry, restored from userData on first use (after Electron is up). */
+function fileRoots(): FileRegistry {
+  if (fileRootsRegistry) return fileRootsRegistry;
+  const file = join(app.getPath("userData"), ROOTS_FILE);
+  let saved: string | null = null;
+  try {
+    saved = readFileSync(file, "utf8");
+  } catch {
+    saved = null;
+  }
+  const isFolder = (dir: string) => {
+    try {
+      return existsSync(dir) && statSync(dir).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  const restored = decodeRoots(process.platform, saved, isFolder);
+  fileRootsRegistry = createFileRegistry(process.platform, restored, (entries) => {
+    try {
+      writeFileSync(file, encodeRoots(entries));
+    } catch (err) {
+      rootsLog(`browser file roots: ${errorText(err)}`);
+    }
+  });
+  return fileRootsRegistry;
+}
 const tabs = new Map<number, BrowserTab>();
 
 function errorText(err: unknown): string {
@@ -80,7 +111,7 @@ async function serveFile(request: Request, log: (line: string) => void): Promise
   if (request.method !== "GET" && request.method !== "HEAD") return deny(405);
   let resolved: { root: string; path: string };
   try {
-    resolved = fileRoots.resolve(request.url);
+    resolved = fileRoots().resolve(request.url);
   } catch {
     return deny(403);
   }
@@ -147,6 +178,7 @@ function handleDownload(item: DownloadItem, contents: WebContents | null, log: (
  * ready.
  */
 export function setupBrowserSession(log: (line: string) => void): void {
+  rootsLog = log;
   const ses = browserSession();
   const proxy = browserProxy(process.env);
   const proxying = proxy
@@ -213,6 +245,6 @@ export function registerBrowserIpc(fromApp: (event: IpcMainInvokeEvent) => boole
   handle("browser:file-url", async (_event, absPath) => {
     if (typeof absPath !== "string" || !absPath) throw new Error("没有文件路径");
     if (!(await stat(absPath)).isFile()) throw new Error("不是一个文件");
-    return fileRoots.register(absPath);
+    return fileRoots().register(absPath);
   });
 }
