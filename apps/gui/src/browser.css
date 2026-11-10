@@ -1,0 +1,52 @@
+/* A browser tab (browser.tsx): the address bar and the page's own controls over the page, then
+   the page itself — a <webview> in CrossAgents, a drawn stand-in in the mock preview. */
+
+.web-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--surface); }
+.web-bar {
+  flex: none; display: flex; align-items: center; gap: 4px; padding: 5px 8px;
+  border-bottom: 1px solid var(--border); color: var(--text-2);
+}
+.web-bar > .icon { flex: none; color: var(--muted); }
+.web-bar .ghost.icon:disabled { opacity: 0.4; cursor: default; }
+.web-url {
+  flex: 1; min-width: 0; font: inherit; font-size: 12.5px; padding: 4px 9px;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--surface-sunk); color: var(--text);
+}
+.web-url:focus { outline: none; border-color: var(--border-strong); background: var(--surface); }
+.web-loading { flex: none; padding-right: 4px; white-space: nowrap; }
+
+/* Who is operating the tab: an agent's tool, or the person who took it over. */
+.web-control {
+  flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 4px 8px 4px 12px; font-size: 12.5px; color: var(--text-2);
+  border-bottom: 1px solid var(--border); background: var(--accent-bg);
+}
+.web-control strong { color: var(--text); font-weight: 600; }
+.web-control.human { background: var(--surface-sunk); }
+
+.web-problem {
+  flex: none; margin: 0; padding: 6px 12px; font-size: 12.5px; color: var(--warn-text);
+  border-bottom: 1px solid var(--border);
+}
+
+.web-box { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--surface); }
+/* Electron's webview: it has to be told how big it is. */
+.web-box webview { flex: 1; display: inline-flex; width: 100%; height: 100%; min-height: 0; border: none; }
+/* A tab's page waiting for a dock: off screen at a real size, not hidden — `display: none` would
+   stop it loading, and an agent's tools could not reach it. */
+#web-vault {
+  position: fixed; left: -20000px; top: 0; width: 1280px; height: 800px;
+  pointer-events: none; overflow: hidden;
+}
+#web-vault webview { display: flex; width: 100%; height: 100%; border: none; }
+
+/* The mock preview's page: no <webview> exists there, so the scenario draws the page. */
+.web-mock { flex: 1; min-height: 0; overflow: auto; padding: 18px 16px; background: var(--surface-sunk); }
+.web-mock-page {
+  max-width: 560px; margin: 0 auto; padding: 22px 24px; border-radius: var(--radius-lg);
+  background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-float);
+}
+.web-mock-page h1 { margin: 0 0 4px; font-size: 20px; line-height: 1.3; }
+.web-mock-url { margin: 0 0 14px; color: var(--muted); word-break: break-all; }
+.web-mock-page ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 7px; line-height: 1.55; }
+.web-mock-note { margin: 14px auto 0; max-width: 560px; text-align: center; }

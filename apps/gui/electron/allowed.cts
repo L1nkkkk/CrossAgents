@@ -20,6 +20,9 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "POST", path: /^\/v1\/terminals$/, level: "admin" },
   { method: "DELETE", path: /^\/v1\/terminals\/[^/]+$/, level: "admin" },
   { method: "POST", path: /^\/v1\/terminals\/[^/]+\/(input|resize|takeover)$/, level: "admin" },
+  // The built-in browser's half of an agent's tool call (run note browser/contract §2): this
+  // window claims the request, runs it in one of its tabs, and posts what the tool answered.
+  { method: "POST", path: /^\/v1\/browser\/requests\/[^/]+\/(claim|result)$/, level: "write" },
   { method: "GET", path: /^\/v1\/agents$/, level: "read" },
   { method: "POST", path: /^\/v1\/agents$/, level: "write" },
   // `?repo=` rides along; `route()` drops it before matching.

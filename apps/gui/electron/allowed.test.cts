@@ -87,6 +87,15 @@ test("the S1 endpoints pass, query strings included", () => {
   assert.ok(allowed("GET", "/v1/agents/Rex/resume-command"));
 });
 
+test("the built-in browser claims and answers an agent's call, and nothing wider", () => {
+  assert.ok(allowed("POST", "/v1/browser/requests/abc/claim"));
+  assert.ok(allowed("POST", "/v1/browser/requests/abc/result"));
+  assert.ok(!allowed("GET", "/v1/browser/requests/abc/claim"));
+  assert.ok(!allowed("POST", "/v1/browser/requests"));
+  assert.ok(!allowed("POST", "/v1/browser/requests/abc"));
+  assert.ok(!allowed("POST", "/v1/browser/requests/abc/claim/extra"));
+});
+
 test("the files and graph endpoints pass for every scope", () => {
   assert.ok(allowed("GET", "/v1/agents/Rex/files/tree?path=src&all=true"));
   assert.ok(allowed("GET", "/v1/runs/r1/files/content?path=a.rs"));

@@ -10,7 +10,8 @@
 //   the same everywhere; what a tab shows follows the focused conversation: the routed one, or
 //   the one beside it once it was clicked last. Something opened on purpose (a turn's "查看变更",
 //   a task card's turn) is `target` until the focus moves to another conversation. Terminals
-//   (terminal.tsx) are tabs too, with their own project instead.
+//   (terminal.tsx) are tabs too, with their own project instead; so are the built-in browser's
+//   pages (browser.tsx), each `web:<id>` remembering its url in this same saved layout.
 //
 // 事件流 (raw hub events) is for debugging, so only a development page or the mock preview offers
 // it, and a saved layout that still names it loses just that tab.
@@ -22,12 +23,16 @@ import { extensionOfTab, filterDockTabs, isExtTab, type ExtTab } from "./extensi
 export type PaneKind = "changes" | "files" | "task" | "activity" | "events" | "graph" | "background";
 /** A terminal's tab, by its id in the hub. */
 export type TermTab = `term:${string}`;
+/** A built-in browser tab (browser.tsx): its page is the `<id>`, the tab is `web:<id>`. */
+export type WebTab = `web:${string}`;
 /** A tab an extension registered (docs/EXTENSIONS.md §5): `ext:<name>/<id>`. */
 export type { ExtTab };
 export { isExtTab };
-export type TabId = PaneKind | TermTab | ExtTab;
+export type TabId = PaneKind | TermTab | WebTab | ExtTab;
 export const isTermTab = (tab: TabId): tab is TermTab => tab.startsWith("term:");
 export const termTab = (id: string): TermTab => `term:${id}`;
+export const isWebTab = (tab: TabId): tab is WebTab => tab.startsWith("web:");
+export const webTab = (id: string): WebTab => `web:${id}`;
 export type DockTarget = DockId;
 const LABELS: Record<PaneKind, string> = { changes: "改动", files: "文件", task: "任务", activity: "活动", events: "事件流", graph: "提交图", background: "后台" };
 /** Raw hub events: shown by the dev server and `preview:mock`, not by a packaged build. */
@@ -40,7 +45,7 @@ export const PANE_KINDS: { kind: PaneKind; label: string }[] = (Object.keys(LABE
 /** What a pane was opened for: an agent's turn (and file), or a task. */
 export type Target = { agent?: string; turn?: string; file?: string; run?: string; task?: string };
 
-type Panes = { beside: string | null; ratio: number; docks: Docks<TabId> };
+type Panes = { beside: string | null; ratio: number; docks: Docks<TabId>; web: Record<string, string> };
 
 const KEY = "crossagents.panes";
 const clamp = (r: number) => Math.min(0.75, Math.max(0.25, r));
@@ -48,8 +53,9 @@ const clamp = (r: number) => Math.min(0.75, Math.max(0.25, r));
 const isKind = (k: unknown): k is PaneKind => typeof k === "string" && k in LABELS;
 /** Whether this build offers `kind` (事件流 only where debugging is on). */
 export const offered = (k: PaneKind) => PANE_KINDS.some((p) => p.kind === k);
-/** Whether a saved layout may name `k`: a built-in pane, a terminal, or an extension tab. */
-export const isTab = (k: unknown): k is TabId => (typeof k === "string" && k.startsWith("term:")) || isExtTab(k) || (isKind(k) && offered(k));
+/** Whether a saved layout may name `k`: a built-in pane, a terminal, a browser page, or an extension tab. */
+export const isTab = (k: unknown): k is TabId =>
+  (typeof k === "string" && (k.startsWith("term:") || k.startsWith("web:"))) || isExtTab(k) || (isKind(k) && offered(k));
 /** Whether this build offers `kind` in its menu. */
 export const isPaneKind = isKind;
 /** What an extension tab is called, until (or unless) its extension registers it again. */
@@ -75,14 +81,26 @@ let peek = false;
 const sessionTargets = new Map<string, Target | null>();
 let view: { state: Panes; focus: string | null; target: Target | null; floatTab: TabId | null; peek: boolean } = { state, focus, target, floatTab, peek };
 
+/** The urls of the browser tabs a saved layout names, by tab; bad entries are dropped. */
+function readWeb(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (raw && typeof raw === "object") {
+    for (const [tab, url] of Object.entries(raw as Record<string, unknown>)) {
+      if (tab.startsWith("web:") && typeof url === "string" && url) out[tab] = url;
+    }
+  }
+  return out;
+}
+
 function load(): Panes {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) ?? "null");
-    if (saved && typeof saved.ratio === "number") return { beside: saved.beside ?? null, ratio: clamp(saved.ratio), docks: restoreDocks(saved, isTab, FRESH) };
+    if (saved && typeof saved.ratio === "number")
+      return { beside: saved.beside ?? null, ratio: clamp(saved.ratio), docks: restoreDocks(saved, isTab, FRESH), web: readWeb(saved.web) };
   } catch {
     // Fall through to the default.
   }
-  return { beside: null, ratio: 0.5, docks: restoreDocks(null, isTab, FRESH) };
+  return { beside: null, ratio: 0.5, docks: restoreDocks(null, isTab, FRESH), web: {} };
 }
 
 function changed() {
@@ -260,7 +278,31 @@ export function pickTab(dock: DockId, tab: TabId) {
   setDocks({ ...state.docks, [dock]: { ...state.docks[dock], active: tab } });
 }
 
+/**
+ * Unfolds the dock `tab` is in and shows it there, so a tab opened from outside (an agent's
+ * browser_open) is on screen rather than only built. A tab in no dock is left alone.
+ */
+export function showDockOf(tab: TabId) {
+  const dock = dockOf(state.docks, tab);
+  if (!dock) return;
+  const current = state.docks[dock];
+  if (!current.tabs.includes(tab) || (current.open && current.active === tab)) return;
+  setDocks({ ...state.docks, [dock]: { ...current, active: tab, open: true } });
+}
+
 export const dropTab = (tab: TabId, dock: DockId, index?: number) => setDocks(moveTab(state.docks, tab, dock, index));
+
+/**
+ * Where a browser tab's page was, kept with the layout (crossagents.panes) so the tabs come
+ * back at the same pages after a reload.
+ */
+export const webUrl = (tab: WebTab) => state.web[tab];
+
+/** Remembers where `tab` went; the page calls this on every navigation. */
+export function rememberWebUrl(tab: WebTab, url: string) {
+  if (state.web[tab] === url) return;
+  set({ ...state, web: { ...state.web, [tab]: url } });
+}
 
 export function shutTab(tab: TabId) {
   if (isExtTab(tab)) {
@@ -268,11 +310,18 @@ export function shutTab(tab: TabId) {
     saveOffered();
   }
   if (floatTab === tab) floatTab = null;
-  setDocks(closeTab(state.docks, tab));
+  if (!isWebTab(tab)) return setDocks(closeTab(state.docks, tab));
+  // A browser page goes with its tab: a reload does not bring back one that was closed.
+  const web = { ...state.web };
+  delete web[tab];
+  set({ ...state, docks: closeTab(state.docks, tab), web });
 }
 
 /** Kinds with no tab now, for a dock's + menu. */
 export const closedKinds = (docks: Docks<TabId>) => PANE_KINDS.filter((p) => !dockOf(docks, p.kind));
+
+/** The docks as they stand, for code outside React (a new browser tab's home dock). */
+export const docksNow = (): Docks<TabId> => state.docks;
 
 const subscribe = (l: () => void) => {
   listeners.add(l);

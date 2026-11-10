@@ -161,8 +161,15 @@ pub fn crossagents_bin() -> std::path::PathBuf {
     static BUILT: std::sync::Once = std::sync::Once::new();
     let path = std::path::Path::new(MOCK_AGENT)
         .with_file_name(format!("crossagents{}", std::env::consts::EXE_SUFFIX));
-    // Always build: a stale binary would serve outdated tools. Cheap when up to date.
+    // A stale binary would serve outdated tools, but a fresh one is not worth building
+    // again: `cargo build -p crossagents-cli` resolves features for that package alone,
+    // while `cargo test --workspace` resolves them for the whole workspace, so each one
+    // rebuilds what the other made — about a minute each way on Windows, inside a suite
+    // whose check has 600 s for all of it. What the test build just made is what we want.
     BUILT.call_once(|| {
+        if built_with_sources(&path) {
+            return;
+        }
         let status = std::process::Command::new(env!("CARGO"))
             .args(["build", "-q", "-p", "crossagents-cli"])
             .status()
@@ -170,6 +177,46 @@ pub fn crossagents_bin() -> std::path::PathBuf {
         assert!(status.success(), "cannot build crossagents");
     });
     path
+}
+
+/// `bin` is at least as new as every `.rs` and `Cargo.toml` under `crates/` (and the
+/// workspace's manifests), so a build would change nothing.
+fn built_with_sources(bin: &std::path::Path) -> bool {
+    let Ok(bin_time) = std::fs::metadata(bin).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let newer = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .is_ok_and(|time| time > bin_time)
+    };
+    if newer(&root.join("Cargo.toml")) || newer(&root.join("Cargo.lock")) {
+        return false;
+    }
+    let mut dirs = vec![root.join("crates")];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                // Test sources do not go into the binary.
+                if entry.file_name() != "tests" {
+                    dirs.push(path);
+                }
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext == "rs" || ext == "toml")
+                && newer(&path)
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// A git repository with one commit.

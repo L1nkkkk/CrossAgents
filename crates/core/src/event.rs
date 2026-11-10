@@ -682,6 +682,35 @@ pub enum EventKind {
         #[cfg_attr(feature = "ts", ts(optional))]
         error: Option<String>,
     },
+    /// An agent asked the built-in browser for something (docs/BROWSER.md): the GUI claims
+    /// the request, does it in a tab and answers it on
+    /// `POST /v1/browser/requests/{id}/result`.
+    #[serde(rename = "browser.request")]
+    BrowserRequest {
+        /// The request id the claim and result routes name.
+        id: String,
+        /// The tool, e.g. `browser_snapshot`.
+        tool: String,
+        /// The tool's input, as the agent passed it.
+        input: serde_json::Value,
+        agent: BrowserAgent,
+    },
+    /// A browser request ended, answered or not (a timeout answers nothing). The answer
+    /// itself is not carried: only the call that waited for it has it.
+    #[serde(rename = "browser.request_done")]
+    BrowserRequestDone {
+        id: String,
+        /// `false` for a failure, and for a request nobody claimed in time.
+        ok: bool,
+    },
+}
+
+/// Who asked for a browser request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct BrowserAgent {
+    pub id: AgentId,
+    pub name: String,
 }
 
 /// A message on its way to an agent. The id is fixed before delivery, so a sender can
@@ -870,6 +899,8 @@ impl EventKind {
             Self::PluginChanged { .. } => "plugin.changed",
             Self::ExtensionChanged { .. } => "extension.changed",
             Self::ExtensionCallFinished { .. } => "extension.call.finished",
+            Self::BrowserRequest { .. } => "browser.request",
+            Self::BrowserRequestDone { .. } => "browser.request_done",
         }
     }
 
@@ -935,7 +966,10 @@ impl EventKind {
             | Self::LessonUpdated { .. }
             // The caller is in the call record, not here: an extension's panel calls its
             // tools as the person, with no agent to attribute them to.
-            | Self::ExtensionCallFinished { .. } => None,
+            | Self::ExtensionCallFinished { .. }
+            // The agent that asked is in the payload (`agent`): the GUI is the audience.
+            | Self::BrowserRequest { .. }
+            | Self::BrowserRequestDone { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::TaskReviewer { reviewer, .. } => Some(*reviewer),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),

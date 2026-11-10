@@ -23,6 +23,7 @@ import {
   FileDiff,
   Folder,
   GitBranch,
+  Globe,
   Info,
   ListChecks,
   Menu,
@@ -36,6 +37,7 @@ import {
   Pin,
   Plus,
   Rocket,
+  RotateCw,
   Search,
   Settings,
   SlidersHorizontal,
@@ -571,6 +573,8 @@ const ICONS = {
   attach: Paperclip,
   device: Monitor,
   connection: Network,
+  globe: Globe,
+  reload: RotateCw,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof ICONS;

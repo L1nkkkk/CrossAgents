@@ -539,6 +539,14 @@ export const api = {
   resizeTerminal: (id: string, req: TerminalResizeRequest) => request<void>("POST", `/v1/terminals/${enc(id)}/resize`, req),
   takeoverTerminal: (id: string, req: TerminalTakeoverRequest) => request<void>("POST", `/v1/terminals/${enc(id)}/takeover`, req),
 
+  /**
+   * Claims an agent's browser tool call so this window runs it (run note browser/contract §2);
+   * 409 when another window got there first. The page then posts what the tool answered.
+   */
+  browserClaim: (id: string) => request<{ ok: boolean }>("POST", `/v1/browser/requests/${enc(id)}/claim`, {}),
+  browserResult: (id: string, result: { ok: boolean; output?: unknown; error?: string }) =>
+    request<void>("POST", `/v1/browser/requests/${enc(id)}/result`, result),
+
   quota: () => request<QuotaResponse>("GET", "/v1/quota"),
   /** Every device the hub has issued, revoked ones included; no tokens or hashes (docs/API-AUTH.md §2.2). */
   listDevices: () => request<ListDevicesResponse>("GET", "/v1/devices"),

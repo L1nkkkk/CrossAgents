@@ -68,7 +68,32 @@ export type TailscaleStatus = {
   peers: TailscalePeer[];
 };
 
+/** A console entry a browser tab logged (electron/browserCdp.cts). */
+export type BrowserConsoleEntry = { level: string; text: string; ts: number };
+
+/**
+ * The built-in browser's tabs (run note browser/contract §3), as `window.crossagents.browser`
+ * exposes them (electron/preload.cts). Every call names the tab by its webContents id
+ * (`webview.getWebContentsId()`), which only the page that owns the tab can ask about.
+ */
+export type BrowserBridge = {
+  /** The page's accessibility tree, each interactive element carrying `[ref=N]`, and its url and title. */
+  snapshot(wcId: number): Promise<{ text: string; url: string; title: string }>;
+  click(wcId: number, ref: number): Promise<{ ok: true }>;
+  type(wcId: number, ref: number, text: string, submit?: boolean): Promise<{ ok: true }>;
+  press(wcId: number, key: string): Promise<{ ok: true }>;
+  scroll(wcId: number, dy: number): Promise<{ ok: true }>;
+  screenshot(wcId: number): Promise<{ base64: string; mime: "image/png" }>;
+  console(wcId: number): Promise<BrowserConsoleEntry[]>;
+  /** A local file's `crossagents-file://` url; the main process lets the tab read that file's folder. */
+  fileUrl(absPath: string): Promise<string>;
+  /** The url of a new tab the page asked for (a `window.open` or `target=_blank` in a tab). */
+  onOpenTab(listener: (url: string) => void): () => void;
+};
+
 export interface CrossAgentsBridge {
+  /** The built-in browser (<webview> tabs); absent where the page has no tab of its own. */
+  browser?: BrowserBridge;
   /**
    * Which hub the GUI talks to (electron/remoteController.cts). Switching mode, pairing anew or
    * forgetting while remote reloads the window. Electron only.

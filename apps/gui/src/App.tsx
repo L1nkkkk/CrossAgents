@@ -8,6 +8,7 @@ import { shownTab } from "./lib/docks";
 import { FileViewerHost } from "./FileViewer";
 import { TabDragLayer } from "./tabs";
 import { TerminalHydrate, TerminalProblem, TerminalScope, toggleTerminal, useTabShows } from "./terminal";
+import { BrowserHost } from "./browser";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
@@ -366,6 +367,7 @@ export function App() {
       <FileViewerHost />
       <TabDragLayer />
       <TerminalHydrate />
+      <BrowserHost />
       {tools && <TerminalScope follow={tools.follow} run={tools.run} />}
       <TerminalProblem />
     </div>
