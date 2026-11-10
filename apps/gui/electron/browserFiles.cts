@@ -19,6 +19,12 @@ export function isWithin(platform: NodeJS.Platform, root: string, target: string
   return rel !== "" && rel !== ".." && !rel.startsWith(`..${api.sep}`) && !api.isAbsolute(rel);
 }
 
+/** How many registered folders are kept (and saved); the oldest go first. */
+export const ROOTS_LIMIT = 200;
+
+/** A registered folder: its id (see `rootIdOf`) and its absolute path. */
+export type RootEntry = [id: string, dir: string];
+
 export type FileRegistry = {
   /** Registers the folder of `absPath` as readable and returns the URL of that file. */
   register(absPath: string): string;
@@ -26,14 +32,60 @@ export type FileRegistry = {
   resolve(url: string): { root: string; path: string };
 };
 
+/** The URL root of a folder: a hash of the folder (case-folded on Windows). */
+export function rootIdOf(platform: NodeJS.Platform, dir: string): string {
+  const fold = platform === "win32" ? dir.toLowerCase() : dir;
+  return createHash("sha256").update(fold).digest("hex").slice(0, 32);
+}
+
+/** The saved form of the registry: JSON, the newest `ROOTS_LIMIT` folders, oldest first. */
+export function encodeRoots(entries: readonly RootEntry[]): string {
+  const kept = entries.slice(-ROOTS_LIMIT).map(([id, dir]) => ({ id, dir }));
+  return `${JSON.stringify({ version: 1, roots: kept }, null, 2)}\n`;
+}
+
 /**
- * Folders registered by `register`, keyed by a hash of the folder (case-folded on Windows), so
- * the same folder always gives the same URL root.
+ * Reads the saved form back. `text` is null when there is no file. An entry is kept only when its
+ * id matches its folder and `isFolder` says the folder still exists; anything else is dropped.
+ * Oldest first, at most `ROOTS_LIMIT`.
  */
-export function createFileRegistry(platform: NodeJS.Platform): FileRegistry {
+export function decodeRoots(platform: NodeJS.Platform, text: string | null, isFolder: (dir: string) => boolean): RootEntry[] {
+  if (text === null) return [];
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const list = (data as { roots?: unknown } | null)?.roots;
+  if (!Array.isArray(list)) return [];
   const api = apiFor(platform);
-  const roots = new Map<string, string>();
-  const fold = (p: string) => (platform === "win32" ? p.toLowerCase() : p);
+  // A Map keeps one position per id: a repeated entry moves to the newest place.
+  const kept = new Map<string, string>();
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const { id, dir } = item as { id?: unknown; dir?: unknown };
+    if (typeof id !== "string" || typeof dir !== "string") continue;
+    if (!api.isAbsolute(dir) || rootIdOf(platform, dir) !== id || !isFolder(dir)) continue;
+    kept.delete(id);
+    kept.set(id, dir);
+  }
+  return Array.from(kept.entries()).slice(-ROOTS_LIMIT);
+}
+
+/**
+ * Folders registered by `register`, keyed by `rootIdOf`, so the same folder always gives the same
+ * URL root. `initial` restores saved folders (oldest first); `onChange` gets the whole list after
+ * every registration, so it can be saved.
+ */
+export function createFileRegistry(
+  platform: NodeJS.Platform,
+  initial: readonly RootEntry[] = [],
+  onChange?: (entries: RootEntry[]) => void,
+): FileRegistry {
+  const api = apiFor(platform);
+  const roots = new Map<string, string>(initial);
+  const entries = (): RootEntry[] => Array.from(roots.entries());
   return {
     register(absPath: string): string {
       if (!api.isAbsolute(absPath)) throw new Error("文件路径必须是绝对路径");
@@ -41,8 +93,13 @@ export function createFileRegistry(platform: NodeJS.Platform): FileRegistry {
       const dir = api.dirname(file);
       const base = api.basename(file);
       if (!base || base === "." || base === "..") throw new Error("不是一个文件");
-      const id = createHash("sha256").update(fold(dir)).digest("hex").slice(0, 32);
-      if (!roots.has(id)) roots.set(id, dir);
+      const id = rootIdOf(platform, dir);
+      // Re-registering moves the folder to the newest place, so the oldest are the ones not used lately.
+      const known = roots.get(id) ?? dir;
+      roots.delete(id);
+      roots.set(id, known);
+      while (roots.size > ROOTS_LIMIT) roots.delete(roots.keys().next().value as string);
+      onChange?.(entries());
       return `${FILE_SCHEME}://${id}/${encodeURIComponent(base)}`;
     },
     resolve(url: string): { root: string; path: string } {
