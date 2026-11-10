@@ -483,8 +483,18 @@ pub struct Runtime {
 /// Messages to an agent's event forwarder, kept in order with the session's own events.
 enum Control {
     TurnStarted(MessageId),
-    /// The turn's outcome, and what it changed when the hub works that out itself.
-    TurnFinished(MessageId, Result<StopReason, String>, Option<String>),
+    /// The turn's outcome, and what it changed when the hub works that out itself; the
+    /// forwarder has published all of it once it answers.
+    ///
+    /// The next turn waits for that answer: its prompt may already be on its way to the
+    /// session, and the forwarder must not still be reading the last turn's output then
+    /// (it would file it under the new turn).
+    TurnFinished(
+        MessageId,
+        Result<StopReason, String>,
+        Option<String>,
+        tokio::sync::oneshot::Sender<()>,
+    ),
     /// The session's context was compacted (`Runtime::compact`): stream rules may repeat.
     Compacted,
     Stopped,
@@ -3156,10 +3166,7 @@ async fn run_turns(
             .settle(store.as_ref(), message_id, ended)
             .await;
         inbox.finish_turn();
-        if control
-            .send(Control::TurnFinished(message_id, result, None))
-            .is_err()
-        {
+        if !report_turn(&control, message_id, result, None).await {
             return;
         }
     }
@@ -3188,13 +3195,31 @@ async fn run_turns(
         let ended = matches!(&result, Ok(StopReason::EndTurn));
         notices.settle(store.as_ref(), message_id, ended).await;
         inbox.finish_turn();
-        if control
-            .send(Control::TurnFinished(message_id, result, diff))
-            .is_err()
-        {
+        if !report_turn(&control, message_id, result, diff).await {
             return;
         }
     }
+}
+
+/// Hands a finished turn to the forwarder and waits until it has published it; `false`
+/// when the forwarder is gone (so is the session).
+///
+/// The next prompt must not reach the session before this: the forwarder would still be
+/// reading the last turn's output, and the transcript would file it under the new turn.
+async fn report_turn(
+    control: &mpsc::UnboundedSender<Control>,
+    message_id: MessageId,
+    result: Result<StopReason, String>,
+    diff: Option<String>,
+) -> bool {
+    let (done, published) = tokio::sync::oneshot::channel();
+    if control
+        .send(Control::TurnFinished(message_id, result, diff, done))
+        .is_err()
+    {
+        return false;
+    }
+    published.await.is_ok()
 }
 
 /// The next inbox message, marking its notice versions in flight in the same critical
@@ -3300,7 +3325,9 @@ async fn forward_events(
     let mut turn_error: Option<String> = None;
     loop {
         tokio::select! {
-            event = events.recv(), if events_open => match event {
+            // Not while a control waits: the prompt of a turn being announced may already
+            // be out, and its output must be read after the announcement, not before.
+            event = events.recv(), if events_open && control.is_empty() => match event {
                 Some(event) => {
                     if let SessionEventKind::Error { message } | SessionEventKind::Exited { message, .. } = &event.kind && unavailable_model_error(message) { turn_error = Some(message.clone()); }
                     let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
@@ -3315,16 +3342,21 @@ async fn forward_events(
                 None => events_open = false,
             },
             ctl = control.recv() => {
-                // Everything the session emitted before this point is already queued.
-                while let Ok(event) = events.try_recv() {
-                    if let SessionEventKind::Error { message } | SessionEventKind::Exited { message, .. } = &event.kind && unavailable_model_error(message) { turn_error = Some(message.clone()); }
-                    let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
-                    if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
-                        if let Some(message_id) = running.take() {
-                            learn_model_result(&bus, turn_agent.as_ref(), reason, turn_error.as_deref()).await;
-                            publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: reason }).await;
+                // Everything the session emitted before this point is already queued. Not
+                // so for a turn being announced: its prompt is out already, so what waits
+                // here may be its own output, and reading it now would file it under the
+                // turn before.
+                if !matches!(ctl, Some(Control::TurnStarted(..))) {
+                    while let Ok(event) = events.try_recv() {
+                        if let SessionEventKind::Error { message } | SessionEventKind::Exited { message, .. } = &event.kind && unavailable_model_error(message) { turn_error = Some(message.clone()); }
+                        let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
+                        if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
+                            if let Some(message_id) = running.take() {
+                                learn_model_result(&bus, turn_agent.as_ref(), reason, turn_error.as_deref()).await;
+                                publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: reason }).await;
+                            }
+                            return;
                         }
-                        return;
                     }
                 }
                 out.flush(&bus, id).await;
@@ -3338,7 +3370,7 @@ async fn forward_events(
                         announce_inbox(&bus, id, &live, generation).await;
                     }
                     Some(Control::Compacted) => rules.compacted(),
-                    Some(Control::TurnFinished(message_id, result, diff)) => {
+                    Some(Control::TurnFinished(message_id, result, diff, done)) => {
                         if running == Some(message_id) {
                             running = None;
                         }
@@ -3387,6 +3419,8 @@ async fn forward_events(
                             set_status(&bus, id, AgentStatus::Idle).await;
                         }
                         announce_inbox(&bus, id, &live, generation).await;
+                        // The next turn may start now (see `Control`).
+                        let _ = done.send(());
                     }
                     Some(Control::Stopped) | None => {
                         if let Some(message_id) = running.take() {

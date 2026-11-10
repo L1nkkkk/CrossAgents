@@ -3211,6 +3211,32 @@ impl ApiError {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// The built-in browser (docs/BROWSER.md, run note `browser/contract` §2)
+
+/// `POST /v1/browser/requests/{id}/claim`: the first 200 takes the request, any later one
+/// is a 409. The caller is the GUI's connection, read from its credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BrowserClaimResponse {
+    pub ok: bool,
+}
+
+/// `POST /v1/browser/requests/{id}/result`: what the GUI did with a request. `output` is the
+/// tool's own output (`browser_screenshot` answers `{image_base64, mime}`); `error` says why
+/// it failed, and one that starts with `human_control:` is passed to the agent as it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BrowserResultRequest {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

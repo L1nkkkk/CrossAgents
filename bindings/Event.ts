@@ -5,6 +5,7 @@ import type { Agent } from "./Agent";
 import type { AgentId } from "./AgentId";
 import type { AgentStatus } from "./AgentStatus";
 import type { Attachment } from "./Attachment";
+import type { BrowserAgent } from "./BrowserAgent";
 import type { CarriedNotice } from "./CarriedNotice";
 import type { CheckResult } from "./CheckResult";
 import type { ContextPart } from "./ContextPart";
@@ -38,6 +39,7 @@ import type { ToolDetail } from "./ToolDetail";
 import type { ToolStatus } from "./ToolStatus";
 import type { TriageRecord } from "./TriageRecord";
 import type { Work } from "./Work";
+import type { JsonValue } from "./serde_json/JsonValue";
 
 export type Event = { 
 /**
@@ -148,4 +150,20 @@ status: string, duration_ms: number,
 /**
  * Why it failed, for a status other than `ok`.
  */
-error?: string, } });
+error?: string, } } | { "type": "browser.request", "data": { 
+/**
+ * The request id the claim and result routes name.
+ */
+id: string, 
+/**
+ * The tool, e.g. `browser_snapshot`.
+ */
+tool: string, 
+/**
+ * The tool's input, as the agent passed it.
+ */
+input: JsonValue, agent: BrowserAgent, } } | { "type": "browser.request_done", "data": { id: string, 
+/**
+ * `false` for a failure, and for a request nobody claimed in time.
+ */
+ok: boolean, } });

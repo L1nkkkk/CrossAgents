@@ -279,6 +279,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::api_projects::router())
         .merge(crate::lessons::router())
         .merge(crate::api_terminal::router())
+        .merge(crate::browser::router())
         .merge(crate::api_bytes::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     // Routes for agents, authenticated with their per-session token.
@@ -3460,6 +3461,9 @@ async fn events(
     // later event is guaranteed to reach it.
     let live = state.bus.subscribe();
     let (tx, rx) = mpsc::channel(256);
+    // A stream is a viewer: the browser tools answer "open a window" at once when there is
+    // none, instead of waiting 30 s for a GUI that is not running (docs/BROWSER.md).
+    let viewer = state.orchestrator.viewers().attach();
     let follow = query.follow.unwrap_or(true);
     if query.live.unwrap_or(false) {
         let latest = match state.store().latest_event_seq().await {
@@ -3475,7 +3479,11 @@ async fn events(
     }
     let stream = ReceiverStream::new(rx)
         .filter(move |event| agent.is_none() || event.kind.agent_id() == agent)
-        .map(|event| Ok(to_sse(&event)));
+        .map(move |event| {
+            // Held for as long as this stream lives; dropped with it.
+            let _ = &viewer;
+            Ok(to_sse(&event))
+        });
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 

@@ -201,6 +201,9 @@ pub struct Orchestrator {
         std::sync::Mutex<std::collections::HashSet<(TaskId, AgentId, u32)>>,
     /// Runs extension tools (docs/EXTENSIONS.md §3); set once by the hub, after both exist.
     pub(crate) extensions: std::sync::OnceLock<Arc<dyn crate::host::ExtensionHost>>,
+    /// The built-in browser's waiting requests (docs/BROWSER.md). The GUI's live event
+    /// streams are counted here, so a tool call knows at once whether a window is open.
+    pub(crate) browser: crate::browser::Browser,
 }
 
 /// What a run says about a lead copied for it (docs/tasks/S1.md §3.2).
@@ -288,6 +291,7 @@ impl Orchestrator {
             turn_errors: std::sync::Mutex::default(),
             review_reminders: std::sync::Mutex::default(),
             extensions: std::sync::OnceLock::new(),
+            browser: crate::browser::Browser::default(),
         })
     }
 
@@ -299,6 +303,36 @@ impl Orchestrator {
 
     pub fn store(&self) -> &Arc<dyn Store> {
         &self.store
+    }
+
+    /// The browser's live viewers: the hub's event route counts each stream here, so the
+    /// browser tools can answer at once that a window is needed (docs/BROWSER.md).
+    pub fn viewers(&self) -> &Arc<crossagents_core::Viewers> {
+        self.browser.viewers()
+    }
+
+    /// The first claim of a browser request wins; the next is a conflict (`crate::browser`).
+    pub fn browser_claim(&self, id: &str, by: Option<String>) -> Result<(), CoreError> {
+        self.browser.claim(id, by)
+    }
+
+    /// The GUI's answer to a browser request.
+    pub fn browser_answer(
+        &self,
+        id: &str,
+        answer: crate::browser::Answer,
+    ) -> Result<(), CoreError> {
+        self.browser.answer(id, answer)
+    }
+
+    /// A `browser_*` tool call: records it for the GUI and waits for the answer.
+    pub(crate) async fn browser_tool(
+        &self,
+        caller: &Agent,
+        tool: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, CoreError> {
+        self.browser.request(&self.bus, caller, tool, input).await
     }
 
     pub(crate) async fn lock(&self, run: RunId) -> OwnedMutexGuard<()> {

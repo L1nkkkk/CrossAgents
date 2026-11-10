@@ -10,6 +10,7 @@ pub mod api_projects;
 pub mod api_terminal;
 pub mod attachments;
 pub mod avatars;
+pub mod browser;
 pub mod budget;
 pub mod collab;
 pub mod devices;

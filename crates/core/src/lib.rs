@@ -35,6 +35,7 @@ pub use account::{
 };
 pub use attachment::{Attachment, AttachmentKind, AttachmentSupport, Prompt};
 pub use bus::EventBus;
+pub use bus::{ViewerGuard, Viewers};
 pub use claim::{AgentClaim, AgentNow, ClaimRole, NowKind, SessionOf};
 pub use cli::{CliSource, CliStatus, Located};
 pub use driver::{
@@ -45,7 +46,7 @@ pub use driver::{
 };
 pub use error::CoreError;
 pub use event::{
-    AccountCandidate, CarriedNotice, DeliveryState, DeliveryStatus, DiffSource,
+    AccountCandidate, BrowserAgent, CarriedNotice, DeliveryState, DeliveryStatus, DiffSource,
     EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, MessageSource, QueuedReason,
     RoundNotice, RoundSource,
 };
