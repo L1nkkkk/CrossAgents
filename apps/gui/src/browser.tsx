@@ -17,7 +17,7 @@ import { resolvePath } from "./fileResolve";
 import { onHubEvent } from "./hub";
 import { holdAfterRequest, holdLapsed, type Hold } from "./lib/browserControl";
 import { dockOf, type DockId } from "./lib/docks";
-import { docksNow, isWebTab, placeTab, rememberWebUrl, shutTab, useLayout, webTab, webUrl, type WebTab } from "./panes";
+import { docksNow, isWebTab, placeTab, rememberWebUrl, shutTab, showDockOf, useLayout, webTab, webUrl, type WebTab } from "./panes";
 import "./browser.css";
 
 /** What the person was told when they took a tab over: the agent's own tools get this back. */
@@ -45,8 +45,6 @@ const ATTACH_TIMEOUT = 10_000;
 
 /** A wait for the page to stop loading: `null` when it loaded, or why it did not. */
 type Waiter = (error: string | null) => void;
-
-const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
 
 /** One browser tab's page. Kept outside React; `publish` is what re-renders the docks. */
 type Page = {
@@ -133,13 +131,18 @@ export function browserUrl(text: string): string | null {
   return /^(https?|about|crossagents-file|file):/i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
-/** Where a tab's `<webview>` waits while its tab is in another dock: taking it out of the document would destroy its page. */
+/**
+ * Where a tab's `<webview>` waits while its tab is in no dock (another dock, a folded one, a page
+ * with no tools column): taking it out of the document would destroy its page. It stays on screen
+ * in the layout sense — off to the left at a real size, not `display: none`, which would leave the
+ * page unloaded and an agent's tools unable to reach it.
+ */
 function vault(): HTMLElement {
   const known = document.getElementById("web-vault");
   if (known) return known;
   const el = document.createElement("div");
   el.id = "web-vault";
-  el.hidden = true;
+  el.setAttribute("aria-hidden", "true");
   document.body.appendChild(el);
   return el;
 }
@@ -162,18 +165,11 @@ function settle(page: Page, error: string | null) {
 /**
  * Resolves once the tab's page has loaded and the main process knows it by a webContents id;
  * rejects with the reason a load failed, or after 20 s. An agent's tool runs right after
- * browser_open, before the first `dom-ready` — hence the wait. A tab in a folded dock is not on
- * screen (its page does not load until it is), and the mock has no page at all: neither has
- * anything to wait for.
+ * browser_open, before the first `dom-ready` — hence the wait. A page not on screen still loads:
+ * it waits in the vault, so this does not have to give up on a tab that is not shown.
  */
 async function whenLoaded(page: Page): Promise<void> {
   if (!page.el) return;
-  if (!page.el.isConnected) {
-    // A tab React is about to show attaches on its next frame or two.
-    await nextFrame();
-    await nextFrame();
-    if (!page.el.isConnected) return;
-  }
   if (!page.loading && page.problem) throw new Error(page.problem);
   if (!page.loading && page.wcId !== null) return;
   await new Promise<void>((resolve, reject) => {
@@ -300,6 +296,9 @@ function createPage(id: string, url: string, title?: string): Page {
     page.loading = false;
   } else if (supportsWebview()) {
     page.el = makeWebview(page, url);
+    // In the document from the start: a page loads (and an agent can drive it) even when no dock
+    // is on screen; showing the tab moves it into the dock's box.
+    vault().appendChild(page.el);
   }
   rememberWebUrl(page.tab, page.url);
   publish();
@@ -570,6 +569,8 @@ async function runTool(tool: string, input: Record<string, unknown>, control: (p
     }
     const page = openBrowserTab({ url: browserUrl(wanted) ?? wanted });
     control(page);
+    // The agent may be on a page with no dock in front: unfold the one the tab went in.
+    showDockOf(page.tab);
     await whenLoaded(page);
     return { tab: page.id, url: page.url, title: pageName(page) };
   }
@@ -700,7 +701,9 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
   useEffect(() => {
     const el = page?.el;
     const host = box.current;
-    if (!el || !host) return;
+    if (!page || !el || !host) return;
+    // Switching tabs remounts this body with the new tab's key, so the previous page is already
+    // back in the vault (its effect cleanup) before this one is attached here.
     host.appendChild(el);
     // Attached again: if the guest survived (no dom-ready to come), its id is readable now.
     if (page.wcId === null) {
@@ -719,12 +722,12 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
       page.wcId = null;
       vault().appendChild(el);
     };
-  }, [page?.el]);
+  }, [tab, page?.el]);
 
   if (!page) return <p className="muted small tool-blank">这个浏览器标签已经关掉了。</p>;
   return (
     <div className="web-pane">
-      <BrowserBar page={page} />
+      <BrowserBar key={tab} page={page} />
       <ControlBar page={page} />
       {page.problem && (
         <p className="web-problem" role="alert">

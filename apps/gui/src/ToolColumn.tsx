@@ -80,7 +80,7 @@ export function ToolColumn({ dock, follow, task, run, onClose, onCloseTask }: { 
           (isTermTab(kind) ? (
             <TerminalBody tab={kind} dock={dock} />
           ) : isWebTab(kind) ? (
-            <BrowserBody tab={kind} />
+            <BrowserBody key={kind} tab={kind} />
           ) : isExtTab(kind) ? (
             <ExtensionTabBody tab={kind} follow={follow} />
           ) : (
