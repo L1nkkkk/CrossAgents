@@ -23,10 +23,14 @@ import { RemoteController, Unavailable } from "./remoteController.cjs";
 import { applicationMenu, bundledHub, clientHeaders, clientOs, shortcut, trayIcon } from "./platform.cjs";
 import { hasProxy, proxyFromResolve, type LinkProgram } from "./link.cjs";
 import { tailscaleStatus } from "./tailscale.cjs";
+import { attachGuest, guardWebview, registerBrowserIpc, setupBrowserSession } from "./browser.cjs";
+import { FILE_SCHEME } from "./browserPolicy.cjs";
 
 // Must run before app.ready. CORS remains enabled for module imports from file://.
 protocol.registerSchemesAsPrivileged([{ scheme: "crossagents-ext", privileges: {
   standard: true, secure: true, supportFetchAPI: true, corsEnabled: true,
+} }, { scheme: FILE_SCHEME, privileges: {
+  standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true,
 } }]);
 let safeMode: SafeMode = { enabled: false, reason: null };
 const extensionLoading = loadingMarker(join(hubHome(), "gui-extension-loading"));
@@ -286,6 +290,8 @@ ipcMain.handle("extensions:ready", (event) => {
   if (!fromApp(event)) throw new Error("request from an unknown page");
   extensionLoading.ready();
 });
+
+registerBrowserIpc(fromApp);
 
 ipcMain.handle("tailscale:status", (event) => {
   if (!fromApp(event)) throw new Error("request from an unknown page");
@@ -724,6 +730,8 @@ function parseSse(block: string): { id?: string; data?: string } {
 // No new windows, no navigation away from the app, no permissions (camera, notifications…).
 // Web links (e.g. an account login page) open in the system browser instead.
 app.on("web-contents-created", (_event, contents) => {
+  // Browser tabs (<webview>) get their own rules when they attach (electron/browser.cts).
+  if (contents.getType() === "webview") return;
   contents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("https://") || url.startsWith("http://")) void shell.openExternal(url);
     return { action: "deny" };
@@ -731,7 +739,11 @@ app.on("web-contents-created", (_event, contents) => {
   contents.on("will-navigate", (event, url) => {
     if (!url.startsWith(appUrl)) event.preventDefault();
   });
-  contents.on("will-attach-webview", (event) => event.preventDefault());
+  // Only the built-in browser's tabs may attach; their settings are forced there.
+  contents.on("will-attach-webview", (event, webPreferences, params) => {
+    if (!guardWebview(webPreferences, params)) event.preventDefault();
+  });
+  contents.on("did-attach-webview", (_event, guest) => attachGuest(guest, logLine));
 });
 
 async function createWindow() {
@@ -754,6 +766,8 @@ async function createWindow() {
       sandbox: true,
       webSecurity: true,
       spellcheck: false,
+      // The built-in browser's tabs are <webview> tags (electron/browser.cts).
+      webviewTag: true,
     },
   });
   win.once("ready-to-show", () => win.show());
@@ -848,6 +862,7 @@ app.whenReady().then(async () => {
   }
   session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => callback(permissionAllowed(permission)));
   session.defaultSession.setPermissionCheckHandler((_contents, permission) => permissionAllowed(permission));
+  setupBrowserSession(logLine);
   // macOS needs its native application menu; other platforms use the page menu.
   const template = applicationMenu(process.platform);
   Menu.setApplicationMenu(template ? Menu.buildFromTemplate(template) : null);
