@@ -21,7 +21,55 @@ function subscribe(channel: string, listener: (value: string) => void): () => vo
   };
 }
 
-const bridge: CrossAgentsBridge = {
+/** The main process answers `{ ok, value }` or `{ ok: false, error }` for the browser (electron/browser.cts). */
+async function browserCall<T>(channel: string, ...args: unknown[]): Promise<T> {
+  const reply: { ok: true; value: T } | { ok: false; error: string } = await ipcRenderer.invoke(channel, ...args);
+  if (!reply.ok) throw new Error(reply.error);
+  return reply.value;
+}
+
+/**
+ * `window.crossagents.browser` (run note browser/contract §3). Every call names the tab by its
+ * webContents id (`webview.getWebContentsId()`); the main process refuses any other.
+ */
+export type BrowserBridge = {
+  snapshot(wcId: number): Promise<{ text: string; url: string; title: string }>;
+  click(wcId: number, ref: number): Promise<{ ok: true }>;
+  type(wcId: number, ref: number, text: string, submit?: boolean): Promise<{ ok: true }>;
+  press(wcId: number, key: string): Promise<{ ok: true }>;
+  scroll(wcId: number, dy: number): Promise<{ ok: true }>;
+  screenshot(wcId: number): Promise<{ base64: string; mime: "image/png" }>;
+  console(wcId: number): Promise<{ level: string; text: string; ts: number }[]>;
+  fileUrl(absPath: string): Promise<string>;
+  onOpenTab(listener: (url: string) => void): () => void;
+};
+
+const browser: BrowserBridge = {
+  snapshot: (wcId) => browserCall("browser:snapshot", wcId),
+  async click(wcId, ref) {
+    await browserCall("browser:click", wcId, ref);
+    return { ok: true };
+  },
+  async type(wcId, ref, text, submit) {
+    await browserCall("browser:type", wcId, ref, text, submit === true);
+    return { ok: true };
+  },
+  async press(wcId, key) {
+    await browserCall("browser:press", wcId, key);
+    return { ok: true };
+  },
+  async scroll(wcId, dy) {
+    await browserCall("browser:scroll", wcId, dy);
+    return { ok: true };
+  },
+  screenshot: (wcId) => browserCall("browser:screenshot", wcId),
+  console: (wcId) => browserCall("browser:console", wcId),
+  fileUrl: (absPath) => browserCall("browser:file-url", absPath),
+  onOpenTab: (listener) => subscribe("browser:open-tab", listener),
+};
+
+const bridge: CrossAgentsBridge & { browser: BrowserBridge } = {
+  browser,
   extensions: {
     safeMode: () => ipcRenderer.invoke("extensions:safe-mode"),
     loading: () => ipcRenderer.invoke("extensions:loading"),
