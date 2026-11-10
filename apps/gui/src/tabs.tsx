@@ -5,8 +5,9 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { Icon } from "./components";
+import { browserAvailable, closeBrowserTab, newBrowserTab, useBrowserLabel } from "./browser";
 import { dropTarget, type DockId, type Drop, type Rect, type Strip } from "./lib/docks";
-import { closedExtTabs, closedKinds, dropTab, isTermTab, openExtTab, openTool, paneLabel, pickTab, shutTab, useLayout, type TabId } from "./panes";
+import { closedExtTabs, closedKinds, dropTab, isTermTab, isWebTab, openExtTab, openTool, paneLabel, pickTab, shutTab, useLayout, type TabId } from "./panes";
 import { closeTerminal, newTerminal, terminalsAvailable, useTabLabel, useTerminalScope } from "./terminal";
 
 /** Pixels a pointer moves before a press on a tab becomes a drag. */
@@ -91,7 +92,8 @@ function startDrag(e: ReactPointerEvent, tab: TabId, onDragged: () => void) {
 /** What a tab is called. */
 function useLabel() {
   const termLabel = useTabLabel();
-  return (tab: TabId) => (isTermTab(tab) ? termLabel(tab) : paneLabel(tab));
+  const webLabel = useBrowserLabel();
+  return (tab: TabId) => (isTermTab(tab) ? termLabel(tab) : isWebTab(tab) ? webLabel(tab) : paneLabel(tab));
 }
 
 export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: DockId; tabs: TabId[]; active: TabId | null; narrow: boolean; onCloseTask?: () => void }) {
@@ -101,6 +103,7 @@ export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: Dock
   const dragged = useRef(false);
   const shut = (tab: TabId) => {
     if (isTermTab(tab)) return closeTerminal(tab);
+    if (isWebTab(tab)) return closeBrowserTab(tab);
     shutTab(tab);
     if (tab === "task") onCloseTask?.();
   };
@@ -129,6 +132,7 @@ export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: Dock
             }}
           >
             {isTermTab(tab) && <Icon name="terminal" size={13} />}
+            {isWebTab(tab) && <Icon name="globe" size={13} />}
             {label(tab)}
           </button>
           <button type="button" className="dock-tab-x" onClick={() => shut(tab)} title={`关闭${label(tab)}`} aria-label={`关闭${label(tab)}`}>
@@ -141,7 +145,7 @@ export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: Dock
   );
 }
 
-/** + : a new terminal, and what has no tab now. */
+/** + : a new terminal, a new browser tab, and what has no tab now. */
 function AddTab({ dock }: { dock: DockId }) {
   const { state } = useLayout();
   const [at, setAt] = useState<{ left: number; top: number } | null>(null);
@@ -149,14 +153,14 @@ function AddTab({ dock }: { dock: DockId }) {
   const closed = closedKinds(state.docks);
   const closedExt = closedExtTabs();
   const canTerminal = terminalsAvailable() && !!useTerminalScope();
+  const canBrowser = browserAvailable();
   useEffect(() => {
     if (!at) return;
     const close = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setAt(null);
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
   }, [at]);
-  if (!closed.length && !closedExt.length && !canTerminal) return null;
-  const rows = closed.length + closedExt.length + (canTerminal ? 1 : 0);
+  const rows = closed.length + closedExt.length + (canTerminal ? 1 : 0) + 1;
   return (
     <div className="dock-add" ref={ref}>
       <button
@@ -177,6 +181,26 @@ function AddTab({ dock }: { dock: DockId }) {
       </button>
       {at && (
         <div className="menu" role="menu" style={{ left: at.left, top: at.top, right: "auto", bottom: "auto" }}>
+          <button
+            type="button"
+            role="menuitem"
+            className={`menu-item ${canBrowser ? "" : "disabled"}`}
+            aria-disabled={!canBrowser}
+            title={canBrowser ? "在这个标签栏新开一个浏览器标签" : "这个窗口没有内置浏览器：在 CrossAgents 窗口里打开这个页面才能新建浏览器标签"}
+            onClick={() => {
+              if (!canBrowser) return;
+              setAt(null);
+              newBrowserTab(dock);
+            }}
+          >
+            <span className="menu-icon">
+              <Icon name="globe" size={14} />
+            </span>
+            <span className="menu-text">
+              <span className="menu-label">新建浏览器标签</span>
+              {!canBrowser && <span className="menu-sub">这个窗口没有内置浏览器</span>}
+            </span>
+          </button>
           {canTerminal && (
             <button
               type="button"

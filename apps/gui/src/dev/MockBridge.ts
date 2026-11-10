@@ -68,6 +68,7 @@ import { capabilitiesOf, contextParts, driverOf, HUB_MACHINE, tailscaleSample, t
 import { mockContent, mockResolve, mockSearch, mockStatus, mockTree } from "./files.mock";
 import { mockGit } from "./git.mock";
 import { createMockConnection, type MockConnection, type MockConnectionOptions } from "./mockConnection";
+import { createMockBrowser, type MockBrowser } from "./browser.mock";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
 const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
@@ -173,6 +174,8 @@ export type MockState = {
   link?: { enabled?: boolean; startMs?: number; stuck?: boolean; proxy?: string };
   /** What `bridge.tailscale.status()` answers; a running sample network when unset. */
   tailscale?: TailscaleStatus;
+  /** How long each built-in browser tool takes, in ms (its tab's bar outlives it either way). */
+  browserDelay?: number;
 };
 
 export type ExpertiseMock = { entries: ExpertiseEntry[]; candidates: Candidate[]; usages: UsageRecord[] };
@@ -254,6 +257,24 @@ export class MockBridge implements CrossAgentsBridge {
     private script: Step[] = [],
   ) {
     this.connection = createMockConnection(state.connection ?? {});
+    this.browser = createMockBrowser({ delay: state.browserDelay });
+  }
+
+  /** The preview's `window.crossagents.browser` (src/dev/browser.mock.ts). */
+  readonly browser: MockBrowser;
+  private browserRequests = 0;
+  private browserClaims = new Set<string>();
+
+  /**
+   * A scenario's `browser.request` (run note browser/contract §2): an agent's tool waiting for
+   * the page to claim and run it. `@bindings/Event` lists the event once the hub's half lands.
+   */
+  emitBrowserRequest(tool: string, input: Record<string, unknown>, agentName = "Nova") {
+    const agent = this.state.agents.find((a) => a.name === agentName) ?? this.state.agents[0];
+    this.emit({
+      type: "browser.request",
+      data: { id: `browser-request-${++this.browserRequests}`, tool, input, agent: { id: agent?.id ?? "mock", name: agent?.name ?? agentName } },
+    } as unknown as Payload);
   }
 
   // ---- CrossAgentsBridge ----------------------------------------------------------------
@@ -741,6 +762,15 @@ export class MockBridge implements CrossAgentsBridge {
     if (apply && method === "POST") {
       this.appliedRuns.add(apply[1]);
       return json(200, { outcome: "applied", files: ["src/example.ts"], own_changes: ["src/example.ts"], rerun: { results: [{ command: "npm test", passed: true, exit_code: 0, output: "检查通过" }], error: null } });
+    }
+    const browserRequest = /^\/v1\/browser\/requests\/([^/]+)\/(claim|result)$/.exec(p);
+    if (browserRequest && method === "POST") {
+      const id = browserRequest[1];
+      if (browserRequest[2] === "result") return { status: 204, body: "" };
+      // Claimed twice: 409, as the hub answers a second window (the page then does nothing).
+      if (this.browserClaims.has(id)) return json(409, { error: { code: "claimed", message: "已经被另一个窗口认领" } });
+      this.browserClaims.add(id);
+      return json(200, { ok: true });
     }
     const terminal = this.terminalRoute(method, p, body);
     if (terminal) return terminal;

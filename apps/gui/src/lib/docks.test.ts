@@ -92,3 +92,22 @@ test("a dock already showing is not offered again over the conversation", () => 
   assert.equal(dropTarget(500, 500, "a", { strips: [], right, bottom: { left: 200, top: 400, right: 800, bottom: 600 }, center: { ...center, bottom: 400 } })?.dock, "bottom");
   assert.equal(dropTarget(700, 100, "a", { strips: [], right, bottom: null, center }), null);
 });
+
+/** A layout may also name browser tabs (`web:<id>`, panes.ts `isTab`). */
+const webKnown = (t: unknown): t is string => typeof t === "string" && (t.startsWith("web:") || ["changes", "files", "task", "graph"].includes(t));
+
+test("browser tabs drag between the docks, close, and come back from a saved layout", () => {
+  const start = docks(["web:a", "files"], ["web:b"], { right: "web:a", bottom: "web:b" });
+  const moved = moveTab(start, "web:a", "bottom", 0);
+  assert.deepEqual(moved.bottom.tabs, ["web:a", "web:b"]);
+  assert.deepEqual(moved.right.tabs, ["files"]);
+  assert.equal(moved.bottom.active, "web:a");
+  assert.deepEqual(closeTab(moved, "web:a").bottom, { tabs: ["web:b"], active: "web:b", open: true });
+  const restored = restoreDocks(
+    { right: { tabs: ["web:b"], active: "web:b", open: true }, bottom: { tabs: ["nope"], active: "nope", open: true } },
+    webKnown,
+    ["changes"],
+  );
+  assert.deepEqual(restored.right.tabs, ["web:b"]);
+  assert.deepEqual(restored.bottom, { tabs: [], active: null, open: false });
+});

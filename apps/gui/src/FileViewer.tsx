@@ -9,6 +9,7 @@ import type { FileContentResponse } from "@bindings/FileContentResponse";
 import type { FileEntry } from "@bindings/FileEntry";
 import type { FileStatusEntry } from "@bindings/FileStatusEntry";
 import { api, errorText, getBridge, scopeKey, scopePath, type FileScope } from "./api";
+import { browserAvailable, isHtmlPath, openBrowserFile } from "./browser";
 import { DocLinksProvider, FileScopeProvider, Prose } from "./components";
 import { resolvePath } from "./fileResolve";
 import { highlight, langOf, type Lang } from "./lib/highlight";
@@ -23,8 +24,20 @@ let nonce = 0;
 const listeners = new Set<() => void>();
 const changed = () => listeners.forEach((l) => l());
 
-/** Opens the viewer on `path` (relative to the scope's workspace, or absolute inside it). */
+/**
+ * Opens `path` (relative to the scope's workspace, or absolute inside it). An `.html` file opens
+ * as a page in a browser tab (browser.tsx) when this window has one; where it cannot (no file, no
+ * browser), the viewer shows it instead.
+ */
 export function openFile(target: OpenFile) {
+  if (isHtmlPath(target.path) && browserAvailable()) {
+    void openBrowserFile(target.scope, target.path).catch(() => showFile(target));
+    return;
+  }
+  showFile(target);
+}
+
+function showFile(target: OpenFile) {
   current = { ...target, nonce: ++nonce };
   changed();
 }
@@ -419,13 +432,22 @@ function usePaneBrowser(scope: FileScope, saved?: PaneSaved) {
   };
 
   /** Open a file in a tab (or bring its existing tab forward) and reveal it in the tree. */
-  const openPath = (path: string, at?: number) => {
+  const showInPane = (path: string, at?: number) => {
     setTabs((current) => (current.includes(path) ? current : [...current, path]));
     setActive(path);
     setLine(at);
     const ups = parentDirs(path);
     setOpen((current) => new Set([...current, "", ...ups]));
     for (const dir of ups) if (!dirs.has(dir)) loadDir(dir);
+  };
+
+  /** An `.html` file is a page, not source: it opens in a browser tab (browser.tsx). */
+  const openPath = (path: string, at?: number) => {
+    if (isHtmlPath(path) && browserAvailable()) {
+      void openBrowserFile(scope, path).catch(() => showInPane(path, at));
+      return;
+    }
+    showInPane(path, at);
   };
 
   /** Back to the tree; the open tabs stay. */
