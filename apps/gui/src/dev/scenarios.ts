@@ -16,9 +16,10 @@ import { expertiseScene } from "../views/Expertise.mock";
 import { lessonsScene } from "../views/Lessons/Lessons.mock";
 import { agent, ago, capabilitiesOf, devices, NOTES_REPO, planned, REPO, run, say, team, think, transcript, turn, uid } from "./fixtures";
 import { openFile } from "../FileViewer";
-import { openTool, placeTab } from "../panes";
+import { docksNow, openTool, placeTab, shutTab } from "../panes";
 import { setBottomHeight, setSidebarWidth, setToolsWidth, SIDEBAR } from "../lib/widths";
 import { newTerminal } from "../terminal";
+import { openBrowserTab } from "../browser";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { PluginInfo } from "@bindings/PluginInfo";
@@ -664,6 +665,26 @@ export const SCENARIOS: Scenario[] = [
   { key: "files", label: "文件链接与查看器", hint: "回复里的路径（确认存在的才成链接）可点开只读查看器：左侧懒加载目录树，右侧行号、高亮、跳到第 12 行", build: () => filesScene() },
   { key: "files-markdown", label: "文件查看器（Markdown）", hint: "中间弹窗里的 Markdown 也有同一套大纲：短横线、悬停标题列表、当前章节", build: () => filesMarkdownScene() },
   { key: "terminal", label: "内置终端", hint: "对话下方的终端标签：回显输入；标签可拖到右侧，Ctrl+` 收起和打开，输入 exit 看退出后的样子", build: () => ({ ...filesScene(), script: [{ at: 600, act: () => void newTerminal() }] }) },
+  // The built-in browser (run note browser/contract §3, the page half): two tabs, one per dock,
+  // and an agent's request on the second, so its「正在操作」bar and 接管 are both on show.
+  { key: "browser", label: "内置浏览器", hint: "右侧和底部各一个浏览器标签（可拖动、可关、可多开）：地址栏回车打开、后退/前进/刷新、加载状态，标签名取页面标题；底部那个写着 Nova 正在操作，可以「接管」，接管后 agent 的请求会被拒绝", build: () => {
+    const scene = soloSession();
+    let pricing = "";
+    return {
+      state: { ...scene.state, browserDelay: 30_000 },
+      route: scene.route,
+      script: [
+        { at: 300, act: () => {
+          // The preview keeps the dock layout between scenarios: start from two browser tabs only.
+          const docks = docksNow();
+          for (const tab of [...docks.right.tabs, ...docks.bottom.tabs]) shutTab(tab);
+          openBrowserTab({ url: "https://developer.mozilla.org/zh-CN/docs/Web/HTML", dock: "right" });
+        } },
+        { at: 600, act: () => { pricing = openBrowserTab({ url: "https://example.com/pricing", dock: "bottom" }).id; } },
+        { at: 1100, act: (_s, bridge) => bridge.emitBrowserRequest("browser_snapshot", { tab: pricing }, "Nova") },
+      ] as Step[],
+    };
+  } },
   { key: "files-pane", label: "文件面板", hint: "工具列的「文件」：目录树，点开 docs/cli.md 是渲染后的 Markdown，可切回源码；文档里的相对链接在面板里打开", build: () => filesPaneScene() },
   { key: "files-pane-narrow", label: "文件面板（窄）", hint: "窄面板退回树和文件轮流显示；标签、面包屑和大纲都不溢出", build: () => filesPaneNarrow() },
   { key: "files-pane-wide", label: "文件面板（宽）", hint: "宽面板：左侧内容和标签、面包屑、大纲，右侧整棵文件树和过滤框；docs 与 crates 有改动标记", build: () => filesPaneWide() },

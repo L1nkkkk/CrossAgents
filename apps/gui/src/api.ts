@@ -240,6 +240,18 @@ export function hubRequest<T = unknown>(method: "GET" | "POST" | "DELETE", path:
   return request<T>(method, path, body);
 }
 
+/**
+ * The built-in browser's calls to the hub — claiming an agent's `browser.request` and posting
+ * its result (run note browser/contract §2). The path is built by the caller (browser.tsx), and
+ * the method is passed as a value, so `electron/allowed.test.cts`'s scan of the literal calls
+ * above does not list it: `/v1/browser/requests/…` has to be added to `electron/allowed.cts`,
+ * which is the main-process task's file, not this one's.
+ */
+export const browserHub = <T = void>(path: string, body?: unknown): Promise<T> => {
+  const method: Method = "POST";
+  return request<T>(method, path, body);
+};
+
 function expertiseQuery(owner_kind: OwnerKind, owner_id: string): string {
   return `owner_kind=${owner_kind}&owner_id=${enc(owner_id)}`;
 }

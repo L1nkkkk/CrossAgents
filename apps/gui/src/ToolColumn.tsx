@@ -15,6 +15,7 @@ import type { BackgroundWatch } from "@bindings/BackgroundWatch";
 import type { VerifyingTask } from "@bindings/VerifyingTask";
 import { api, errorText } from "./api";
 import { ActivityFeed } from "./ActivityFeed";
+import { BrowserBody } from "./browser";
 import { Avatar, ErrorBox, Icon, displayName, isAgent, sessionHref, useAgents } from "./components";
 import { board, countdown, elapsed, watchOn, withoutReminder, type Split } from "./lib/background";
 import { CommitGraphView } from "./commitgraph";
@@ -24,7 +25,7 @@ import { FilesPane } from "./FileViewer";
 import type { HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
 import { clock, full } from "./lib/time";
-import { clearTarget, closeBottom, isExtTab, isPaneKind, isTermTab, paneLabel, useLayout, type PaneKind, type TabId, type Target } from "./panes";
+import { clearTarget, closeBottom, isExtTab, isPaneKind, isTermTab, isWebTab, paneLabel, useLayout, type PaneKind, type TabId, type Target } from "./panes";
 import { ExtensionTabBody } from "./extensions/ui";
 import { shownTab, type Dock, type DockId } from "./lib/docks";
 import { TabRow } from "./tabs";
@@ -61,7 +62,7 @@ export function ToolColumn({ dock, follow, task, run, onClose, onCloseTask }: { 
   const kind = shownTab(shown);
   return (
     <div className={`tool-column ${narrow ? "narrow" : ""}`} data-tabdock={dock}>
-      <section className="tool-pane" aria-label={kind && !isTermTab(kind) ? paneLabel(kind) : undefined}>
+      <section className="tool-pane" aria-label={kind && (isPaneKind(kind) || isExtTab(kind)) ? paneLabel(kind) : undefined}>
         <header className="tool-head">
           <TabRow dock={dock} tabs={shown.tabs} active={kind} narrow={narrow} onCloseTask={task ? onCloseTask : undefined} />
           {kind && isPaneKind(kind) && <FollowButton kind={kind} follow={follow} target={target} />}
@@ -78,6 +79,8 @@ export function ToolColumn({ dock, follow, task, run, onClose, onCloseTask }: { 
         {kind &&
           (isTermTab(kind) ? (
             <TerminalBody tab={kind} dock={dock} />
+          ) : isWebTab(kind) ? (
+            <BrowserBody tab={kind} />
           ) : isExtTab(kind) ? (
             <ExtensionTabBody tab={kind} follow={follow} />
           ) : (
