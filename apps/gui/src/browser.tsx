@@ -9,7 +9,7 @@
 // is theirs, a request for it is answered `human_control` until they hand it back.
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { api, browserHub, errorText, getBridge, scopeKey, type FileScope } from "./api";
+import { api, errorText, getBridge, scopeKey, type FileScope } from "./api";
 import type { BrowserBridge } from "./bridge";
 import { Icon } from "./components";
 import { resolvePath } from "./fileResolve";
@@ -385,9 +385,8 @@ function requestOf(event: unknown): Request | null {
   };
 }
 
-const claimRequest = (id: string) => browserHub<{ ok: boolean }>(`/v1/browser/requests/${encodeURIComponent(id)}/claim`, {});
-const postResult = (id: string, result: { ok: boolean; output?: unknown; error?: string }) =>
-  browserHub<void>(`/v1/browser/requests/${encodeURIComponent(id)}/result`, result);
+const claimRequest = (id: string) => api.browserClaim(id);
+const postResult = (id: string, result: { ok: boolean; output?: unknown; error?: string }) => api.browserResult(id, result);
 
 /** The tab an input names, by either `web:<id>` or the `<id>` itself. */
 function pageOf(value: unknown): Page | undefined {
