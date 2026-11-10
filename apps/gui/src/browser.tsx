@@ -40,6 +40,8 @@ type NavEvent = Event & { url?: string; title?: string; errorCode?: number; erro
 
 /** How long browser_open and browser_navigate wait for the page before telling the agent it timed out. */
 const LOAD_TIMEOUT = 20_000;
+/** How long a tool call waits for a tab that just (re)attached to get its webContents id. */
+const ATTACH_TIMEOUT = 10_000;
 
 /** A wait for the page to stop loading: `null` when it loaded, or why it did not. */
 type Waiter = (error: string | null) => void;
@@ -195,6 +197,30 @@ async function whenLoaded(page: Page): Promise<void> {
   });
 }
 
+/**
+ * The tab's webContents id, waiting up to 10 s for `dom-ready` when it has none yet: a tool can
+ * arrive in the moment after a tab showed (or moved between docks) and before its guest is ready,
+ * and that is a wait, not a failure.
+ */
+async function whenAttached(page: Page): Promise<number> {
+  if (page.wcId !== null) return page.wcId;
+  await new Promise<void>((resolve, reject) => {
+    const waiter: Waiter = () => {
+      if (page.wcId === null) return;
+      clearTimeout(timer);
+      page.waiters.delete(waiter);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      page.waiters.delete(waiter);
+      reject(new Error(`这个标签还没有加载好（等了 10 秒）：${page.url}`));
+    }, ATTACH_TIMEOUT);
+    page.waiters.add(waiter);
+  });
+  if (page.wcId === null) throw new Error("这个标签还没有加载好");
+  return page.wcId;
+}
+
 /** A tab's page, with its events. `src` is set before it is attached, so it starts loading then. */
 function makeWebview(page: Page, url: string): WebviewTag {
   const el = document.createElement("webview") as WebviewTag;
@@ -220,6 +246,11 @@ function makeWebview(page: Page, url: string): WebviewTag {
     page.forward = el.canGoForward();
     publish();
     settle(page, null);
+  });
+  el.addEventListener("destroyed", () => {
+    // The guest is gone (Electron recreates it when the <webview> moves): its id is not usable.
+    page.wcId = null;
+    publish();
   });
   el.addEventListener("did-navigate", (e) => onUrl(page, (e as NavEvent).url));
   el.addEventListener("did-navigate-in-page", (e) => onUrl(page, (e as NavEvent).url));
@@ -543,8 +574,16 @@ async function runTool(tool: string, input: Record<string, unknown>, control: (p
     return { tab: page.id, url: page.url, title: pageName(page) };
   }
   const page = mustPage(input.tab, tool);
-  const wcId = page.wcId;
-  if (wcId === null) throw new Error("这个标签还没加载好，等一下再试");
+  // 后退 / 前进 / 刷新 go through the <webview> itself, and wait for the load rather than an id.
+  if (tool === "browser_navigate") {
+    const action = input.action;
+    if (action !== "back" && action !== "forward" && action !== "reload") throw new Error("browser_navigate 的 action 是 back、forward 或 reload");
+    const refused = step(page, action);
+    if (refused) throw new Error(refused);
+    await whenLoaded(page);
+    return { ok: true, action };
+  }
+  const wcId = await whenAttached(page);
   switch (tool) {
     case "browser_snapshot":
       return browser.snapshot(wcId);
@@ -573,14 +612,6 @@ async function runTool(tool: string, input: Record<string, unknown>, control: (p
     }
     case "browser_console":
       return browser.console(wcId);
-    case "browser_navigate": {
-      const action = input.action;
-      if (action !== "back" && action !== "forward" && action !== "reload") throw new Error("browser_navigate 的 action 是 back、forward 或 reload");
-      const refused = step(page, action);
-      if (refused) throw new Error(refused);
-      await whenLoaded(page);
-      return { ok: true, action };
-    }
     default:
       throw new Error(`不认识的浏览器工具：${tool}`);
   }
