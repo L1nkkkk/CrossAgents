@@ -895,13 +895,13 @@ code.bare { background: none; padding: 0; }
 .split .topbar { padding: 10px 14px; flex-wrap: nowrap; }
 .split .topbar .hide-narrow, .split .topbar .meter { display: none; }
 .split .topbar .chip { min-width: 0; overflow: hidden; }
-.split .dock > .needs-you, .split .dock > .run-strip, .split .dock > .queue, .split .dock > .asks { width: calc(100% - 32px); }
+.split .dock > .needs-you, .split .dock > .run-strip, .split .dock > .queue, .split .dock > .asks, .split .dock > .dock-asks { width: calc(100% - 32px); }
 .split .composer-wrap { padding: 0 16px 14px; }
 .split .convo-inner { padding: 20px 16px 12px; }
 
 /* Above the composer: needs-you strip, run strip, queue. Same column as the composer. */
 .dock { display: flex; flex-direction: column; }
-.dock > .needs-you, .dock > .run-strip, .dock > .queue, .dock > .asks { width: calc(100% - 48px); max-width: 780px; margin: 0 auto 6px; }
+.dock > .needs-you, .dock > .run-strip, .dock > .queue, .dock > .asks, .dock > .dock-asks { width: calc(100% - 48px); max-width: 780px; margin: 0 auto 6px; }
 
 .needs-you { display: flex; gap: 6px; flex-wrap: nowrap; align-items: center; min-width: 0; }
 .need { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 11.5px; background: var(--surface); min-width: 0; flex-shrink: 1; }
@@ -1074,9 +1074,16 @@ button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
 .peer-reply { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
 
 /* Questions and notices for the person (H1-2). */
-.asks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
-.ask { background: var(--surface); border: 1px solid var(--border-strong); border-left: 3px solid var(--link); border-radius: var(--radius-lg); padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
-.ask.ask-notice { border-left-color: var(--border-strong); }
+.asks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; max-height: 45vh; overflow-y: auto; overscroll-behavior: contain; }
+.dock-asks > .asks { margin-bottom: 0; }
+.dock-asks:empty { display: none; }
+.ask { flex-shrink: 0; background: var(--surface); border: 1px solid var(--border-strong); border-left: 3px solid var(--link); border-radius: var(--radius-lg); padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.ask.ask-notice { border-left-color: var(--border-strong); padding: 8px 12px; gap: 4px; flex-shrink: 0; }
+.ask-notice .ask-text { font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+.ask-notice .ask-text.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.ask-notice .ask-text.opened { max-height: 32vh; overflow-y: auto; overscroll-behavior: contain; }
+.ask-notice .ask-more { align-self: flex-start; padding: 0; border: 0; background: none; color: var(--link); font-size: 12px; cursor: pointer; }
+.ask-notice .ask-more:hover { text-decoration: underline; }
 .ask.defaulted { border-left-color: var(--warn); padding: 8px 14px; }
 .ask.urgent { border-left-color: var(--danger); }
 .ask-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

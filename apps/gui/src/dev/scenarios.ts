@@ -610,6 +610,21 @@ export const SCENARIOS: Scenario[] = [
     );
     return scene;
   } },
+  // A long 「告诉你」 (a run summary) above the composer: three lines, 展开全文, same column as the composer.
+  { key: "long-notice", label: "很长的「告诉你」", hint: "会话页输入框上方的通知只显示三行，点「展开全文」看全部；卡片和输入框同宽", build: () => {
+    const scene = soloSession();
+    const nova = scene.state.agents[0];
+    const text = Array.from({ length: 8 }, (_, i) => `第 ${i + 1} 段：已落地到 main（squash 2342d0b，5 项检查全过）。做了什么、没做什么、要你看什么，这一段写得很长很长，用来撑满好几行，看卡片会不会把整个对话挤出屏幕。`).join("\n");
+    scene.state.questions.push({
+      id: uid(), kind: "notice", from: nova.id, run_id: null, task_id: null, text, detail: null, options: [], default: null,
+      timeout_at: null, status: "open", answer: null, answered_at: null, action: null, created_at: ago(1),
+    });
+    return { ...scene, route: `#/s/${nova.name}` };
+  } },
+  { key: "long-notice-open", label: "很长的「告诉你」展开后", hint: "展开全文后卡片最高约半屏，多出来的在卡片区里滚动，不把对话挤没", build: () => {
+    const scene = SCENARIOS.find((x) => x.key === "long-notice")!.build();
+    return { ...scene, script: [{ at: 600, act: () => document.querySelector<HTMLButtonElement>(".ask-more")?.click() }] };
+  } },
   { key: "capability-no-turns", label: "没有对话的 agent 也报能力", hint: "这个 codex 队友在 mock 里没开过会话：输入框下面照样写明只收图片和文本，PDF 发不了（codex-native）", build: () => {
     const scene = soloSession();
     const nova = scene.state.agents[0];

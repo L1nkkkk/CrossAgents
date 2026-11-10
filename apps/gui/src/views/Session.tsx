@@ -323,7 +323,7 @@ export function SessionView({
           {/* One strip is enough: the pane beside leaves it to the main one. A run page passes its
               own strip (`top`), scoped to that run, so the dock's list would add every other run's
               「告诉你」 (docs/tasks/SELF.md B3). */}
-          {!onClose && !side && <div ref={questionArea}><QuestionCards agents={everyone} />{questionId && !questions.loading && (!questions.data || !pending(questions.data.items).some((item) => item.id === questionId && item.from === agent.id)) && <p role="alert" className="question-missing">找不到这条待办：它可能已处理、已过期或不属于此会话。{questions.error && ` ${questions.error}`}</p>}</div>}
+          {!onClose && !side && <div className="dock-asks" ref={questionArea}><QuestionCards agents={everyone} />{questionId && !questions.loading && (!questions.data || !pending(questions.data.items).some((item) => item.id === questionId && item.from === agent.id)) && <p role="alert" className="question-missing">找不到这条待办：它可能已处理、已过期或不属于此会话。{questions.error && ` ${questions.error}`}</p>}</div>}
           {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
           <RunStrip runs={liveRuns} agents={everyone} />
           <QueuePanel agent={agent} queued={queued} delivery={transcript.delivery} />

@@ -1,7 +1,7 @@
 // What agents put in front of the person (docs/tasks/H1.md §5.4): questions to answer right
 // here, notices to read, and answers that were defaults because nobody answered in time.
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { HumanItem } from "@bindings/HumanItem";
 import { api, errorText } from "./api";
@@ -101,7 +101,7 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
             知道了
           </button>
         </div>
-        <div className="ask-text">{item.text}</div>
+        <NoticeText text={item.text} />
         <ErrorBox error={error} />
       </div>
     );
@@ -161,6 +161,37 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
       )}
       <ErrorBox error={error} />
     </form>
+  );
+}
+
+/**
+ * A notice's words: three lines, then 展开 when there is more. A long run summary used to push
+ * the conversation off the screen; the whole text is one click away and the card stays small.
+ */
+function NoticeText({ text }: { text: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [long, setLong] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || open) return;
+    const measure = () => setLong(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    observer?.observe(el);
+    return () => observer?.disconnect();
+  }, [text, open]);
+  return (
+    <>
+      <div ref={ref} className={`ask-text ${open ? "opened" : "clamped"}`}>
+        {text}
+      </div>
+      {(long || open) && (
+        <button type="button" className="ask-more" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? "收起" : "展开全文"}
+        </button>
+      )}
+    </>
   );
 }
 
