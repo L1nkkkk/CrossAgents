@@ -278,6 +278,18 @@ export function pickTab(dock: DockId, tab: TabId) {
   setDocks({ ...state.docks, [dock]: { ...state.docks[dock], active: tab } });
 }
 
+/**
+ * Unfolds the dock `tab` is in and shows it there, so a tab opened from outside (an agent's
+ * browser_open) is on screen rather than only built. A tab in no dock is left alone.
+ */
+export function showDockOf(tab: TabId) {
+  const dock = dockOf(state.docks, tab);
+  if (!dock) return;
+  const current = state.docks[dock];
+  if (!current.tabs.includes(tab) || (current.open && current.active === tab)) return;
+  setDocks({ ...state.docks, [dock]: { ...current, active: tab, open: true } });
+}
+
 export const dropTab = (tab: TabId, dock: DockId, index?: number) => setDocks(moveTab(state.docks, tab, dock, index));
 
 /**

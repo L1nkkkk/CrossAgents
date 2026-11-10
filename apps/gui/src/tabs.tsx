@@ -99,8 +99,20 @@ function useLabel() {
 export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: DockId; tabs: TabId[]; active: TabId | null; narrow: boolean; onCloseTask?: () => void }) {
   const dragging = useDrag();
   const label = useLabel();
+  const row = useRef<HTMLDivElement>(null);
   // A drag ends in a click on whatever it let go over: that click is not a pick.
   const dragged = useRef(false);
+  // A page's title arrives after its tab does and widens it; the active tab keeps the row scrolled
+  // to it then too, not only when it changed.
+  const activeName = active ? label(active) : "";
+  // The row scrolls sideways; with more tabs than fit, the active one can end up out of sight
+  // (the right dock's own tabs fill it before a browser tab opens). Bring it back on a change.
+  useEffect(() => {
+    const strip = row.current;
+    if (!strip || !active) return;
+    const el = [...strip.querySelectorAll<HTMLElement>("[data-tab]")].find((t) => t.dataset.tab === active);
+    el?.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [active, activeName, tabs.length]);
   const shut = (tab: TabId) => {
     if (isTermTab(tab)) return closeTerminal(tab);
     if (isWebTab(tab)) return closeBrowserTab(tab);
@@ -108,7 +120,7 @@ export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: Dock
     if (tab === "task") onCloseTask?.();
   };
   return (
-    <div className="tab-row" role="tablist" data-tabstrip={narrow ? undefined : dock}>
+    <div className="tab-row" role="tablist" data-tabstrip={narrow ? undefined : dock} ref={row}>
       {tabs.map((tab) => (
         <div
           key={tab}
