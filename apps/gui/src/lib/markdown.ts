@@ -28,7 +28,14 @@ export type Block =
   | { t: "hr" }
   | { t: "table"; head: string[]; align: ("left" | "center" | "right" | undefined)[]; rows: string[][] };
 
-const FENCE = /^\s*(```|~~~)\s*([\w+-]*)\s*$/;
+// Fences as in CommonMark: a run of 3+ backticks or tildes, then an info string whose first word
+// is the language (a backtick fence's info string has no backtick). It closes only on a bare run
+// of the same character at least as long, so ```` can hold a ```text block.
+const FENCE = /^([ \t]*)(`{3,}|~{3,})[ \t]*([^`]*?)[ \t]*$|^([ \t]*)(~{3,})[ \t]*(.*?)[ \t]*$/;
+const closesFence = (line: string, marker: string) => {
+  const m = line.match(/^[ \t]*(`{3,}|~{3,})[ \t]*$/);
+  return !!m && m[1][0] === marker[0] && m[1].length >= marker.length;
+};
 const HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
 const RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
 const ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
@@ -60,11 +67,15 @@ export function parseBlocks(text: string): Block[] {
     const fence = line.match(FENCE);
     if (fence) {
       flush();
+      const indent = fence[1] ?? fence[4];
+      const marker = fence[2] ?? fence[5];
+      const info = fence[3] ?? fence[6];
+      const strip = new RegExp(`^[ \\t]{0,${indent.length}}`);
       const body: string[] = [];
       i++;
-      while (i < lines.length && !lines[i].trim().startsWith(fence[1])) body.push(lines[i++]);
+      while (i < lines.length && !closesFence(lines[i], marker)) body.push(lines[i++].replace(strip, ""));
       i++;
-      blocks.push({ t: "code", lang: fence[2], text: body.join("\n") });
+      blocks.push({ t: "code", lang: info.split(/\s+/)[0], text: body.join("\n") });
       continue;
     }
     if (!line.trim()) {

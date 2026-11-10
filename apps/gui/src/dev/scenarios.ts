@@ -9,7 +9,7 @@ import { workRounds } from "../views/Work.mock";
 import { swimlaneScene } from "../views/RunSwimlane.mock";
 import { runCostScene } from "../views/RunCost.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
-import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
+import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, diagramSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
@@ -213,6 +213,7 @@ export const SCENARIOS: Scenario[] = [
     ] };
   } },
   { key: "tool-image-paths", label: "工具参数图片路径", hint: "加载、拒绝与去重", build: () => toolImagePathsSession() },
+  { key: "diagram", label: "回复里的图与嵌套代码块", hint: "```mermaid 画成图，悬停出现「源码」；```` 里套 ```text 仍是一个代码块", build: () => diagramSession() },
   { key: "tool-images", label: "工具结果图片", hint: "图片结果与混合文字", build: () => toolImagesSession() },
   { key: "continuation-options", label: "持续推进设置", hint: "新建 Work 的持续推进开关及次数、间隔", build: () => {
     localStorage.setItem("crossagents.mode", JSON.stringify("run"));

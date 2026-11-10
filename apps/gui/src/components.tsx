@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useAvatarImage } from "./avatarImages";
+import { MermaidBlock } from "./mermaid";
 import { modelFamily } from "./lib/modelFamily";
 import { MODEL_ICONS, VENDOR_ICONS, type BrandIcon } from "./modelIcons";
 import {
@@ -359,7 +360,7 @@ function renderBlocks(blocks: Block[], doc = false, headingIds?: string[], headi
         );
       }
       case "code":
-        return <pre key={i}>{b.text}</pre>;
+        return b.lang.toLowerCase() === "mermaid" ? <MermaidBlock key={i} text={b.text} /> : <pre key={i}>{b.text}</pre>;
       case "list": {
         const items = b.items.map((item, j) => (
           <li key={j}>

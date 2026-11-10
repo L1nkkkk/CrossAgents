@@ -83,14 +83,17 @@ function push(out: Token[], k: TokKind, s: string) {
 
 function md(line: string, state: HlState): { tokens: Token[]; state: HlState } {
   const out: Token[] = [];
-  const fence = /^\s*(```|~~~)/.exec(line);
   if (state.block === "fence") {
+    // Closes only on a bare run of the same character at least as long (CommonMark).
+    const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1];
+    const ends = !!close && !!state.close && close[0] === state.close[0] && close.length >= state.close.length;
     push(out, "code", line);
-    return { tokens: out, state: fence ? {} : state };
+    return { tokens: out, state: ends ? {} : state };
   }
+  const fence = /^\s*(`{3,}|~{3,})/.exec(line);
   if (fence) {
     push(out, "code", line);
-    return { tokens: out, state: { block: "fence" } };
+    return { tokens: out, state: { block: "fence", close: fence[1] } };
   }
   if (/^\s{0,3}#{1,6}\s/.test(line)) {
     push(out, "head", line);

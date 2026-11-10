@@ -464,3 +464,38 @@ export function liveTaskSession(): { state: MockState; script: Step[]; route: st
     route: `#/s/${nova.name}`,
   };
 }
+
+/** A reply with a ```mermaid diagram and a ```` fence that holds a ```text block: the diagram is
+ * drawn (源码 on hover shows the text) and the inner fence stays inside the outer one. */
+export function diagramSession(): { state: MockState; script: Step[]; route: string } {
+  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", status: "idle", cwd: NOTES_REPO, topic: "NTC 管线", profile: { display_name: "Nova" } });
+  const state: MockState = { ...emptyState(), agents: [nova], plugins: plugins(), quota: quota() };
+  const diagram = [
+    "提示词模板要原样写进文件：",
+    "",
+    "````markdown",
+    "## 输出格式",
+    "```text",
+    "结论：…",
+    "```",
+    "````",
+    "",
+    "上面这段整个是一个代码块。整条链路分三段：",
+    "",
+    "```mermaid",
+    "flowchart LR",
+    '    subgraph A["① 离线压缩（= 训练）"]',
+    '        A1["PBR 通道打包<br/>最多 16 通道"] --> A2[".ntc 文件"]',
+    "    end",
+    '    subgraph B["② 加载：解析 + 上传"]',
+    '        B1["CreateTextureSetMetadata<br/>解析 header/journal"] --> B2["latent → Texture2DArray"]',
+    "    end",
+    "    A2 --> B1",
+    '    B2 --> C["Shading"]',
+    "```",
+  
+  ].join("\n");
+  const t1 = turn({ input: "画一下 NTC 的整条链路，再给我提示词模板。", minutesAgo: 3, took: 1, items: [say(diagram)] });
+  state.transcripts.set(nova.id, transcript(nova, [t1], 9_000));
+  return { state, script: [], route: `#/s/${nova.name}` };
+}

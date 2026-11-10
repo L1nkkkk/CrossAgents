@@ -49,6 +49,21 @@ test("nested lists and numbered starts", () => {
   if (inner.t === "list") assert.deepEqual(inner.items.map((x) => x.text), ["内层 a", "内层 b"]);
 });
 
+test("a longer fence holds a shorter one, and an info string does not close it", () => {
+  const nested = parseBlocks("````markdown\n看这段：\n```text\nhello\n```\n````\n\n后面");
+  assert.deepEqual(nested, [
+    { t: "code", lang: "markdown", text: "看这段：\n```text\nhello\n```" },
+    { t: "p", text: "后面" },
+  ]);
+  // Inside a ``` block, a ```text line is content, not a closer.
+  assert.deepEqual(parseBlocks("```\na\n```text\nb\n```"), [{ t: "code", lang: "", text: "a\n```text\nb" }]);
+  // Tildes and backticks do not close each other; extra info words are ignored for the language.
+  assert.deepEqual(parseBlocks("~~~\n```\n~~~"), [{ t: "code", lang: "", text: "```" }]);
+  assert.deepEqual(parseBlocks("```mermaid title=x\nflowchart TB\n```"), [{ t: "code", lang: "mermaid", text: "flowchart TB" }]);
+  // An indented fence strips its own indentation from the body.
+  assert.deepEqual(parseBlocks("  ```\n  x\n    y\n  ```"), [{ t: "code", lang: "", text: "x\n  y" }]);
+});
+
 test("headings, fences, quotes, rules and tables", () => {
   const blocks = parseBlocks("## 结论\n\n```rust\nfn main() {}\n```\n\n> 引用\n\n---\n\n| 模型 | 价格 |\n|:--|--:|\n| Haiku | 低 |");
   assert.deepEqual(blocks.map((b) => b.t), ["h", "code", "quote", "hr", "table"]);
