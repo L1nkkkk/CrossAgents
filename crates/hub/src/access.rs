@@ -59,6 +59,9 @@ pub fn required(method: &Method, pattern: &str) -> Level {
         (method.as_str(), pattern),
         ("POST", "/v1/devices")
             | ("DELETE", "/v1/devices/{id}")
+            // Opens the hub to the outside, and a pairing code is a credential.
+            | ("POST", "/v1/link")
+            | ("POST", "/v1/link/invites")
             // Settings can restore automatic execution, enable hooks or change setting sources.
             | ("POST", "/v1/agents/{key}/settings")
             // Runs git init and an initial commit at any path supplied by the caller.

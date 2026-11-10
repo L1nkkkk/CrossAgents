@@ -165,6 +165,11 @@ export type MockState = {
   safeMode?: { enabled: boolean; reason: string | null };
   /** The remote connection (`bridge.connection`): absent is 本机, as a desktop never paired. */
   connection?: MockConnectionOptions;
+  /**
+   * The hub's hole-punching entrance (`/v1/link`): "off" until turned on, then "starting" for
+   * `startMs` and "online" (or stuck in "starting" with `stuck`). Absent: off.
+   */
+  link?: { enabled?: boolean; startMs?: number; stuck?: boolean; proxy?: string };
   /** What `bridge.tailscale.status()` answers; a running sample network when unset. */
   tailscale?: TailscaleStatus;
 };
@@ -354,6 +359,27 @@ export class MockBridge implements CrossAgentsBridge {
   }
 
   // ---- Terminals: an echo, with the hub's frames ------------------------------------------
+
+  private linkSince = Date.now();
+  private linkRelay: string | undefined;
+  private linkInvites = 0;
+
+  /** `GET /v1/link` as the scene's `link` says. */
+  private linkStatus() {
+    const link = this.state.link;
+    const enabled = !!link?.enabled;
+    const online = enabled && !link?.stuck && Date.now() - this.linkSince >= (link?.startMs ?? 1200);
+    return {
+      enabled,
+      state: !enabled ? "off" : online ? "online" : "starting",
+      ...(enabled ? { endpoint: "5f1c0a3e9b7d42c8a6e1f0b9d3c7e2a48b6f1d0c9e3a7b5d2f8c4e6a1b9d0f3e" } : {}),
+      ...(enabled ? { relay: this.linkRelay ?? "https://aps1-1.relay.n0.iroh-canary.iroh.link./" } : {}),
+      relay_connected: online,
+      ...(this.linkRelay ? { custom_relay: this.linkRelay } : {}),
+      ...(enabled && link?.proxy ? { proxy: link.proxy } : {}),
+      pending_invites: this.linkInvites,
+    };
+  }
 
   private terminals = new Map<string, { info: Record<string, unknown>; log: string; line: string; connection?: string; relayed: boolean }>();
   private terminalListeners = new Set<(id: string, data: string) => void>();
@@ -937,6 +963,7 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/background") return json(200, s.background ?? { reminders: [], watches: [], verifying: [] });
       if (p === "/v1/quota") return json(200, s.quota);
       if (p === "/v1/devices") return json(200, { devices: s.devices ?? [] });
+      if (p === "/v1/link") return json(200, this.linkStatus());
       if (p === "/v1/accounts/import") return json(200, { candidates: importCandidates() });
       if (p === "/v1/usage/series") return json(200, usageSeriesMock(url.searchParams.get("range") ?? "7d", url.searchParams.get("group") ?? "total", url.searchParams.get("source") ?? "all", s.usageSeriesVariant ?? "normal"));
       if (p === "/v1/expertise" || p === "/v1/expertise/card" || p === "/v1/expertise/maintenance" || p === "/v1/expertise/export") {
@@ -1004,6 +1031,20 @@ export class MockBridge implements CrossAgentsBridge {
     }
 
     if (method === "POST") {
+      if (p === "/v1/link") {
+        const req = (body ?? {}) as { enabled?: boolean; relay?: string };
+        const link = (s.link ??= {});
+        link.enabled = !!req.enabled;
+        this.linkSince = Date.now();
+        this.linkRelay = req.relay?.trim() || undefined;
+        if (!link.enabled) this.linkInvites = 0;
+        return json(200, this.linkStatus());
+      }
+      if (p === "/v1/link/invites") {
+        if (!s.link?.enabled) return json(409, { error: { code: "conflict", message: "内置打洞没有开启：先在 设置 →「连接」里打开它" } });
+        this.linkInvites += 1;
+        return json(200, { code: mockInviteCode(this.linkRelay), expires_at: new Date(Date.now() + 30 * 60_000).toISOString() });
+      }
       if ((m = p.match(FILES_ROUTE)) && m[1] === "resolve") return json(200, { entries: mockResolve((body as { paths: string[] }).paths ?? []) });
       if ((m = p.match(/^\/v1\/expertise\/candidates\/([^/]+)\/(accept|reject)$/))) {
         const x = s.expertise;
@@ -1667,4 +1708,20 @@ function runHistory(s: MockState, detail: RunDetail): RunHistory {
     ended_at: run.updated_at,
     deleted: false,
   };
+}
+
+/** A pairing code as the hub makes it (crates/link/src/lib.rs `Invite`), valid for 30 minutes. */
+export function mockInviteCode(relay?: string): string {
+  const invite = {
+    e: "5f1c0a3e9b7d42c8a6e1f0b9d3c7e2a48b6f1d0c9e3a7b5d2f8c4e6a1b9d0f3e",
+    r: relay ?? "https://aps1-1.relay.n0.iroh-canary.iroh.link./",
+    ...(relay ? { c: true } : {}),
+    a: ["192.168.1.20:51820"],
+    s: "mock0secret0mock0secret0mock0secret0mock0secret0",
+    h: "DESKTOP-CENTRE",
+    x: Math.floor(Date.now() / 1000) + 30 * 60,
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(invite));
+  const b64 = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `ca1-${b64}`;
 }

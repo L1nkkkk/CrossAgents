@@ -111,6 +111,11 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   // CLI this round (`crossagents device add`), so POST /v1/devices is deliberately absent.
   { method: "GET", path: /^\/v1\/devices$/, level: "read" },
   { method: "DELETE", path: /^\/v1\/devices\/[^/]+$/, level: "admin" },
+  // Built-in hole punching (docs/MULTI-NODE.md §14): the status is read; switching it and making a
+  // one-time pairing code are admin, as on the hub.
+  { method: "GET", path: /^\/v1\/link$/, level: "read" },
+  { method: "POST", path: /^\/v1\/link$/, level: "admin" },
+  { method: "POST", path: /^\/v1\/link\/invites$/, level: "admin" },
   { method: "POST", path: /^\/v1\/accounts$/, level: "admin" },
   { method: "GET", path: /^\/v1\/accounts\/import$/, level: "read" },
   { method: "POST", path: /^\/v1\/accounts\/import$/, level: "admin" },

@@ -125,7 +125,7 @@
 
 2026-11-08（run e28910b3）配好了，还没在 Mac 上打出来、装上去。这台是 Windows，electron-builder 只在 macOS 上打 mac 包。下面每条标了「要实测」的，都是还没在那台 Mac 上跑过的。Windows 的安装包仍走 `electron:build` / `electron:release`，这一节不改它。
 
-**前提。** macOS 上安装 Node 与 git。这台机器没有核对 Mac 上要哪一个版本，要实测。不需要 Rust，也不需要先 `cargo build`：`electron:build:mac` 跑 [check-version.mjs](../../apps/gui/scripts/check-version.mjs) `--without-hub`，不检查 hub 二进制。
+**前提。** macOS 上安装 Node 与 git。这台机器没有核对 Mac 上要哪一个版本，要实测。要 Rust（2026-11-10 起）：`electron:build:mac` 先 `cargo build --release -p crossagents-link`，包里带打洞程序（[MULTI-NODE.md](../MULTI-NODE.md) §14「内置打洞」）；[check-version.mjs](../../apps/gui/scripts/check-version.mjs) `--without-hub` 检查它在且版本对，不检查 hub 二进制。
 
 **步骤。**
 

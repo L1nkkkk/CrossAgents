@@ -51,13 +51,75 @@ pub struct ListDevicesResponse {
     pub devices: Vec<Device>,
 }
 
+/// `GET /v1/link`: the hub's built-in hole-punching entrance (docs/MULTI-NODE.md §14「内置打洞」).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LinkStatus {
+    /// The person turned it on (it is kept across hub restarts).
+    pub enabled: bool,
+    /// `off`, `starting` (no relay yet), `online` (reachable), `failed` (see `error`).
+    pub state: LinkState,
+    /// The hub's endpoint id (its public key) while it runs.
+    #[serde(default)]
+    #[ts(optional)]
+    pub endpoint: Option<String>,
+    /// The relay the hub keeps a connection to, and whether that connection is up now.
+    #[serde(default)]
+    #[ts(optional)]
+    pub relay: Option<String>,
+    pub relay_connected: bool,
+    /// A self-hosted relay used instead of n0's public ones.
+    #[serde(default)]
+    #[ts(optional)]
+    pub custom_relay: Option<String>,
+    /// The proxy the hub reaches the relay through (`host:port`, no password).
+    #[serde(default)]
+    #[ts(optional)]
+    pub proxy: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub error: Option<String>,
+    /// Pairing codes made and not used or expired yet.
+    pub pending_invites: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum LinkState {
+    Off,
+    Starting,
+    Online,
+    Failed,
+}
+
+/// `POST /v1/link` (admin): turn the entrance on or off, and choose the relay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetLinkRequest {
+    pub enabled: bool,
+    /// A self-hosted relay (`https://relay.example.com`); empty or missing: n0's public relays.
+    #[serde(default)]
+    #[ts(optional)]
+    pub relay: Option<String>,
+}
+
+/// `POST /v1/link/invites` (admin): a one-time pairing code. Whoever has it can pair one
+/// client device (write level) until it expires; it is shown only in this response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LinkInvite {
+    pub code: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 pub const API_VERSION: &str = "v2";
 
 /// Entry points this hub has that a hub from before the list did not (docs/TODO.md §二): the
 /// GUI hides what a hub does not list, and a hub built before this field sends no list at all,
 /// which the GUI reads as "an older hub" (`apps/gui/src/lib/features.ts`). Names are stable ids;
 /// adding one is not an API break (docs/API-AUTH.md §5), removing one is.
-pub const FEATURES: [&str; 5] = ["git", "lessons", "work", "apply", "devices"];
+pub const FEATURES: [&str; 6] = ["git", "lessons", "work", "apply", "devices", "link"];
 
 /// Checks rerun in the person's directory after applying merged files.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -3195,7 +3257,7 @@ mod tests {
         );
         assert_eq!(
             json["features"],
-            serde_json::json!(["git", "lessons", "work", "apply", "devices"])
+            serde_json::json!(["git", "lessons", "work", "apply", "devices", "link"])
         );
         // An older hub's `/v1/info`, without the field, still parses (that is the whole point).
         let old: HubInfo = serde_json::from_value(serde_json::json!({

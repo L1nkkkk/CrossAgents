@@ -108,7 +108,13 @@ A2 留下的（2026-11-08，run 8298b08a）：
 
 Tailscale 与设备系统（2026-11-10，run 44148f21）：
 
-- [ ] 真内置 tsnet：人选了先接系统 Tailscale（2026-11-10），GUI 现在只读本机已装的 Tailscale。不装系统 Tailscale 也能连，要把 tsnet（或 iroh 这类库，见 [MULTI-NODE.md](MULTI-NODE.md) §14「待评估」）做进 `crossagents` 二进制，留到 A3 之后再定（[MULTI-NODE.md](MULTI-NODE.md) §14、§12 A3）。
+内置打洞（2026-11-10，run 44148f21 第二轮；原来「真内置 tsnet」那条改用 iroh 做了，剪到 [DONE.md](DONE.md) §三十）：
+
+- [ ] Mac 真机实测：照 [INSTALL-MAC.md](INSTALL-MAC.md) §4.0 用配对码连 Windows 中心。要测：Mac 上打包时 `cargo build --release -p crossagents-link` 能编过；GUI 按 macOS 系统代理起 crossagents-link（`session.resolveProxy`）；跨网络时经中继能连、能不能打通直连；中心 hub 重启后 Mac 自动重连（中心的 id 不变，[link.rs](../crates/hub/src/link.rs) 的 `<home>/link.key`）。
+- [ ] 中继的可用性：这台 Windows 不经代理连不上 n0 的公共中继（实测卡在「连接中继中」）。要不要提供国内自建中继（iroh-relay 部署说明、默认地址），或在 GUI 里填 hub 的代理，待定。
+- [ ] UDP 被封、中继也连不上时，没有 TCP 的退路（iroh 的中继本身走 HTTPS，一般能过；纯 UDP 被封的网络能不能用，要实测）。
+- [ ] hub 记下设备是经打洞连进来的：设备页现在看不出一台设备走的是 SSH 还是配对码。配对码兑换时没有把方式写进设备记录。
+- [ ] Mac 包的另一种架构：`electron:build:mac` 打 arm64 与 x64 两种包，但 crossagents-link 只按本机架构编一次，另一种包里的跑不起来（[INSTALL-MAC.md](INSTALL-MAC.md) §2 写了只装同架构的）。要么只打本机架构，要么两种架构各编一次再分别放进包里。
 - [ ] Tailscale 列表真机实测：设置 →「连接」的 Tailscale 一节还没在 Mac 与 Windows 真机上跑过。要测：没装、没登录、没在运行三种提示；同账号多台机器的排序与在线标记；「用这个地址」填进主机后配对能否成功；Linux 服务器作中心时同理（[INSTALL-MAC.md](INSTALL-MAC.md) §4.4）。
 - [ ] 老设备 os 要等下次连上才补：迁移 `0018_device_os.sql` 只加 `devices.os` 列，不回填历史数据。一台设备的系统要等它下次带 `x-crossagents-client-os` 请求、且值与库里不同时才写入（[devices.rs](../crates/hub/src/devices.rs)）；在那之前库里它的 `os` 是空的。
 - [ ] 设备「在线」可能误判离线：设备页的在线由 [isOnline](../apps/gui/src/lib/devices.ts)（`last_seen_at` 在 5 分钟内，`ONLINE_WITHIN_MS`）决定；而 `last_seen_at` 只在设备带 token 的请求时才写，且每分钟最多写一次（[store-sqlite lib.rs](../crates/store-sqlite/src/lib.rs) 第 2176 行左右的 `UPDATE devices SET last_seen_at`）。GUI 只开着 SSE 长连接、没有别的请求时，设备可能被显示成离线。待定做法二选一：SSE 连着时定期刷新 `last_seen`；或者由 hub 记下当前开着事件流的设备，在线判定看它，不再只看 `last_seen_at`。

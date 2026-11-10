@@ -82,7 +82,7 @@ test("a 0.2.6 hub without a list still has the Git page and 排障记录", () =>
   assert.deepEqual(supportOf(state, "work"), { known: true, show: false, disabled: false });
   assert.deepEqual(supportOf(state, "apply"), { known: true, show: false, disabled: false });
   assert.deepEqual(supportOf(state, "devices"), { known: true, show: false, disabled: false });
-  assert.deepEqual(hiddenByHub(state), ["work", "apply", "devices"]);
+  assert.deepEqual(hiddenByHub(state), ["work", "apply", "devices", "link"]);
 });
 
 test("a 0.2.5 hub without a list has none of the entries", () => {
@@ -116,7 +116,7 @@ test("a listed entry shows; one the hub left out stays hidden", () => {
   const state: FeatureState = { known: true, version: "0.2.6", listed: ["git", "apply"], refused: {} };
   assert.deepEqual(supportOf(state, "git"), { known: true, show: true, disabled: false });
   assert.deepEqual(supportOf(state, "work"), { known: true, show: false, disabled: false });
-  assert.deepEqual(hiddenByHub(state), ["lessons", "work", "devices"]);
+  assert.deepEqual(hiddenByHub(state), ["lessons", "work", "devices", "link"]);
 });
 
 test("a hub that does not list 设备 has no devices page", () => {
@@ -124,7 +124,7 @@ test("a hub that does not list 设备 has no devices page", () => {
   // settings entry does not appear, whatever the version says.
   const listed: FeatureState = { known: true, version: "0.3.0", listed: ["git", "lessons", "work", "apply"], refused: {} };
   assert.deepEqual(supportOf(listed, "devices"), { known: true, show: false, disabled: false });
-  assert.deepEqual(hiddenByHub(listed), ["devices"]);
+  assert.deepEqual(hiddenByHub(listed), ["devices", "link"]);
   const inferred: FeatureState = { known: true, version: "0.9.0", listed: null, refused: {} };
   assert.deepEqual(supportOf(inferred, "devices"), { known: true, show: false, disabled: false });
 });

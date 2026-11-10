@@ -7,6 +7,7 @@ import {
   writeRecord, type ConnectionState, type Crypto, type PairStep, type RemoteRecord, type RemoteTarget, type TunnelState,
 } from "./remote.cjs";
 import { locate, pairDevice, Tunnel, type Ssh } from "./remoteTunnel.cjs";
+import { decodeCode, redeemCode, type LinkProgram } from "./link.cjs";
 
 /** The remote hub cannot be reached now: `hub:request` answers 503 with this reason. */
 export class Unavailable extends Error {}
@@ -16,6 +17,10 @@ export type ControllerOptions = {
   file: string;
   crypto: Crypto;
   ssh: Ssh;
+  /** crossagents-link, for hubs paired by code; undefined: this build has none. */
+  link?: LinkProgram;
+  /** This machine's system as the hub records it (`windows`, `macos`, `linux`). */
+  os?: string;
   /** The default device name (`<host name>-gui`, cleaned). */
   defaultDeviceName: string;
   /** Packaged: executable exists; development: true to retain local connections. */
@@ -84,6 +89,11 @@ export class RemoteController {
 
   pair(target: unknown, deviceName: unknown): Promise<ConnectionState> {
     return this.serial(() => this.doPair(target, deviceName));
+  }
+
+  /** Pairs with a hub by its one-time code (hole punching, docs/MULTI-NODE.md §14). */
+  pairCode(code: unknown, deviceName: unknown): Promise<ConnectionState> {
+    return this.serial(() => this.doPairCode(code, deviceName));
   }
 
   use(mode: unknown): Promise<ConnectionState> {
@@ -164,6 +174,41 @@ export class RemoteController {
     return this.get();
   }
 
+  private async doPairCode(rawCode: unknown, rawName: unknown): Promise<ConnectionState> {
+    // Checked here, before anything runs: a pasted code that is not one says so at once.
+    const info = decodeCode(rawCode);
+    const deviceName = checkDeviceName(rawName);
+    const why = this.opts.crypto.unavailable();
+    if (why) throw new Error(`无法安全保存 token：${why}。没有配对。`);
+    if (!this.opts.link) throw new Error("这个安装包里没有打洞程序（crossagents-link），不能用配对码连接");
+    this.opts.onPairStep("redeem");
+    const { paired } = await redeemCode(this.opts.link, String(rawCode), deviceName, this.opts.os ?? "other");
+    const sealed = sealToken(this.opts.crypto, paired.token);
+    const target: RemoteTarget = { host: info.host };
+    const same = this.record?.via === "link" && this.record.link?.endpoint === info.link.endpoint;
+    const record: RemoteRecord = {
+      mode: "remote",
+      via: "link",
+      link: info.link,
+      target,
+      deviceName: paired.deviceName || deviceName,
+      deviceId: paired.deviceId,
+      pairedAt: new Date().toISOString(),
+      ...(same && this.record?.localPort ? { localPort: this.record.localPort } : {}),
+      token: sealed,
+    };
+    await this.disconnect();
+    if (this.mode() === "local") await this.opts.beforeRemote?.();
+    await writeRecord(this.opts.file, record);
+    this.record = record;
+    this.opts.log?.(`remote: paired ${record.deviceName} (${record.deviceId}) with ${info.host} by code`);
+    this.opts.onPairStep("forward");
+    this.connect();
+    await this.settled();
+    this.opts.onHubChange("remote");
+    return this.get();
+  }
+
   private async doUse(raw: unknown): Promise<ConnectionState> {
     if (raw !== "local" && raw !== "remote") throw new Error(`unknown mode: ${String(raw)}`);
     const mode: "local" | "remote" = raw;
@@ -192,9 +237,15 @@ export class RemoteController {
       this.publish();
       return;
     }
+    if (record.via === "link" && !this.opts.link) {
+      this.tunnelState = { status: "offline", reason: "这个安装包里没有打洞程序（crossagents-link）", stopped: true };
+      this.publish();
+      return;
+    }
     const tunnel: Tunnel = new Tunnel({
       ssh: this.opts.ssh,
       target: record.target,
+      ...(record.via === "link" && record.link && this.opts.link ? { link: { program: this.opts.link, target: record.link } } : {}),
       token: this.token,
       localPort: record.localPort,
       onLocalPort: (port) => {

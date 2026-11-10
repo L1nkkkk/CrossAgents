@@ -49,7 +49,7 @@ test("local mode is 本机; remote mode carries the target and the tunnel's stat
   const remote: ConnectionState = {
     mode: "remote",
     bundledHub: true,
-    remote: { target, deviceName: "mac-gui", deviceId: "d1", pairedAt: "2026-11-08T10:00:00Z" },
+    remote: { target, via: "ssh", deviceName: "mac-gui", deviceId: "d1", pairedAt: "2026-11-08T10:00:00Z" },
     tunnel: { status: "connected", localPort: 50123, remotePort: 7420 },
     defaultDeviceName: "pc-gui",
   };
@@ -71,7 +71,7 @@ test("the sidebar mark is red whenever the remote tunnel is not up", () => {
   const base: ConnectionState = {
     mode: "remote",
     bundledHub: true,
-    remote: { target, deviceName: "mac-gui", deviceId: "d1", pairedAt: "2026-11-08T10:00:00Z" },
+    remote: { target, via: "ssh", deviceName: "mac-gui", deviceId: "d1", pairedAt: "2026-11-08T10:00:00Z" },
     defaultDeviceName: "pc-gui",
   };
   const up = markWords({ ...base, tunnel: { status: "connected", localPort: 50123, remotePort: 7420 } });

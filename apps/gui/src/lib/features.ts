@@ -12,7 +12,7 @@ import { useSyncExternalStore } from "react";
  * Entry names the hub lists. Stable ids, also spelled out in `crates/api-types/src/lib.rs`
  * (`FEATURES`); the GUI ignores names it does not know, so a newer hub can add some.
  */
-export const FEATURES = ["git", "lessons", "work", "apply", "devices"] as const;
+export const FEATURES = ["git", "lessons", "work", "apply", "devices", "link"] as const;
 export type Feature = (typeof FEATURES)[number];
 
 /** How an entry is named to a person, in the old-hub notice and the version tooltip. */
@@ -22,6 +22,7 @@ export const FEATURE_LABELS: Record<Feature, string> = {
   work: "工作组",
   apply: "应用到原目录",
   devices: "设备",
+  link: "内置打洞",
 };
 
 /**

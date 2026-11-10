@@ -26,6 +26,7 @@ import { wsKey } from "../workspace";
 import { quota } from "../views/Usage.mock";
 import { workspaceState } from "../views/Workspace.mock";
 import type { MockState, Step } from "./MockBridge";
+import { mockInviteCode } from "./MockBridge";
 import { FEATURES } from "../lib/features";
 
 export type Scenario = {
@@ -37,9 +38,11 @@ export type Scenario = {
 
 /** Fills a React-controlled input as a person would, so its `onChange` runs. */
 function typeInto(selector: string, value: string) {
-  const input = document.querySelector<HTMLInputElement>(selector);
+  const input = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
   if (!input) throw new Error(`scenario: no ${selector}`);
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  // React follows the value through the element's own setter, and a textarea has its own.
+  const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, "value")!.set!.call(input, value);
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
@@ -906,15 +909,73 @@ export const SCENARIOS: Scenario[] = [
     ],
     route: "#/settings/devices",
   }) },
-  { key: "connection-local", label: "连接：本机", hint: "设置 →「连接」：现在连的是本机，可以在这里填中心的主机配对；下面写明配对拿到的是 write 设备，终端、批准扩展和改 agent 权限要 admin", build: () => {
+  { key: "connection-local", label: "连接：本机（SSH）", hint: "设置 →「连接」→「连到别的电脑上的中心」→ SSH：现在连的是本机，可以在这里填中心的主机配对；下面写明配对拿到的是 write 设备，终端、批准扩展和改 agent 权限要 admin", build: () => {
     const scene = workRounds();
-    return { state: { ...scene.state, connection: {} }, script: [], route: "#/settings/connection" };
+    return {
+      state: { ...scene.state, connection: {} },
+      script: [
+        { at: 300, act: () => document.querySelector<HTMLButtonElement>('[data-action="goal-join"]')?.click() },
+        { at: 400, act: () => document.querySelector<HTMLButtonElement>('[data-action="method-ssh"]')?.click() },
+      ],
+      route: "#/settings/connection",
+    };
+  } },
+  { key: "connection-host", label: "连接：当中心（内置打洞）", hint: "本机有 hub、没配对过：默认就是「让别的电脑连进来」。点「开启」后先是「连接中继中」，一会儿变「在线」；再点「生成配对码」，第三步出现配对码、复制按钮和倒计时", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: {}, link: { startMs: 1500, proxy: "http://127.0.0.1:7890" } },
+      script: [
+        { at: 600, act: () => document.querySelector<HTMLButtonElement>('[data-action="link-on"]')?.click() },
+        { at: 3200, act: () => document.querySelector<HTMLButtonElement>('[data-action="link-invite"]')?.click() },
+      ],
+      route: "#/settings/connection",
+    };
+  } },
+  { key: "connection-host-stuck", label: "连接：当中心（中继连不上）", hint: "开启后一直「连接中继中」：说明里写经哪个代理、多半是代理不通或中继被墙，可以换代理或填自建中继；这时生成的码只带局域网地址，第二步写明这一点", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: {}, link: { enabled: true, stuck: true } },
+      script: [],
+      route: "#/settings/connection",
+    };
+  } },
+  { key: "connection-code", label: "连接：用配对码连接", hint: "Mac（不带 hub）打开连接页：默认「连到别的电脑上的中心」→「配对码」。粘贴后下面马上写出中心的名字、还剩多久过期；点「连接」后按三步走，连上后整页切到远程", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: { bundledHub: false, stepMs: 1500 } },
+      script: [
+        { at: 500, act: () => typeInto('[data-field="code"]', mockInviteCode()) },
+        { at: 1800, act: () => document.querySelector<HTMLButtonElement>('[data-action="pair-code"]')?.click() },
+      ],
+      route: "#/settings/connection",
+    };
+  } },
+  { key: "connection-code-failed", label: "连接：配对码用不了", hint: "配对码已经被用过：原样显示中心的话，并给出下一步——在中心上重新生成一个", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: { bundledHub: false, stepMs: 300, codeError: "这个配对码已经用过、过期，或中心的 hub 重启过：在中心上重新生成一个" } },
+      script: [
+        { at: 400, act: () => typeInto('[data-field="code"]', mockInviteCode()) },
+        { at: 700, act: () => document.querySelector<HTMLButtonElement>('[data-action="pair-code"]')?.click() },
+      ],
+      route: "#/settings/connection",
+    };
+  } },
+  { key: "connection-link-remote", label: "连接：打洞已连接", hint: "用配对码配对好以后：上面写远程 DESKTOP-CENTRE、已连接，旁边先是「经中继」，打通后变「直连」；下面写明是配对码（内置打洞）", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: { paired: { host: "DESKTOP-CENTRE" }, via: "link", stepMs: 300, bundledHub: false } },
+      script: [],
+      route: "#/settings/connection",
+    };
   } },
   { key: "connection-pairing", label: "连接：配对中", hint: "填好主机点「配对并连接」：表单禁用，下面按 onPairStep 列出四步并标出正在做哪一步", build: () => {
     const scene = workRounds();
     return {
       state: { ...scene.state, connection: { stepMs: 5000 } },
       script: [
+        { at: 200, act: () => document.querySelector<HTMLButtonElement>('[data-action="goal-join"]')?.click() },
+        { at: 300, act: () => document.querySelector<HTMLButtonElement>('[data-action="method-ssh"]')?.click() },
         { at: 400, act: () => typeInto('[data-field="host"]', "centre.example") },
         { at: 700, act: () => document.querySelector<HTMLButtonElement>('[data-action="pair"]')?.click() },
       ],
@@ -946,6 +1007,8 @@ export const SCENARIOS: Scenario[] = [
     return {
       state: { ...scene.state, connection: { stepMs: 200, pairError: "ssh 失败（退出码 255）\nHost key verification failed." } },
       script: [
+        { at: 200, act: () => document.querySelector<HTMLButtonElement>('[data-action="goal-join"]')?.click() },
+        { at: 300, act: () => document.querySelector<HTMLButtonElement>('[data-action="method-ssh"]')?.click() },
         { at: 400, act: () => typeInto('[data-field="host"]', "centre.example") },
         { at: 700, act: () => document.querySelector<HTMLButtonElement>('[data-action="pair"]')?.click() },
       ],

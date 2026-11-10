@@ -102,6 +102,8 @@ pub struct AppState {
     pub refresher: Arc<crate::refresh::Refresher>,
     /// The person's terminals on this machine.
     pub terminals: Arc<crate::terminal::Terminals>,
+    /// The built-in hole-punching entrance (docs/MULTI-NODE.md §14).
+    pub link: Arc<crate::link::LinkService>,
 }
 
 impl AppState {
@@ -114,6 +116,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     let authed = Router::new()
         .route("/v1/devices", get(list_devices).post(create_device))
         .route("/v1/devices/{id}", delete(revoke_device))
+        .route("/v1/link", get(link_status).post(set_link))
+        .route("/v1/link/invites", post(create_link_invite))
         .route("/v1/info", get(info))
         .route("/v1/agents", get(list_agents).post(create_agent))
         .route("/v1/session-candidates", get(session_candidates))
@@ -297,6 +301,12 @@ pub fn router(state: Arc<AppState>) -> Router {
 // Errors
 
 pub struct AppError(StatusCode, ApiError);
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1.error.message)
+    }
+}
 
 impl AppError {
     fn new(status: StatusCode, code: ErrorCode, message: impl Into<String>) -> Self {
@@ -3811,7 +3821,28 @@ async fn create_device(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crossagents_api_types::CreateDeviceRequest>,
 ) -> ApiResult<Json<crossagents_api_types::CreateDeviceResponse>> {
-    let name = req.name.trim();
+    Ok(Json(
+        issue_device(
+            &state,
+            &req.name,
+            req.kind.unwrap_or_default(),
+            req.level.unwrap_or_default(),
+            req.os,
+        )
+        .await?,
+    ))
+}
+
+/// Records a new device and returns its token (shown only here). `POST /v1/devices` and a
+/// redeemed pairing code (crate::link) both issue through this.
+pub(crate) async fn issue_device(
+    state: &AppState,
+    name: &str,
+    kind: crossagents_core::DeviceKind,
+    level: crossagents_core::DeviceLevel,
+    os: Option<crossagents_core::DeviceOs>,
+) -> ApiResult<crossagents_api_types::CreateDeviceResponse> {
+    let name = name.trim();
     if !(1..=64).contains(&name.chars().count()) || name.chars().any(char::is_control) {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
@@ -3822,12 +3853,12 @@ async fn create_device(
     let device = crossagents_core::Device {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.to_owned(),
-        kind: req.kind.unwrap_or_default(),
-        level: req.level.unwrap_or_default(),
+        kind,
+        level,
         created_at: Utc::now(),
         last_seen_at: None,
         revoked_at: None,
-        os: req.os,
+        os,
     };
     let token = format!(
         "cad_{}{}",
@@ -3848,10 +3879,62 @@ async fn create_device(
     {
         tracing::error!(device = %device.name, %error, "failed to publish device created event");
     }
-    Ok(Json(crossagents_api_types::CreateDeviceResponse {
-        device,
-        token,
-    }))
+    Ok(crossagents_api_types::CreateDeviceResponse { device, token })
+}
+
+/// Where the hub listens: the entrance pipes streams there.
+fn hub_addr(state: &AppState) -> ApiResult<std::net::SocketAddr> {
+    state
+        .url
+        .trim_start_matches("http://")
+        .parse()
+        .map_err(|_| {
+            AppError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
+                "the hub's own address is unknown",
+            )
+        })
+}
+
+async fn link_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<crossagents_api_types::LinkStatus> {
+    Json(state.link.status().await)
+}
+
+async fn set_link(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crossagents_api_types::SetLinkRequest>,
+) -> ApiResult<Json<crossagents_api_types::LinkStatus>> {
+    let addr = hub_addr(&state)?;
+    let status = state
+        .link
+        .set(&state, addr, req.enabled, req.relay)
+        .await
+        .map_err(|err| {
+            AppError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::BadRequest,
+                format!("{err:#}"),
+            )
+        })?;
+    tracing::info!(enabled = req.enabled, "link: entrance switched");
+    Ok(Json(status))
+}
+
+async fn create_link_invite(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crossagents_api_types::LinkInvite>> {
+    let invite = state.link.invite(hostname()).await.map_err(|err| {
+        AppError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Conflict,
+            format!("{err:#}"),
+        )
+    })?;
+    tracing::info!(expires = %invite.expires_at, "link: pairing code made");
+    Ok(Json(invite))
 }
 async fn revoke_device(
     State(state): State<Arc<AppState>>,

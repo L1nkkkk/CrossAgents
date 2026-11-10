@@ -20,6 +20,7 @@ pub mod identity;
 pub mod image;
 pub mod install;
 pub mod lessons;
+pub mod link;
 pub mod models;
 pub mod notices;
 pub mod paths;
@@ -401,7 +402,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         installer: Arc::new(install::Installer::new()),
         refresher,
         terminals: terminals.clone(),
+        link: Arc::new(link::LinkService::new(&paths.home)),
     });
+    // The hole-punching entrance, when the person left it on (docs/MULTI-NODE.md §14).
+    state.link.resume(&state, addr).await;
+    let link = state.link.clone();
     bus.publish(EventKind::HubStarted {
         version: VERSION.into(),
     })
@@ -430,6 +435,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 .await;
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
+            link.stop().await;
             let _ = account_start.await;
             let _ = extension_poll.await;
             // Hooks and services end before the runner closes its door, so their processes

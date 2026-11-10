@@ -9,6 +9,11 @@ export type MockConnectionOptions = {
   paired?: RemoteTarget;
   /** Pairing fails with this reason (as ssh's stderr would read). */
   pairError?: string;
+  /** Pairing by code fails with this reason (as crossagents-link would say). */
+  codeError?: string;
+  /** Start paired by code (hole punching) rather than over SSH; `path` is what it settles on. */
+  via?: "ssh" | "link";
+  path?: "direct" | "relay";
   /** The tunnel drops this many ms after connecting, with `dropReason`. */
   dropAfterMs?: number;
   dropReason?: string;
@@ -36,7 +41,7 @@ export function createMockConnection(options: MockConnectionOptions = {}): MockC
     state = {
       ...state,
       mode: "remote",
-      remote: { target: options.paired, deviceName: state.defaultDeviceName, deviceId: "dev-mock", pairedAt: new Date().toISOString() },
+      remote: { target: options.paired, via: options.via ?? "ssh", deviceName: state.defaultDeviceName, deviceId: "dev-mock", pairedAt: new Date().toISOString() },
       tunnel: { status: "connecting" },
     };
   }
@@ -62,7 +67,9 @@ export function createMockConnection(options: MockConnectionOptions = {}): MockC
         if (options.offline.retry) timer = setTimeout(connect, 1_000);
         return;
       }
-      set({ ...state, tunnel: { status: "connected", localPort: 50123, remotePort: 7420 } });
+      const link = state.remote?.via === "link";
+      set({ ...state, tunnel: link ? { status: "connected", localPort: 50123, path: options.path ?? "relay" } : { status: "connected", localPort: 50123, remotePort: 7420 } });
+      if (link && !options.path) timer = setTimeout(() => state.tunnel?.status === "connected" && set({ ...state, tunnel: { ...state.tunnel, path: "direct" } }), 2_000);
       if (options.revoked) {
         timer = setTimeout(() => set({ ...state, tunnel: { ...state.tunnel!, status: "offline", reason: REVOKED, stopped: true } }), stepMs);
       } else if (options.dropAfterMs !== undefined) {
@@ -92,9 +99,26 @@ export function createMockConnection(options: MockConnectionOptions = {}): MockC
       state = {
         ...state,
         mode: "remote",
-        remote: { target: { ...target }, deviceName, deviceId: "dev-mock", pairedAt: new Date().toISOString() },
+        remote: { target: { ...target }, via: "ssh", deviceName, deviceId: "dev-mock", pairedAt: new Date().toISOString() },
       };
       step("tunnel");
+      connect();
+      await wait(stepMs);
+      step("check");
+      return copy();
+    },
+    async pairCode(code, deviceName) {
+      if (!code.trim().startsWith("ca1-")) throw new Error("这不是 CrossAgents 的配对码（配对码以 ca1- 开头）");
+      step("redeem");
+      await wait(stepMs * 2);
+      if (options.codeError) throw new Error(options.codeError);
+      disconnect();
+      state = {
+        ...state,
+        mode: "remote",
+        remote: { target: { host: "DESKTOP-CENTRE" }, via: "link", deviceName, deviceId: "dev-mock", pairedAt: new Date().toISOString() },
+      };
+      step("forward");
       connect();
       await wait(stepMs);
       step("check");

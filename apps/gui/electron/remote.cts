@@ -8,15 +8,30 @@ import { dirname, join } from "node:path";
 
 /** Where the hub runs and how to reach it over SSH (src/bridge.d.ts `RemoteTarget`). */
 export type RemoteTarget = { host: string; user?: string; sshPort?: number; command?: string };
-export type TunnelState = { status: "connecting" | "connected" | "offline"; localPort?: number; remotePort?: number; reason?: string; stopped?: boolean };
+/**
+ * A hub reached by hole punching (crossagents-link, docs/MULTI-NODE.md §14「内置打洞」): its
+ * endpoint id, the relay it used when the code was made, and its direct addresses.
+ */
+export type LinkTarget = { endpoint: string; relay?: string; customRelay?: boolean; addrs?: string[] };
+/** How the remote hub is reached: an SSH tunnel, or the built-in hole punching. */
+export type Via = "ssh" | "link";
+export type TunnelState = {
+  status: "connecting" | "connected" | "offline";
+  localPort?: number;
+  remotePort?: number;
+  reason?: string;
+  stopped?: boolean;
+  /** Hole punching only: "direct" once it won, "relay" while the relay carries the traffic. */
+  path?: "direct" | "relay";
+};
 export type ConnectionState = {
   mode: "local" | "remote";
   bundledHub: boolean;
-  remote?: { target: RemoteTarget; deviceName: string; deviceId: string; pairedAt: string };
+  remote?: { target: RemoteTarget; via: Via; deviceName: string; deviceId: string; pairedAt: string };
   tunnel?: TunnelState;
   defaultDeviceName: string;
 };
-export type PairStep = "locate" | "pair" | "tunnel" | "check";
+export type PairStep = "locate" | "pair" | "tunnel" | "check" | "redeem" | "forward";
 
 // ---------------------------------------------------------------------------------------
 // Input checks: everything below that reaches ssh or the remote shell has passed these.
@@ -82,6 +97,35 @@ export function checkTarget(target: unknown): RemoteTarget {
   const command = checkCommand(t.command);
   if (command) out.command = command;
   return out;
+}
+
+/** An endpoint id: 64 hex digits (or 52 base32 letters, which iroh also reads). */
+const ENDPOINT = /^(?:[0-9a-f]{64}|[a-z2-7]{52})$/i;
+/** `ip:port` or `[ipv6]:port`, as the hub reports its direct addresses. */
+const SOCKET = /^(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+(?:%[A-Za-z0-9._-]+)?\]):\d{1,5}$/;
+
+/** Checks what is passed to crossagents-link as arguments; throws InputError. */
+export function checkLinkTarget(value: unknown): LinkTarget {
+  if (!value || typeof value !== "object") throw new InputError("配对码里没有中心的地址");
+  const v = value as Record<string, unknown>;
+  if (typeof v.endpoint !== "string" || !ENDPOINT.test(v.endpoint)) throw new InputError("配对码里中心的 id 无效");
+  const out: LinkTarget = { endpoint: v.endpoint };
+  if (v.relay !== undefined && v.relay !== null && v.relay !== "") {
+    if (typeof v.relay !== "string" || v.relay.length > 512 || !/^https?:\/\/[^\s"'`]+$/.test(v.relay)) throw new InputError("配对码里的中继地址无效");
+    out.relay = v.relay;
+    if (v.customRelay === true) out.customRelay = true;
+  }
+  if (Array.isArray(v.addrs)) {
+    const addrs = v.addrs.filter((a): a is string => typeof a === "string" && SOCKET.test(a)).slice(0, 16);
+    if (addrs.length) out.addrs = addrs;
+  }
+  return out;
+}
+
+/** A host name to show for a hub paired by code, cleaned to what `checkHost` takes. */
+export function hostLabel(host: unknown): string {
+  const cleaned = (typeof host === "string" ? host : "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 63);
+  return cleaned || "center";
 }
 
 /** `<host name>-gui`, cleaned to what a device name allows. */
@@ -221,10 +265,11 @@ export const REVOKED = "这台设备已被吊销或 token 失效，请重新配�
 
 export type TunnelEvent =
   | { type: "connecting" }
-  | { type: "up"; localPort: number; remotePort: number }
+  | { type: "up"; localPort: number; remotePort?: number }
   | { type: "down"; reason: string }
   | { type: "unauthorized" }
-  | { type: "stopped"; reason: string };
+  | { type: "stopped"; reason: string }
+  | { type: "path"; direct: boolean };
 
 /**
  * The tunnel's next state. Once stopped (revoked, or the token could not be read) nothing but
@@ -237,7 +282,9 @@ export function tunnelReduce(state: TunnelState | undefined, event: TunnelEvent)
     case "connecting":
       return clean({ status: "connecting", ...ports });
     case "up":
-      return { status: "connected", localPort: event.localPort, remotePort: event.remotePort };
+      return clean({ status: "connected", localPort: event.localPort, remotePort: event.remotePort, path: state?.path });
+    case "path":
+      return { ...(state ?? { status: "connecting" }), path: event.direct ? "direct" : "relay" };
     case "down":
       return clean({ status: "offline", ...ports, reason: event.reason });
     case "unauthorized":
@@ -265,6 +312,10 @@ export type Crypto = {
 
 export type RemoteRecord = {
   mode: "local" | "remote";
+  /** Missing in records saved before hole punching: ssh. */
+  via?: Via;
+  /** `via: "link"`: where the hub is. `target.host` then only names it. */
+  link?: LinkTarget;
   target: RemoteTarget;
   deviceName: string;
   deviceId: string;
@@ -287,8 +338,10 @@ export async function readRecord(file: string): Promise<RemoteRecord | undefined
     const value = JSON.parse(text) as Partial<RemoteRecord>;
     if (!value || typeof value.token !== "string" || typeof value.deviceId !== "string") return undefined;
     const target = checkTarget(value.target);
+    const link = value.via === "link" ? checkLinkTarget(value.link) : undefined;
     return {
       mode: value.mode === "remote" ? "remote" : "local",
+      ...(link ? { via: "link" as const, link } : {}),
       target,
       deviceName: typeof value.deviceName === "string" ? value.deviceName : "",
       deviceId: value.deviceId,
@@ -345,7 +398,7 @@ export const REPAIR = "请重新配对";
 export function publicState(record: RemoteRecord | undefined, tunnel: TunnelState | undefined, deviceName: string): Omit<ConnectionState, "bundledHub"> {
   const state: Omit<ConnectionState, "bundledHub"> = { mode: record?.mode ?? "local", defaultDeviceName: deviceName };
   if (record) {
-    state.remote = { target: { ...record.target }, deviceName: record.deviceName, deviceId: record.deviceId, pairedAt: record.pairedAt };
+    state.remote = { target: { ...record.target }, via: record.via ?? "ssh", deviceName: record.deviceName, deviceId: record.deviceId, pairedAt: record.pairedAt };
     if (record.mode === "remote" && tunnel) state.tunnel = { ...tunnel };
   }
   return state;

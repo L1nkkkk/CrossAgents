@@ -65,6 +65,9 @@ pub enum Command {
     /// Issue, list and revoke device credentials.
     #[command(subcommand)]
     Device(cmd::device::DeviceCommand),
+    /// The built-in hole-punching entrance: on, off, status and one-time pairing codes.
+    #[command(subcommand)]
+    Link(cmd::link::LinkCommand),
     /// Guided setup of a vendor: account, login, models and agents.
     Setup(cmd::setup::SetupArgs),
     /// Run a command under the local resource locks (docs/tasks/LOCKS.md §4).

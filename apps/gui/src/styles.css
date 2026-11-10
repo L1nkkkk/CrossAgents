@@ -2099,6 +2099,28 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .conn-steps li.now::before { content: "→ "; color: var(--accent); }
 .settings-section > .notice { margin: 0; }
 
+/* 设置 → 连接: what the person came to do, and the numbered steps of each way (§14 内置打洞) */
+.guide-goals { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.guide-goals button { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 10px 14px; text-align: left; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.guide-goals button:hover { border-color: var(--border-strong); }
+.guide-goals button.active { border-color: var(--accent); background: var(--accent-bg); }
+.guide-goal-title { font-weight: 500; color: var(--text); }
+.guide-goals button.active .guide-goal-title { color: var(--accent-text); }
+.guide-goal-hint { font-size: 12px; color: var(--text-2); }
+.guide-steps { counter-reset: guide; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.host-steps { padding: 14px 16px 16px; }
+.guide-steps > li { counter-increment: guide; position: relative; padding-left: 30px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.guide-steps > li::before { content: counter(guide); position: absolute; left: 0; top: 0; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 11.5px; font-weight: 600; background: var(--surface-sunk); color: var(--text-2); border: 1px solid var(--border); }
+.guide-steps > li.now::before { background: var(--accent); border-color: var(--accent); color: #fff; }
+.guide-steps > li.done::before { content: "✓"; background: var(--ok); border-color: var(--ok); color: #fff; }
+.guide-step-title { font-weight: 500; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.guide-line { padding: 0; border: none; gap: 12px; }
+.code-input { width: 100%; box-sizing: border-box; font-size: 11.5px; word-break: break-all; min-height: 52px; }
+.code-box { display: flex; gap: 8px; align-items: flex-start; }
+.code-box .code-input { flex: 1; min-width: 0; }
+.code-preview.ok { color: var(--ok-text, var(--text-2)); }
+.code-preview.bad { color: var(--danger-text); }
+
 /* The sidebar's one-line "本机 / 远程 host" mark, above the hub connection line */
 .conn-where { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); padding: 2px 4px 0; border-radius: var(--radius); min-width: 0; text-decoration: none; }
 .conn-where:hover { background: var(--hover); color: var(--text); }

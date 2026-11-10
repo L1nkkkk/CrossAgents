@@ -12,9 +12,9 @@
     "test": "node --test \"src/lib/*.test.ts\" \"src/extensions/*.test.ts\" && tsc -p electron && node --test scripts/packaging.test.mjs && node --test \"dist-electron/*.test.cjs\"",
     "electron:compile": "tsc -p electron",
     "electron:dev": "npm run electron:compile && concurrently -k -n vite,electron \"vite\" \"electron . --dev-server-url=http://localhost:1420\"",
-    "electron:build": "node scripts/check-version.mjs && cargo build --release -p crossagents-cli && npm run build && npm run electron:compile && electron-builder --win --publish never",
-    "electron:release": "node scripts/check-version.mjs && cargo build --release -p crossagents-cli && npm run build && npm run electron:compile && electron-builder --win --publish always",
-    "electron:build:mac": "node scripts/check-version.mjs --without-hub && npm run build && npm run electron:compile && electron-builder --mac --publish never"
+    "electron:build": "cargo build --release -p crossagents-cli -p crossagents-link && node scripts/check-version.mjs && npm run build && npm run electron:compile && electron-builder --win --publish never",
+    "electron:release": "cargo build --release -p crossagents-cli -p crossagents-link && node scripts/check-version.mjs && npm run build && npm run electron:compile && electron-builder --win --publish always",
+    "electron:build:mac": "cargo build --release -p crossagents-link && node scripts/check-version.mjs --without-hub && npm run build && npm run electron:compile && electron-builder --mac --publish never"
   },
   "devDependencies": {
     "@fontsource-variable/inter": "^5.3.0",
@@ -49,6 +49,7 @@
       "dist-electron/**",
       "!dist-electron/*.test.cjs",
       "!dist-electron/fakeSsh.cjs",
+      "!dist-electron/fakeLink.cjs",
       "package.json"
     ],
     "win": {
@@ -60,6 +61,10 @@
         {
           "from": "../../target/release/crossagents.exe",
           "to": "bin/crossagents.exe"
+        },
+        {
+          "from": "../../target/release/crossagents-link.exe",
+          "to": "bin/crossagents-link.exe"
         },
         {
           "from": "build/icon.ico",
@@ -103,6 +108,10 @@
       "notarize": false,
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "extraResources": [
+        {
+          "from": "../../target/release/crossagents-link",
+          "to": "bin/crossagents-link"
+        },
         {
           "from": "build/iconTemplate.png",
           "to": "iconTemplate.png"

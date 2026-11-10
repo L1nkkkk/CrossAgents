@@ -122,8 +122,8 @@ console.log("  Cargo.toml · apps/gui/package.json · apps/gui/package-lock.json
 
 // ---------------------------------------------------------------------------- 构建
 
-step("cargo build --release -p crossagents-cli（顺带刷新 Cargo.lock）");
-runLoud("cargo build --release -p crossagents-cli", { env: buildEnv });
+step("cargo build --release -p crossagents-cli -p crossagents-link（顺带刷新 Cargo.lock）");
+runLoud("cargo build --release -p crossagents-cli -p crossagents-link", { env: buildEnv });
 
 const changed = run("git status --porcelain");
 if (!changed.includes("Cargo.lock")) {

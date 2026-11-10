@@ -454,7 +454,17 @@ B1 之后节点机器上的 GUI 管的可能是本机 node（单干时是本机 
 
 **默认推荐打洞（组网工具）**：不要公网地址、不开端口；偷到 token 还得先进组网；CrossAgents 传的主要是文字事件，走中继也够快；它只解决连得到，中心那台仍要开着。代价是国内厂商中继多在海外、打不通时延迟高，可在国内云服务器自建中继（headscale + 自建 DERP、EasyTier 自建节点、RustDesk 那种 hbbs / hbbr）；两边都有 IPv6 时更容易打通。
 
-已接系统 Tailscale（2026-11-10，人选了先接这条）：GUI 读本机已装的 Tailscale（`tailscale status --json`），在设置 →「连接」列出同一账号下的机器，点「用这个地址」填主机，连接仍走上面的 SSH 隧道。不内置 tsnet：装系统 Tailscale 是前提，内置留待 A3（§12）。
+已接系统 Tailscale（2026-11-10，人选了先接这条）：GUI 读本机已装的 Tailscale（`tailscale status --json`），在设置 →「连接」列出同一账号下的机器，点「用这个地址」填主机，连接仍走上面的 SSH 隧道。
+
+**内置打洞**（2026-11-10，run 44148f21 第二轮）：打洞做进了 CrossAgents 自己，用 iroh（按公钥拨号，先经中继、再尽量打通直连；打不通就一直经中继）。不装 Tailscale、不开端口、不用 SSH。
+
+- 中心：hub 里的入口（[link.rs](../crates/hub/src/link.rs)），人在设置 →「连接」→「让别的电脑连进来」打开（或 `crossagents link on`），开关记在 `<home>/link.json`，密钥在 `<home>/link.key`（中心的 id 跟着它，hub 重启不变）。hub 仍只听 `127.0.0.1`：入口收到的每条流，第一行要么是一个设备 token（`tunnel`），要么是一次性配对码的密钥（`redeem`）；token 不是有效的客户端设备就关流，一个字节也不转给 hub。
+- 配对码：`POST /v1/link/invites`（admin）或 `crossagents link invite`。`ca1-` 加 base64url 的 JSON：中心 id、中继、直连地址（局域网的和发现到的公网地址）、密钥、主机名、过期时间。30 分钟、只能用一次、只存在 hub 内存里（hub 重启就作废）。兑换时 hub 签发一台 write 级客户端设备，和 `POST /v1/devices` 同一段代码。
+- 客户端：GUI 带的 `crossagents-link`。`redeem` 换 token，`connect` 在 `127.0.0.1` 起转发，GUI 照旧连本机端口；健康检查、退避重连、401 停止和 SSH 隧道是同一套（[remoteTunnel.cts](../apps/gui/electron/remoteTunnel.cts)）。配对码和 token 都从 stdin 给，不出现在命令行；token 加密保存同 SSH 方式。
+- 代理：hub 用自己的 `HTTPS_PROXY`，没有就用系统代理；GUI 起 crossagents-link 时用 Chromium 给中继地址解析出的系统代理。n0 的公共中继在海外，国内网络一般要代理；也可以填自建中继（iroh-relay），配对码会带上它，客户端也用它。
+- 信任：和 SSH 方式一样落在设备 token 上；配对码本身是一次性的凭据。中继看到的是加密后的 QUIC，看不到内容。吊销设备后，下一条流就被入口拒绝，客户端停止重连、要求重新配对。
+
+这一层不替代 §10 的 TLS 与证书指纹（A3）：hub 仍不对外开端口，入口只认 hub 自己签发的设备。
 
 **SSH 隧道**：它不是第四种「连得到」的办法，而是跑在局域网、组网工具或端口映射之上的传输层。A 阶段的远程 GUI 走这一层（§4.3，2026-11-08 已实现）。hub 继续只听 `127.0.0.1`。GUI 用系统 OpenSSH：认证交给 `~/.ssh/config` 与 ssh-agent；配对时在中心上跑 `crossagents device add <设备名> --json`，命令和端口怎么找见 §4.3。token 只显示一次，`safeStorage` 加密后存在 Electron 的 `<userData>/remote.json`，渲染层拿不到。平时 `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:<本机端口>:127.0.0.1:<中心端口>`，本机端口记住沿用；断了按 1、2、5、10、30 秒退避重连，401 停止。GUI 只连本机端口。事件流按 `Last-Event-ID` 续传。
 
@@ -480,7 +490,7 @@ B1 之后节点机器上的 GUI 管的可能是本机 node（单干时是本机 
 
 hub 放云上：对话里有代码片段和 diff，公司代码先确认合规（沿用 §10）。
 
-**待评估**：把打洞做进 `crossagents` 二进制，比如 iroh 这类 Rust 库（按公钥拨号、自带打洞和中继）。GUI 安装包本来就带这个二进制，可以在本机起转发，Electron 照旧连 `127.0.0.1`；身份即公钥，和 §10「认指纹不认地址」一致；代价是要运营中继、UDP 被封的网络要能退回 TCP 中继。再往后：GUI 和节点之间大文件直接打洞传，不绕 hub，缓解 §7.5 的带宽瓶颈。
+**再往后**：GUI 和节点之间的大文件直接打洞传，不绕 hub，缓解 §7.5 的带宽瓶颈；B1 的节点通道也可以走同一个入口（节点设备现在会被入口拒绝）。
 
 ## 15. 单干模式
 

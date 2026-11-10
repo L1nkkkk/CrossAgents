@@ -57,6 +57,7 @@ const bridge: CrossAgentsBridge = {
   connection: {
     get: () => connectionCall("connection:get"),
     pair: (target, deviceName) => connectionCall("connection:pair", target, deviceName),
+    pairCode: (code, deviceName) => connectionCall("connection:pair-code", code, deviceName),
     use: (mode) => connectionCall("connection:use", mode),
     reconnect: () => connectionCall("connection:reconnect"),
     forget: () => connectionCall("connection:forget"),

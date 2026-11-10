@@ -9,6 +9,8 @@ import {
   shellCommand, tunnelArgs, tunnelReduce, type Paired, type RemoteHub, type RemoteTarget, type TunnelEvent, type TunnelState,
 } from "./remote.cjs";
 import { clientHeaders } from "./platform.cjs";
+import { EXIT_UNAUTHORIZED, parseEvent, spawnConnect, unreachableWords, type LinkProgram } from "./link.cjs";
+import type { LinkTarget } from "./remote.cjs";
 
 /** The ssh to run: `program` with `prefix` before ssh's own arguments (a script in tests). */
 export type Ssh = { program: string; prefix: string[] };
@@ -117,6 +119,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export type TunnelOptions = {
   ssh: Ssh;
   target: RemoteTarget;
+  /** Set: the hub is reached by hole punching (crossagents-link), not over ssh. */
+  link?: { program: LinkProgram; target: LinkTarget };
   token: string;
   /** The local port used last time; kept unless it is taken. */
   localPort?: number;
@@ -253,9 +257,9 @@ export class Tunnel {
 
   /** One connection: resolves when it ends normally, rejects with why it failed. */
   private async once(): Promise<void> {
-    const { ssh, target, token } = this.opts;
+    const { ssh, target, token, link } = this.opts;
     const wake = this.wake;
-    const hub = await locate(ssh, target);
+    const hub = link ? undefined : await locate(ssh, target);
     let port = this.localPort;
     if (port === undefined || !(await portFree(port))) {
       port = await freePort();
@@ -263,16 +267,45 @@ export class Tunnel {
       this.opts.onLocalPort(port);
     }
     if (this.closed) return;
-    const child = spawn(ssh.program, [...ssh.prefix, ...tunnelArgs(target, port, hub.port)], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+    const child = link
+      ? await spawnConnect(link.program, link.target, port, token)
+      : spawn(ssh.program, [...ssh.prefix, ...tunnelArgs(target, port, hub!.port)], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
     this.child = child;
     let stderr = "";
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
       stderr = (stderr + chunk).slice(-8_000);
     });
+    /** Hole punching: the last reason crossagents-link gave for not reaching the hub. */
+    let unreachable = "";
+    if (link) {
+      let buffered = "";
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        buffered += chunk;
+        let nl: number;
+        while ((nl = buffered.indexOf("\n")) >= 0) {
+          const event = parseEvent(buffered.slice(0, nl));
+          buffered = buffered.slice(nl + 1);
+          if (!event) continue;
+          if (event.event === "connected" || event.event === "path") {
+            unreachable = "";
+            this.emit({ type: "path", direct: event.direct });
+          } else if (event.event === "unreachable") {
+            unreachable = unreachableWords(event.error);
+          } else if (event.event === "unauthorized") {
+            this.unauthorized();
+          }
+        }
+      });
+    }
+    const program = link ? "crossagents-link" : "ssh";
     const exited = new Promise<string>((done) => {
-      child.once("error", (err) => done(`无法运行 ssh（${ssh.program}）：${err.message}`));
-      child.once("exit", (code) => done(`ssh 退出了（退出码 ${code}）${stderr ? `\n${stderr}` : ""}`));
+      child.once("error", (err) => done(`无法运行 ${program}（${link ? link.program.program : ssh.program}）：${err.message}`));
+      child.once("exit", (code) => {
+        if (link && code === EXIT_UNAUTHORIZED) this.unauthorized();
+        done(`${program} 退出了（退出码 ${code}）${stderr ? `\n${stderr}` : ""}`);
+      });
     });
     let ended: string | undefined;
     void exited.then((why) => {
@@ -282,12 +315,16 @@ export class Tunnel {
     const base = `http://127.0.0.1:${port}`;
 
     // Up: the hub answers /v1/health through the forward.
-    const deadline = Date.now() + (this.opts.upTimeoutMs ?? 20_000);
+    // Hole punching may spend up to 30 s dialling before the first byte gets through.
+    const deadline = Date.now() + (this.opts.upTimeoutMs ?? (link ? 45_000 : 20_000));
     for (;;) {
       if (ended !== undefined) throw new Error(ended);
       if (this.closed) return;
       if (await healthy(base)) break;
-      if (Date.now() > deadline) throw new Error(`隧道建立后中心的 hub 没有应答${stderr ? `\n${stderr}` : ""}`);
+      if (Date.now() > deadline) {
+        if (unreachable) throw new Error(unreachable);
+        throw new Error(`隧道建立后中心的 hub 没有应答${stderr ? `\n${stderr}` : ""}`);
+      }
       await sleep(250, wake.signal);
     }
     this.opts.onCheck?.();
@@ -298,7 +335,7 @@ export class Tunnel {
       return;
     }
     if (!info.ok) throw new Error(`中心的 hub 回答 ${info.status}`);
-    this.emit({ type: "up", localPort: port, remotePort: hub.port });
+    this.emit({ type: "up", localPort: port, remotePort: hub?.port });
 
     // Connected: until ssh exits or /v1/health stops answering twice in a row.
     let misses = 0;

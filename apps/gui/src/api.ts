@@ -41,6 +41,9 @@ import type { CreateRunRequest } from "@bindings/CreateRunRequest";
 import type { DeleteRunResponse } from "@bindings/DeleteRunResponse";
 import type { Device } from "@bindings/Device";
 import type { ListDevicesResponse } from "@bindings/ListDevicesResponse";
+import type { LinkInvite } from "@bindings/LinkInvite";
+import type { LinkStatus } from "@bindings/LinkStatus";
+import type { SetLinkRequest } from "@bindings/SetLinkRequest";
 import type { AgentExecutionResponse } from "@bindings/AgentExecutionResponse";
 import type { AgentCommandsResponse } from "@bindings/AgentCommandsResponse";
 import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
@@ -541,6 +544,12 @@ export const api = {
   listDevices: () => request<ListDevicesResponse>("GET", "/v1/devices"),
   /** Revokes a device's credential; idempotent, answers the device as it now stands (`admin`). */
   revokeDevice: (id: string) => request<Device>("DELETE", `/v1/devices/${enc(id)}`),
+  /** The built-in hole-punching entrance: on or off, its id and relay (docs/MULTI-NODE.md §14). */
+  linkStatus: () => request<LinkStatus>("GET", "/v1/link"),
+  /** Turns it on or off (`admin`). */
+  setLink: (req: SetLinkRequest) => request<LinkStatus>("POST", "/v1/link", req),
+  /** A one-time pairing code, shown only in this answer (`admin`). */
+  createLinkInvite: () => request<LinkInvite>("POST", "/v1/link/invites", {}),
   createAccount: (req: CreateAccountRequest) => request<Account>("POST", "/v1/accounts", req),
   importCandidates: () => request<ImportAccountsResponse>("GET", "/v1/accounts/import"),
   importAccount: (req: ImportAccountRequest) => request<Account>("POST", "/v1/accounts/import", req),

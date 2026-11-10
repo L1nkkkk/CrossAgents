@@ -22,18 +22,28 @@ export type UpdateState =
  */
 export type RemoteTarget = { host: string; user?: string; sshPort?: number; command?: string };
 /** The SSH tunnel to the remote hub. `stopped`: it no longer retries (revoked, or re-pair needed). */
-export type TunnelState = { status: "connecting" | "connected" | "offline"; localPort?: number; remotePort?: number; reason?: string; stopped?: boolean };
+export type TunnelState = {
+  status: "connecting" | "connected" | "offline";
+  localPort?: number;
+  remotePort?: number;
+  reason?: string;
+  stopped?: boolean;
+  /** Hole punching only: "direct" once it won, "relay" while the relay carries the traffic. */
+  path?: "direct" | "relay";
+};
+/** How the remote hub is reached: an SSH tunnel, or the built-in hole punching (a pairing code). */
+export type Via = "ssh" | "link";
 /** Local mode (this machine's hub) or remote mode (a paired hub elsewhere). Never carries the token. */
 export type ConnectionState = {
   mode: "local" | "remote";
   /** Packaged: the hub executable is present; development: true. */
   bundledHub: boolean;
-  remote?: { target: RemoteTarget; deviceName: string; deviceId: string; pairedAt: string };
+  remote?: { target: RemoteTarget; via: Via; deviceName: string; deviceId: string; pairedAt: string };
   tunnel?: TunnelState;
   defaultDeviceName: string;
 };
 /** Pairing goes: find the hub there, `device add`, start the tunnel, check the token. */
-export type PairStep = "locate" | "pair" | "tunnel" | "check";
+export type PairStep = "locate" | "pair" | "tunnel" | "check" | "redeem" | "forward";
 
 /** A machine on this person's Tailscale network, as `tailscale status --json` shows it (electron/tailscale.cts). */
 export type TailscaleOs = "windows" | "macos" | "linux" | "ios" | "android" | "other";
@@ -67,6 +77,8 @@ export interface CrossAgentsBridge {
     get(): Promise<ConnectionState>;
     /** Rejects with the reason (ssh's stderr as it is) when pairing fails. */
     pair(target: RemoteTarget, deviceName: string): Promise<ConnectionState>;
+    /** Pairs by a one-time code made on the hub's machine (hole punching). */
+    pairCode(code: string, deviceName: string): Promise<ConnectionState>;
     use(mode: "local" | "remote"): Promise<ConnectionState>;
     reconnect(): Promise<ConnectionState>;
     /** Forgets the pairing here only; the device stays on the hub until revoked there. */

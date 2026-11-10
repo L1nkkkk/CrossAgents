@@ -6,6 +6,7 @@ pub mod exec;
 pub mod expertise;
 pub mod hub;
 pub mod lesson;
+pub mod link;
 pub mod mcp;
 pub mod plugin;
 pub mod retro;
@@ -52,6 +53,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Lessons(cmd) => lesson::run(&ctx, cmd).await,
         Command::Account(cmd) => account::run(&ctx, cmd).await,
         Command::Device(cmd) => device::run(&ctx, cmd).await,
+        Command::Link(cmd) => link::run(&ctx, cmd).await,
         Command::Setup(args) => setup::run(&ctx, args).await,
         Command::Mcp | Command::RuntimeHost(_) | Command::Exec(_) => {
             unreachable!("handled in main")

@@ -515,3 +515,15 @@ B 删除 run：
 - [x] GUI：系统图标（[osIcon.tsx](../apps/gui/src/osIcon.tsx)）；设备页标出中心机器、系统、在线与「这个窗口」；设置 →「连接」列出 Tailscale 机器，「用这个地址」一键填主机，没装 / 没登录 / 没运行给出原因（[Connection.tsx](../apps/gui/src/views/Connection.tsx)、[tailscale.ts](../apps/gui/src/lib/tailscale.ts)）。
 - [x] 侧栏两级：工作区之上多一级「机器」，目前只有中心（本机或远程主机名、连接状态，可折叠）；折叠状态记住，搜索时仍显示匹配项（[Sidebar.tsx](../apps/gui/src/Sidebar.tsx)、[sidebarTree.ts](../apps/gui/src/lib/sidebarTree.ts)）。
 - [x] 文档：[INSTALL-MAC.md](INSTALL-MAC.md) §4.4「用 Tailscale」；[MULTI-NODE.md](MULTI-NODE.md) §14 补一句已接系统 Tailscale、不内置 tsnet。
+
+## 三十、内置打洞与配对引导（2026-11-10）
+
+> 来源：run `44148f21` 第二轮。人说「你自己完成吧，然后就是要做好 UI 引导」。没装的、要真机测的留在 [TODO.md](TODO.md) §八「内置打洞」。
+
+- [x] 新 crate [crates/link](../crates/link/src/lib.rs)（iroh 1.4）：中心的入口（`serve`：每条 QUIC 流第一行是 JSON 的 `tunnel` 或 `redeem`；token 不通过就关流，一个字节也到不了 hub 的端口）和客户端的本机转发（`forward`：每个本机 TCP 连接走一条流，报告 `listening` / `connected` / `path` / `unreachable` / `unauthorized`）。程序 `crossagents-link` 的 `redeem`、`connect` 从 stdin 读配对码和 token，不放命令行；token 被拒退出码 3。
+- [x] hub：[link.rs](../crates/hub/src/link.rs) 管开关（`<home>/link.json`，hub 重启后照旧）、密钥（`<home>/link.key`，id 不变）、一次性配对码（30 分钟、用一次、只在内存，最多 16 个）；代理用 hub 自己的 `HTTPS_PROXY`，没有就用系统代理；可填自建中继。路由 `GET /v1/link`（read）、`POST /v1/link`、`POST /v1/link/invites`（admin）；兑换走和 `POST /v1/devices` 同一个 `issue_device`，签发 write 级的客户端设备。`FEATURES` 加 `link`。CLI `crossagents link status|on|off|invite`。
+- [x] 配对码 `ca1-` + base64url(JSON)：中心 id、中继、局域网与公网地址、一次性密钥、主机名、过期时间。同一局域网不经中继也能连。
+- [x] Electron：[link.cts](../apps/gui/electron/link.cts) 读码、起 crossagents-link（带 Chromium 解析出的系统代理）；保存的配对多了 `via: "link"`（老记录照旧是 ssh）；隧道循环和 SSH 共用一套（健康检查、退避重连、401 停止），多了「直连 / 经中继」。打包：Windows 与 Mac 包都带 `bin/crossagents-link`，[check-version.mjs](../apps/gui/scripts/check-version.mjs) 检查它在且版本对。
+- [x] 设置 →「连接」改成引导：先选「连到别的电脑上的中心」还是「让别的电脑连进来」（本机有 hub、没配对过的默认后者）。中心那边三步：开启（状态、代理、id、自建中继）→ 生成配对码 → 复制、倒计时、去另一台怎么点。连接那边默认「配对码（推荐）」三步：去中心生成 → 粘贴（马上预览中心名、剩余时间、有没有中继）→ 起名连接，进度三步，失败按原因给下一步；SSH 与 Tailscale 收在「SSH」页签里。mock 场景 `connection-host`、`connection-host-stuck`、`connection-code`、`connection-code-failed`、`connection-link-remote`。
+- [x] 测试：link 的单元测试与真网络端到端（`--include-ignored`）；hub 集成测试 [tests/link.rs](../crates/hub/tests/link.rs)（权限、开关、配对码、经真 iroh 配对、转发、吊销后被拒）；Electron 用假的 crossagents-link 跑完整配对与吊销；GUI 的码预览、状态文字、失败归类。另用真程序在这台 Windows 上跑了一遍：经代理连上 n0 中继，几秒后变直连，吊销后转发报 `unauthorized` 并退出。
+- [x] 文档：[MULTI-NODE.md](MULTI-NODE.md) §14「内置打洞」；[INSTALL-MAC.md](INSTALL-MAC.md) §4.0「用配对码」、§1 要装 Rust、§7 的报错表。

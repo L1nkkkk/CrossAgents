@@ -20,7 +20,8 @@ import { copyRoot, copyPrefix, copyName, staleCopies, runsWhenOpened, safeCopyRo
 import { decideSafeMode, loadingMarker, type SafeMode } from "./safeMode.cjs";
 import { defaultDeviceName, remoteFile, sshProgram, type Crypto } from "./remote.cjs";
 import { RemoteController, Unavailable } from "./remoteController.cjs";
-import { applicationMenu, bundledHub, clientHeaders, shortcut, trayIcon } from "./platform.cjs";
+import { applicationMenu, bundledHub, clientHeaders, clientOs, shortcut, trayIcon } from "./platform.cjs";
+import { hasProxy, proxyFromResolve, type LinkProgram } from "./link.cjs";
 import { tailscaleStatus } from "./tailscale.cjs";
 
 // Must run before app.ready. CORS remains enabled for module imports from file://.
@@ -163,11 +164,44 @@ function broadcast(channel: string, value: unknown) {
   for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send(channel, value);
 }
 
+/**
+ * crossagents-link (hole punching): packaged, next to the hub in `resources/bin`; in development
+ * `CROSSAGENTS_LINK`, else the cargo build of this checkout. Started with the system proxy
+ * (Chromium's answer for the relay) unless the environment names one.
+ */
+function linkProgram(): LinkProgram | undefined {
+  const exe = process.platform === "win32" ? "crossagents-link.exe" : "crossagents-link";
+  const candidates = app.isPackaged
+    ? [join(process.resourcesPath, "bin", exe)]
+    : [
+        process.env.CROSSAGENTS_LINK,
+        process.env.CARGO_TARGET_DIR && join(process.env.CARGO_TARGET_DIR, "debug", exe),
+        join(app.getAppPath(), "..", "..", "target", "debug", exe),
+      ].filter((p): p is string => !!p);
+  const program = candidates.find((p) => existsSync(p));
+  if (!program) {
+    logLine(`link: no crossagents-link (looked at ${candidates.join(", ")})`);
+    return undefined;
+  }
+  return {
+    program,
+    prefix: [],
+    async env() {
+      const env = { ...process.env, NO_PROXY: [process.env.NO_PROXY, "127.0.0.1,localhost"].filter(Boolean).join(",") };
+      if (hasProxy(env)) return env;
+      const proxy = proxyFromResolve(await session.defaultSession.resolveProxy("https://relay.iroh.network/").catch(() => undefined));
+      return proxy ? { ...env, HTTPS_PROXY: proxy, HTTP_PROXY: proxy } : env;
+    },
+  };
+}
+
 function createRemote(): RemoteController {
   return new RemoteController({
     file: remoteFile(app.getPath("userData")),
     crypto: safeCrypto,
     ssh: { program: sshProgram(process.platform, process.env, existsSync), prefix: [] },
+    link: linkProgram(),
+    os: clientOs(process.platform),
     defaultDeviceName: defaultDeviceName(hostname()),
     bundledHub: hasBundledHub,
     onState: (state) => broadcast("connection:state", state),
@@ -196,6 +230,7 @@ function connectionHandler(channel: string, call: (r: RemoteController, ...args:
 }
 connectionHandler("connection:get", (r) => r.get());
 connectionHandler("connection:pair", (r, target, deviceName) => r.pair(target, deviceName));
+connectionHandler("connection:pair-code", (r, code, deviceName) => r.pairCode(code, deviceName));
 connectionHandler("connection:use", (r, mode) => r.use(mode));
 connectionHandler("connection:reconnect", (r) => r.reconnect());
 connectionHandler("connection:forget", (r) => r.forget());
