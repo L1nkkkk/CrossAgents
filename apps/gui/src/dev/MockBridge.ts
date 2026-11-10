@@ -174,7 +174,7 @@ export type MockState = {
   link?: { enabled?: boolean; startMs?: number; stuck?: boolean; proxy?: string };
   /** What `bridge.tailscale.status()` answers; a running sample network when unset. */
   tailscale?: TailscaleStatus;
-  /** How long each built-in browser tool takes, in ms: a screenshot can catch the「正在操作」bar. */
+  /** How long each built-in browser tool takes, in ms (its tab's bar outlives it either way). */
   browserDelay?: number;
 };
 

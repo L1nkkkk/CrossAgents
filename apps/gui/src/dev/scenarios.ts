@@ -666,12 +666,13 @@ export const SCENARIOS: Scenario[] = [
   { key: "files-markdown", label: "文件查看器（Markdown）", hint: "中间弹窗里的 Markdown 也有同一套大纲：短横线、悬停标题列表、当前章节", build: () => filesMarkdownScene() },
   { key: "terminal", label: "内置终端", hint: "对话下方的终端标签：回显输入；标签可拖到右侧，Ctrl+` 收起和打开，输入 exit 看退出后的样子", build: () => ({ ...filesScene(), script: [{ at: 600, act: () => void newTerminal() }] }) },
   // The built-in browser (run note browser/contract §3, the page half): two tabs, one per dock,
-  // and an agent's request on the second, so its「正在操作」bar and 接管 are both on show.
-  { key: "browser", label: "内置浏览器", hint: "右侧和底部各一个浏览器标签（可拖动、可关、可多开）：地址栏回车打开、后退/前进/刷新、加载状态，标签名取页面标题；底部那个写着 Nova 正在操作，可以「接管」，接管后 agent 的请求会被拒绝", build: () => {
+  // and an agent's request on the second, so its「正在操作」bar and 接管 are both on show. The bar
+  // outlives the tool by 15 s (lib/browserControl.ts), which is what makes 接管 reachable.
+  { key: "browser", label: "内置浏览器", hint: "右侧和底部各一个浏览器标签（可拖动、可关、可多开）：地址栏回车打开、后退/前进/刷新、加载状态，标签名取页面标题；底部那个的 agent 工具早已跑完，「Nova 正在操作」还会留 15 秒，可以点「接管」，接管后 agent 的请求会被拒绝", build: () => {
     const scene = soloSession();
     let pricing = "";
     return {
-      state: { ...scene.state, browserDelay: 30_000 },
+      state: { ...scene.state, browserDelay: 600 },
       route: scene.route,
       script: [
         { at: 300, act: () => {

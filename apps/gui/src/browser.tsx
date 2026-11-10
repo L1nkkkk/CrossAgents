@@ -1,8 +1,9 @@
 // The built-in browser (run note browser/contract §3): every tab is a `<webview>` on the
 // `persist:browser` session, with an address bar and its page's title above it. Tabs are dock
-// tabs like terminals (`web:<id>`, panes.ts) and their pages are kept out of React, so moving one
-// between the docks keeps its page; their urls are saved with the layout, so a reload brings the
-// tabs back at the same pages.
+// tabs like terminals (`web:<id>`, panes.ts) and their pages are kept out of React so a re-render
+// does not throw them away; moving a tab to the other dock re-parents its `<webview>`, and
+// Electron may then recreate the guest (the page loads again, with a new webContents id). Their
+// urls are saved with the layout, so a reload of the window brings the tabs back at those pages.
 //
 // Agents drive the same tabs (§2): the hub sends `browser.request`, this page claims it, runs the
 // tool against the tab and posts the result. The person can take a tab over meanwhile; while it
@@ -14,15 +15,13 @@ import type { BrowserBridge } from "./bridge";
 import { Icon } from "./components";
 import { resolvePath } from "./fileResolve";
 import { onHubEvent } from "./hub";
+import { holdAfterRequest, holdLapsed, type Hold } from "./lib/browserControl";
 import { dockOf, type DockId } from "./lib/docks";
 import { docksNow, isWebTab, placeTab, rememberWebUrl, shutTab, useLayout, webTab, webUrl, type WebTab } from "./panes";
 import "./browser.css";
 
 /** What the person was told when they took a tab over: the agent's own tools get this back. */
 export const HUMAN_CONTROL = "human_control: 这个标签正由人接管，等人点「交还」后再试";
-
-/** Who is driving a tab now: an agent's tool, or the person who took it over. */
-type Controller = { kind: "agent"; agent: string } | { kind: "human" };
 
 /** A `<webview>` as Electron adds it to HTMLElement (only the calls this page makes). */
 type WebviewTag = HTMLElement & {
@@ -39,6 +38,14 @@ type WebviewTag = HTMLElement & {
 /** A navigation event of a `<webview>`. */
 type NavEvent = Event & { url?: string; title?: string; errorCode?: number; errorDescription?: string; isMainFrame?: boolean };
 
+/** How long browser_open and browser_navigate wait for the page before telling the agent it timed out. */
+const LOAD_TIMEOUT = 20_000;
+
+/** A wait for the page to stop loading: `null` when it loaded, or why it did not. */
+type Waiter = (error: string | null) => void;
+
+const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+
 /** One browser tab's page. Kept outside React; `publish` is what re-renders the docks. */
 type Page = {
   /** The `<id>` of `web:<id>`, which is also the tab an agent's tool names. */
@@ -54,7 +61,10 @@ type Page = {
   forward: boolean;
   /** Why the page did not load, until another navigation. */
   problem: string | null;
-  controller: Controller | null;
+  /** Who is driving the tab now (lib/browserControl.ts). */
+  controller: Hold | null;
+  /** Waits for the page to stop loading (`whenLoaded`), settled by the webview's events. */
+  waiters: Set<Waiter>;
   /** The `<webview>`; null in the mock preview, which has no real page. */
   el: WebviewTag | null;
   created: number;
@@ -121,7 +131,7 @@ export function browserUrl(text: string): string | null {
   return /^(https?|about|crossagents-file|file):/i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
-/** Where a tab's `<webview>` waits while its tab is in another dock: removing it would close the page. */
+/** Where a tab's `<webview>` waits while its tab is in another dock: taking it out of the document would destroy its page. */
 function vault(): HTMLElement {
   const known = document.getElementById("web-vault");
   if (known) return known;
@@ -139,6 +149,52 @@ function onUrl(page: Page, url: string | undefined) {
   publish();
 }
 
+/**
+ * Something about the page changed (a load ended, or `dom-ready` gave it its webContents id):
+ * everyone waiting looks again, and lets go once it is loaded and its id is known.
+ */
+function settle(page: Page, error: string | null) {
+  for (const waiter of [...page.waiters]) waiter(error);
+}
+
+/**
+ * Resolves once the tab's page has loaded and the main process knows it by a webContents id;
+ * rejects with the reason a load failed, or after 20 s. An agent's tool runs right after
+ * browser_open, before the first `dom-ready` — hence the wait. A tab in a folded dock is not on
+ * screen (its page does not load until it is), and the mock has no page at all: neither has
+ * anything to wait for.
+ */
+async function whenLoaded(page: Page): Promise<void> {
+  if (!page.el) return;
+  if (!page.el.isConnected) {
+    // A tab React is about to show attaches on its next frame or two.
+    await nextFrame();
+    await nextFrame();
+    if (!page.el.isConnected) return;
+  }
+  if (!page.loading && page.problem) throw new Error(page.problem);
+  if (!page.loading && page.wcId !== null) return;
+  await new Promise<void>((resolve, reject) => {
+    const give = (error: string | null) => {
+      clearTimeout(timer);
+      page.waiters.delete(waiter);
+      if (error) reject(new Error(error));
+      else resolve();
+    };
+    const waiter: Waiter = (error) => {
+      if (error) return give(error);
+      // Still loading, or not attached yet (no id): wait for the next event.
+      if (page.loading || page.wcId === null) return;
+      give(page.problem);
+    };
+    const timer = setTimeout(() => {
+      page.waiters.delete(waiter);
+      reject(new Error(`等了 20 秒还没有加载完：${page.url}`));
+    }, LOAD_TIMEOUT);
+    page.waiters.add(waiter);
+  });
+}
+
 /** A tab's page, with its events. `src` is set before it is attached, so it starts loading then. */
 function makeWebview(page: Page, url: string): WebviewTag {
   const el = document.createElement("webview") as WebviewTag;
@@ -146,10 +202,12 @@ function makeWebview(page: Page, url: string): WebviewTag {
   el.setAttribute("data-crossagents-browser", "1");
   el.setAttribute("src", url);
   el.addEventListener("dom-ready", () => {
+    // A re-attached <webview> has a new guest, and so a new id: this is where it is learned.
     page.wcId = el.getWebContentsId();
     page.back = el.canGoBack();
     page.forward = el.canGoForward();
     publish();
+    settle(page, null);
   });
   el.addEventListener("did-start-loading", () => {
     page.loading = true;
@@ -161,6 +219,7 @@ function makeWebview(page: Page, url: string): WebviewTag {
     page.back = el.canGoBack();
     page.forward = el.canGoForward();
     publish();
+    settle(page, null);
   });
   el.addEventListener("did-navigate", (e) => onUrl(page, (e as NavEvent).url));
   el.addEventListener("did-navigate-in-page", (e) => onUrl(page, (e as NavEvent).url));
@@ -176,6 +235,7 @@ function makeWebview(page: Page, url: string): WebviewTag {
     page.loading = false;
     page.problem = `打不开这个页面：${failure.errorDescription || "加载失败"}${failure.errorCode ? `（${failure.errorCode}）` : ""}`;
     publish();
+    settle(page, page.problem);
   });
   return el;
 }
@@ -192,6 +252,7 @@ function createPage(id: string, url: string, title?: string): Page {
     forward: false,
     problem: null,
     controller: null,
+    waiters: new Set(),
     el: null,
     created: ++created,
     focusBar: false,
@@ -215,6 +276,7 @@ function createPage(id: string, url: string, title?: string): Page {
 }
 
 function dispose(page: Page) {
+  clearHold(page);
   page.el?.remove();
   pages.delete(page.id);
   mockBrowser()?.close(page.tab);
@@ -304,6 +366,7 @@ function navigate(page: Page, text: string) {
         page.problem = `打不开这个页面：${errorText(err)}`;
         page.loading = false;
         publish();
+        settle(page, page.problem);
       });
   } else {
     const mock = mockBrowser();
@@ -319,13 +382,25 @@ function navigate(page: Page, text: string) {
   publish();
 }
 
-/** 后退 / 前进 / 刷新: the tab's own page does it, not the main process. */
-function step(page: Page, action: "back" | "forward" | "reload") {
+/**
+ * 后退 / 前进 / 刷新: the tab's own page does it, not the main process. Returns why it could not
+ * (an agent hears it; the toolbar's buttons are already disabled then). The load is marked as
+ * starting here, so `whenLoaded` waits for it however fast `did-start-loading` arrives.
+ */
+function step(page: Page, action: "back" | "forward" | "reload"): string | null {
   if (page.el) {
-    if (action === "back") page.el.goBack();
-    else if (action === "forward") page.el.goForward();
-    else page.el.reload();
-    return;
+    if (!page.el.isConnected) return "这个标签现在没有显示，先打开它再" + (action === "back" ? "后退" : action === "forward" ? "前进" : "刷新");
+    if (action === "back") {
+      if (!page.el.canGoBack()) return "没有上一页";
+      page.el.goBack();
+    } else if (action === "forward") {
+      if (!page.el.canGoForward()) return "没有下一页";
+      page.el.goForward();
+    } else page.el.reload();
+    page.loading = true;
+    page.problem = null;
+    publish();
+    return null;
   }
   mockBrowser()?.navigate(page.tab, action);
   const shown = mockBrowser()?.page(page.tab);
@@ -334,6 +409,7 @@ function step(page: Page, action: "back" | "forward" | "reload") {
     page.url = shown.url;
   }
   publish();
+  return null;
 }
 
 function stop(page: Page) {
@@ -342,15 +418,41 @@ function stop(page: Page) {
   publish();
 }
 
-const takeOver = (page: Page) => {
-  page.controller = { kind: "human" };
-  publish();
-};
+/** When each tab's「正在操作」bar goes, by tab id. */
+const holdTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-const handBack = (page: Page) => {
-  page.controller = null;
+function clearHold(page: Page) {
+  const timer = holdTimers.get(page.id);
+  if (timer) clearTimeout(timer);
+  holdTimers.delete(page.id);
+}
+
+/** Sets who drives a tab; an agent's bar clears itself when its hold runs out. */
+function setHold(page: Page, hold: Hold | null) {
+  page.controller = hold;
+  clearHold(page);
+  if (hold?.kind === "agent") {
+    holdTimers.set(
+      page.id,
+      setTimeout(() => {
+        holdTimers.delete(page.id);
+        if (!holdLapsed(page.controller, Date.now())) return;
+        page.controller = null;
+        publish();
+      }, Math.max(0, hold.until - Date.now())),
+    );
+  }
   publish();
-};
+}
+
+/** An agent's tool started on the tab: its bar stays 15 s past the last request. */
+const noteRequest = (page: Page, agent: string) => setHold(page, holdAfterRequest(page.controller, agent, Date.now()));
+
+/** 接管: from now on the tab is the person's, and its agent requests are refused. */
+const takeOver = (page: Page) => setHold(page, { kind: "human" });
+
+/** 交还: the tab is free again. */
+const handBack = (page: Page) => setHold(page, null);
 
 /** A tab's name for its dock tab. */
 export function useBrowserLabel(): (tab: WebTab) => string {
@@ -427,14 +529,17 @@ async function runTool(tool: string, input: Record<string, unknown>, control: (p
           ? await browser.fileUrl(input.path)
           : "";
     if (!wanted) throw new Error("browser_open 要给 url 或 path");
-    // A named tab is opened there; no tab is a new one.
+    // A named tab is opened there; no tab is a new one. Either way the agent gets the page as it
+    // ended up, not the address it asked for: an agent usually snapshots right after opening.
     if (typeof input.tab === "string" && input.tab) {
       const known = mustPage(input.tab, "browser_open");
-      navigate(known, wanted);
-      return { tab: known.id, url: browserUrl(wanted) ?? wanted, title: pageName(known) };
+      navigate(known, browserUrl(wanted) ?? wanted);
+      await whenLoaded(known);
+      return { tab: known.id, url: known.url, title: pageName(known) };
     }
     const page = openBrowserTab({ url: browserUrl(wanted) ?? wanted });
     control(page);
+    await whenLoaded(page);
     return { tab: page.id, url: page.url, title: pageName(page) };
   }
   const page = mustPage(input.tab, tool);
@@ -471,7 +576,9 @@ async function runTool(tool: string, input: Record<string, unknown>, control: (p
     case "browser_navigate": {
       const action = input.action;
       if (action !== "back" && action !== "forward" && action !== "reload") throw new Error("browser_navigate 的 action 是 back、forward 或 reload");
-      step(page, action);
+      const refused = step(page, action);
+      if (refused) throw new Error(refused);
+      await whenLoaded(page);
       return { ok: true, action };
     }
     default:
@@ -493,24 +600,16 @@ async function serve(request: Request) {
     await postResult(request.id, { ok: false, error: HUMAN_CONTROL }).catch(() => undefined);
     return;
   }
-  const controlled = new Set<Page>();
-  const take = (page: Page) => {
-    page.controller = { kind: "agent", agent: request.agent };
-    controlled.add(page);
-  };
+  // The tool finishes in a few hundred milliseconds, so the bar stays 15 s past it (a person
+  // could not reach 接管 otherwise); each further request pushes it out again.
+  const take = (page: Page) => noteRequest(page, request.agent);
   if (target) take(target);
-  publish();
   let result: { ok: boolean; output?: unknown; error?: string };
   try {
     result = { ok: true, output: await runTool(request.tool, request.input, take) };
   } catch (err) {
     result = { ok: false, error: errorText(err) };
   }
-  // The bar goes when the tool does, unless the person took the tab over meanwhile.
-  for (const page of controlled) {
-    if (page.controller?.kind === "agent" && page.controller.agent === request.agent) page.controller = null;
-  }
-  publish();
   await postResult(request.id, result).catch(() => undefined);
 }
 
@@ -572,8 +671,21 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
     const host = box.current;
     if (!el || !host) return;
     host.appendChild(el);
-    // Not removed: a `<webview>` taken out of the page closes it, so it waits in the vault.
+    // Attached again: if the guest survived (no dom-ready to come), its id is readable now.
+    if (page.wcId === null) {
+      try {
+        page.wcId = el.getWebContentsId();
+        settle(page, null);
+        publish();
+      } catch {
+        // Not attached and ready yet: the coming dom-ready reports the id.
+      }
+    }
+    // Re-parented into the vault rather than removed: removing a <webview> destroys its page.
+    // A re-attached one gets a new guest (Electron may recreate it when it moves between docks),
+    // which `dom-ready` reports, so the id of the old one is dropped here and never used again.
     return () => {
+      page.wcId = null;
       vault().appendChild(el);
     };
   }, [page?.el]);
