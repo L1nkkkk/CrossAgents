@@ -9,7 +9,9 @@ use reqwest::{Client, Response, StatusCode};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-const LONG: Duration = Duration::from_secs(60);
+/// How long one event wait may last; the hub's own browser timeout is 30 s, so this only
+/// ever fires when something is wrong, and it fires instead of hanging the whole suite.
+const WAIT: Duration = Duration::from_secs(45);
 
 struct TestHub {
     hub: RunningHub,
@@ -83,13 +85,16 @@ impl TestHub {
 
     /// The GUI's event stream. Its response headers arriving means the hub counts it.
     async fn events(&self) -> Events {
-        let resp = self
-            .client
-            .get(self.url("/v1/events?live=true"))
-            .bearer_auth(&self.hub.token)
-            .send()
-            .await
-            .unwrap();
+        let resp = tokio::time::timeout(
+            WAIT,
+            self.client
+                .get(self.url("/v1/events?live=true"))
+                .bearer_auth(&self.hub.token)
+                .send(),
+        )
+        .await
+        .expect("the event stream opened")
+        .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         Events {
             resp,
@@ -105,7 +110,10 @@ struct Events {
 }
 
 impl Events {
+    /// The next event, or a panic: the wait has one deadline, so a missing event fails the
+    /// test instead of spinning on the hub's keep-alive comments (every 15 s) for ever.
     async fn next(&mut self) -> Value {
+        let deadline = tokio::time::Instant::now() + WAIT;
         loop {
             if let Some(end) = self.pending.find("\n\n") {
                 let block: String = self.pending.drain(..end + 2).collect();
@@ -116,9 +124,9 @@ impl Events {
                 }
                 continue;
             }
-            let chunk = tokio::time::timeout(LONG, self.resp.chunk())
+            let chunk = tokio::time::timeout_at(deadline, self.resp.chunk())
                 .await
-                .unwrap()
+                .expect("no event arrived before the deadline")
                 .unwrap()
                 .expect("the stream ended");
             self.pending.push_str(&String::from_utf8_lossy(&chunk));
@@ -223,7 +231,10 @@ async fn a_request_is_claimed_once_answered_and_the_page_text_is_marked() {
         .unwrap();
     assert_eq!(answered.status(), StatusCode::OK);
 
-    let resp = call.await.unwrap();
+    let resp = tokio::time::timeout(WAIT, call)
+        .await
+        .expect("the tool call answered")
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let out: Value = resp.json().await.unwrap();
     assert_eq!(out["tab"], "4");
@@ -267,7 +278,10 @@ async fn a_human_control_error_reaches_the_agent_with_the_hand_back_note() {
         .await
         .unwrap();
 
-    let resp = call.await.unwrap();
+    let resp = tokio::time::timeout(WAIT, call)
+        .await
+        .expect("the tool call answered")
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: Value = resp.json().await.unwrap();
     let message = body["error"]["message"].as_str().unwrap();
