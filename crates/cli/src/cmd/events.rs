@@ -491,6 +491,14 @@ pub fn summary(kind: &EventKind) -> String {
             }
             text
         }
+        EventKind::BrowserRequest {
+            id, tool, agent, ..
+        } => format!("{} {tool} for {}", short_tail(id), agent.name),
+        EventKind::BrowserRequestDone { id, ok } => format!(
+            "{} {}",
+            short_tail(id),
+            if *ok { "answered" } else { "failed" }
+        ),
         EventKind::NoticeCarried {
             id,
             message_id,

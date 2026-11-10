@@ -128,6 +128,8 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/terminals/{id}/input` | admin | GUI |
 | POST | `/v1/terminals/{id}/resize` | admin | GUI |
 | POST | `/v1/terminals/{id}/takeover` | admin | GUI |
+| POST | `/v1/browser/requests/{id}/claim` | write | GUI（内置浏览器，[BROWSER.md](BROWSER.md)） |
+| POST | `/v1/browser/requests/{id}/result` | write | GUI（内置浏览器） |
 
 ### 2.3 会话 token
 

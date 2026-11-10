@@ -1,6 +1,7 @@
 //! Event bus: persist, then broadcast, then notify sinks.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::{Mutex, broadcast};
 
@@ -9,6 +10,35 @@ use crate::event::{Event, EventKind, EventSink};
 use crate::store::Store;
 
 const CHANNEL_CAPACITY: usize = 1024;
+
+/// How many live event streams are open. The hub's own sinks are not streams, so this is the
+/// GUI (and a `crossagents events` tail): the browser tools answer at once that a window is
+/// needed when it is zero, instead of waiting for a viewer that is not there (docs/BROWSER.md).
+#[derive(Debug, Default)]
+pub struct Viewers {
+    open: AtomicUsize,
+}
+
+impl Viewers {
+    /// Counts one stream until the guard is dropped.
+    pub fn attach(self: &Arc<Self>) -> ViewerGuard {
+        self.open.fetch_add(1, Ordering::SeqCst);
+        ViewerGuard(self.clone())
+    }
+
+    pub fn count(&self) -> usize {
+        self.open.load(Ordering::SeqCst)
+    }
+}
+
+/// One open stream; dropping it (the client went away) stops counting it.
+pub struct ViewerGuard(Arc<Viewers>);
+
+impl Drop for ViewerGuard {
+    fn drop(&mut self) {
+        self.0.open.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub struct EventBus {
     store: Arc<dyn Store>,

@@ -7,6 +7,7 @@ pub mod approval;
 pub mod attempts;
 pub mod breaker;
 pub mod brief;
+pub mod browser;
 pub mod claims;
 pub mod coauthor;
 pub mod continuation;
