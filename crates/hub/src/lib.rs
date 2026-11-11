@@ -12,6 +12,7 @@ pub mod attachments;
 pub mod avatars;
 pub mod browser;
 pub mod budget;
+pub mod builtin_node;
 pub mod cli_runs;
 pub mod collab;
 pub mod devices;
@@ -174,6 +175,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     for warning in &plugin_warnings {
         tracing::warn!("skipping plugin: {warning}");
     }
+    // B1.2: with the built-in node on, every driver the hub uses runs on it; off, the
+    // registry hands out its drivers directly (the path before the node).
+    let plugins = match config.builtin_node {
+        true => builtin_node::serve(plugins),
+        false => plugins,
+    };
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),
         accounts: accounts.clone(),

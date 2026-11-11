@@ -31,6 +31,7 @@ fn agent(plugin: &str) -> Agent {
         plugin: plugin.into(),
         driver: None,
         model: None,
+        node: None,
         role: Role::Worker,
         home: std::env::temp_dir(),
         cwd: std::env::temp_dir(),

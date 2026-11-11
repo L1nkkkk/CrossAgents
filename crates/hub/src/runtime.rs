@@ -781,6 +781,7 @@ impl Runtime {
     /// Takes over the agent's process left running by the previous hub; `false` when there
     /// is none to take over.
     async fn adopt(&self, agent: &Agent, running: Option<MessageId>) -> Result<bool, CoreError> {
+        crate::builtin_node::check_node(agent)?;
         let Ok(resolved) = self.plugins.driver(&agent.plugin, agent.driver.as_deref()) else {
             return Ok(false);
         };
@@ -1021,6 +1022,7 @@ impl Runtime {
     /// session that cannot be resumed is an error instead of a new one: the agent was moved
     /// to work with its conversation (docs/tasks/S1.md §3.1).
     async fn open(&self, agent: &Agent, carry: bool) -> Result<(), CoreError> {
+        crate::builtin_node::check_node(agent)?;
         let agent = agent.clone();
         let resolved = match self.plugins.driver(&agent.plugin, agent.driver.as_deref()) {
             Ok(resolved) => resolved,
