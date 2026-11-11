@@ -545,39 +545,6 @@ fn rerun_note(files: &[String], rerun: Option<&apply::Rerun>) -> String {
     }
 }
 
-#[cfg(test)]
-mod apply_note_tests {
-    use super::*;
-
-    #[test]
-    fn run_apply_message_reports_rerun_without_old_instruction() {
-        let files = vec!["src/a.rs".to_owned()];
-        for (passed, expected) in [(true, "通过"), (false, "失败")] {
-            let report = apply::Rerun {
-                results: vec![crossagents_core::CheckResult {
-                    command: "check".into(),
-                    exit_code: Some(if passed { 0 } else { 1 }),
-                    passed,
-                    output: String::new(),
-                }],
-                error: None,
-            };
-            let note = rerun_note(&files, Some(&report));
-            assert!(note.contains(expected), "{note}");
-            assert!(!note.contains("请在原目录再跑一次"));
-        }
-        let report = apply::Rerun {
-            results: vec![],
-            error: None,
-        };
-        assert!(rerun_note(&files, Some(&report)).contains("没有匹配的检查"));
-        let report = apply::Rerun {
-            results: vec![],
-            error: Some("bad config".into()),
-        };
-        assert!(rerun_note(&files, Some(&report)).contains("bad config"));
-    }
-}
 /// What the person should know about the checks after an apply.
 fn apply_note(run: &Run, outcome: &apply::Outcome) -> Option<String> {
     match outcome {
@@ -621,5 +588,39 @@ impl Orchestrator {
             return Err(CoreError::Conflict("you lead no run".into()));
         }
         self.apply_in_place(run.id).await
+    }
+}
+
+#[cfg(test)]
+mod apply_note_tests {
+    use super::*;
+
+    #[test]
+    fn run_apply_message_reports_rerun_without_old_instruction() {
+        let files = vec!["src/a.rs".to_owned()];
+        for (passed, expected) in [(true, "通过"), (false, "失败")] {
+            let report = apply::Rerun {
+                results: vec![crossagents_core::CheckResult {
+                    command: "check".into(),
+                    exit_code: Some(if passed { 0 } else { 1 }),
+                    passed,
+                    output: String::new(),
+                }],
+                error: None,
+            };
+            let note = rerun_note(&files, Some(&report));
+            assert!(note.contains(expected), "{note}");
+            assert!(!note.contains("请在原目录再跑一次"));
+        }
+        let report = apply::Rerun {
+            results: vec![],
+            error: None,
+        };
+        assert!(rerun_note(&files, Some(&report)).contains("没有匹配的检查"));
+        let report = apply::Rerun {
+            results: vec![],
+            error: Some("bad config".into()),
+        };
+        assert!(rerun_note(&files, Some(&report)).contains("bad config"));
     }
 }

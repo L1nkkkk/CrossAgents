@@ -1306,10 +1306,10 @@ async fn extensions_http_stopping_the_hub_ends_a_tool_a_request_is_waiting_for()
     assert!(stopping.elapsed() < Duration::from_secs(20));
     assert_eq!(runner.live_tokens(), 0);
     // The request got an answer (an error), and the tool's tree is gone.
-    if let Ok(Ok(resp)) = tokio::time::timeout(Duration::from_secs(5), waiting).await {
-        if let Ok(resp) = resp {
-            assert!(!resp.status().is_success());
-        }
+    if let Ok(Ok(resp)) = tokio::time::timeout(Duration::from_secs(5), waiting).await
+        && let Ok(resp) = resp
+    {
+        assert!(!resp.status().is_success());
     }
     let size = fs::metadata(&beat).unwrap().len();
     tokio::time::sleep(Duration::from_millis(600)).await;

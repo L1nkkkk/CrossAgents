@@ -1284,7 +1284,7 @@ async fn a_stage_wakes_the_lead_and_holds_the_next_one_back() {
     // a is stage 1; b is stage 2 though it depends on nothing. Their scopes do not overlap,
     // so only the stage holds b back.
     let mut a = task("a", goal("[write a.txt=alpha]", "a done"), &[]);
-    let mut b = task("b", goal("[write b.txt=beta]", "b done".into()), &[]);
+    let mut b = task("b", goal("[write b.txt=beta]", "b done"), &[]);
     for (task, key, stage) in [(&mut a, "a", 1), (&mut b, "b", 2)] {
         task["spec"]["stage"] = json!(stage);
         task["spec"]["scope"] = json!({ "allow": [format!("{key}.txt")] });

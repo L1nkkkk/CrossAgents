@@ -758,6 +758,7 @@ dependencies = [
  "crossagents-core",
  "crossagents-drivers",
  "crossagents-link",
+ "crossagents-node",
  "crossagents-orchestrator",
  "crossagents-plugins",
  "crossagents-store-sqlite",

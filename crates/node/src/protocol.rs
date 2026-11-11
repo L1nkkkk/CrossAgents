@@ -811,6 +811,7 @@ mod tests {
             plugin: "mock".into(),
             driver: None,
             model: None,
+            node: None,
             role: Role::Worker,
             home: PathBuf::from("/tmp"),
             cwd: PathBuf::from("/tmp"),

@@ -133,10 +133,7 @@ impl TaskLedger {
 
     /// Makes `agent` the task's reviewer for the review it is in.
     fn set_reviewer(&mut self, task: TaskId, agent: AgentId) {
-        let old = std::mem::replace(
-            &mut self.hands.entry(task).or_default().reviewer,
-            Some(agent),
-        );
+        let old = self.hands.entry(task).or_default().reviewer.replace(agent);
         if old == Some(agent) {
             return;
         }

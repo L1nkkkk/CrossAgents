@@ -21,6 +21,7 @@ crossagents-store-sqlite.workspace = true
 crossagents-orchestrator.workspace = true
 crossagents-plugins.workspace = true
 crossagents-link.workspace = true
+crossagents-node = { path = "../node" }
 iroh.workspace = true
 dirs.workspace = true
 dunce.workspace = true

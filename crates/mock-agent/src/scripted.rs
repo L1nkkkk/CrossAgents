@@ -324,7 +324,9 @@ mod tests {
 
     // A subprocess of the test harness serves one request, then leaves a descendant
     // holding stderr open. Normal test runs do not enter either subprocess branch.
+    // The descendant is spawned on purpose and never waited on: it must outlive this helper.
     #[test]
+    #[allow(clippy::zombie_processes)]
     fn stderr_descendant_helper() {
         match std::env::var("MCP_DIAG_HELPER").as_deref() {
             Ok("descendant") => {

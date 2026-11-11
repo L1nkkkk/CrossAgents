@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -597,30 +597,43 @@ fn finish_open(
         .sessions
         .lock()
         .expect("sessions lock poisoned")
-        .insert(handle, state.clone());
-    tokio::spawn(pump(shared.out.clone(), state.clone(), events, returns));
+        .insert(handle.clone(), state.clone());
+    tokio::spawn(pump(
+        shared.out.clone(),
+        handle,
+        Arc::downgrade(&state),
+        events,
+        returns,
+    ));
     (info, state)
 }
 
 /// The one place a session's frames are ordered: its events, then any `Return` a call sent
 /// after them. Splitting the two across tasks let a `prompt` answer arrive before the events
 /// the driver had already emitted, which a direct driver never does.
+///
+/// The pump holds the session's state only weakly. The state holds the `returns` sender this
+/// loop waits on, and the session holds the `events` sender, so a strong reference would keep
+/// the session (and what it holds, a codex app-server's process, say) alive after its shutdown.
+/// The loop ends once the state is gone and the session's events have all been sent.
 async fn pump(
     out: mpsc::UnboundedSender<Outgoing>,
-    state: Arc<SessionState>,
+    handle: String,
+    state: Weak<SessionState>,
     mut events: mpsc::UnboundedReceiver<SessionEvent>,
     mut returns: mpsc::UnboundedReceiver<PendingReturn>,
 ) {
     let mut events_open = true;
+    let mut returns_open = true;
     loop {
         tokio::select! {
             // Events first, so a `Return` queued after them cannot overtake them.
             biased;
             event = events.recv(), if events_open => match event {
                 Some(event) => {
-                    let commands = state.changed_commands();
+                    let commands = state.upgrade().and_then(|s| s.changed_commands());
                     let sent = out.send(Outgoing::Event {
-                        session: state.handle.clone(),
+                        session: handle.clone(),
                         event,
                         commands,
                     });
@@ -630,10 +643,10 @@ async fn pump(
                 }
                 None => events_open = false,
             },
-            pending = returns.recv() => match pending {
+            pending = returns.recv(), if returns_open => match pending {
                 Some(pending) => {
                     let sent = out.send(Outgoing::Return {
-                        session: Some(state.handle.clone()),
+                        session: Some(handle.clone()),
                         id: pending.id,
                         result: pending.result,
                         commands: pending.commands,
@@ -642,7 +655,7 @@ async fn pump(
                         return;
                     }
                 }
-                None => return,
+                None => returns_open = false,
             },
             else => return,
         }

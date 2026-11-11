@@ -51,6 +51,7 @@ fn spec(
             plugin: "mock".into(),
             driver: Some("acp-generic".into()),
             model: None,
+            node: None,
             role: Role::Worker,
             cwd: cwd.to_path_buf(),
             config: serde_json::Value::Null,

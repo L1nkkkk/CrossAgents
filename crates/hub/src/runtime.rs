@@ -781,6 +781,7 @@ impl Runtime {
     /// Takes over the agent's process left running by the previous hub; `false` when there
     /// is none to take over.
     async fn adopt(&self, agent: &Agent, running: Option<MessageId>) -> Result<bool, CoreError> {
+        crate::builtin_node::check_node(agent)?;
         let Ok(resolved) = self.plugins.driver(&agent.plugin, agent.driver.as_deref()) else {
             return Ok(false);
         };
@@ -1021,6 +1022,7 @@ impl Runtime {
     /// session that cannot be resumed is an error instead of a new one: the agent was moved
     /// to work with its conversation (docs/tasks/S1.md §3.1).
     async fn open(&self, agent: &Agent, carry: bool) -> Result<(), CoreError> {
+        crate::builtin_node::check_node(agent)?;
         let agent = agent.clone();
         let resolved = match self.plugins.driver(&agent.plugin, agent.driver.as_deref()) {
             Ok(resolved) => resolved,
@@ -1744,7 +1746,7 @@ impl Runtime {
                         id: stored.id,
                         message_id,
                         text: display,
-                        from: Some(envelope.from.clone()),
+                        from: Some(envelope.from),
                         attachments: envelope.attachments,
                     },
                 )
@@ -2548,9 +2550,7 @@ impl Runtime {
         id: AgentId,
         inbox: Option<&Inbox>,
     ) -> Option<MessageId> {
-        let Some(message) = self.notice_state.digest_message(id) else {
-            return None;
-        };
+        let message = self.notice_state.digest_message(id)?;
         if let Some(inbox) = inbox {
             let _turn = self.notice_state.turn.lock().unwrap();
             if inbox.is_waiting(message) && inbox.withdraw(message) {
@@ -2560,12 +2560,8 @@ impl Runtime {
             return None;
         }
         let mut queues = self.external.lock().await;
-        let Some(queue) = queues.get_mut(&id) else {
-            return None;
-        };
-        let Some(index) = queue.iter().position(|(m, _, _)| *m == message) else {
-            return None;
-        };
+        let queue = queues.get_mut(&id)?;
+        let index = queue.iter().position(|(m, _, _)| *m == message)?;
         queue.remove(index);
         drop(queues);
         self.notice_state.clear_digest_if(id, message);
@@ -3340,6 +3336,7 @@ async fn learn_model_result(
 }
 
 /// Turns session events and turn control into published events, coalescing output text.
+#[allow(clippy::too_many_arguments)]
 async fn forward_events(
     bus: Arc<EventBus>,
     id: AgentId,
@@ -3796,6 +3793,9 @@ struct Digest {
     versions: Vec<(String, DateTime<Utc>)>,
 }
 
+/// Notices sent and not yet acknowledged, by message: who they are for and the versions held.
+type Inflight = HashMap<MessageId, (AgentId, Vec<(String, DateTime<Utc>)>)>;
+
 /// Quiet interval and maximum wait for batch notices. Defaults are 60s and 180s;
 /// `[hub] notice_batch_quiet_secs` and `notice_batch_max_secs` override them.
 struct NoticeState {
@@ -3803,7 +3803,7 @@ struct NoticeState {
     /// Held across popping a turn and updating a wake that is still waiting.
     turn: std::sync::Mutex<()>,
     digests: std::sync::Mutex<HashMap<AgentId, Digest>>,
-    inflight: std::sync::Mutex<HashMap<MessageId, (AgentId, Vec<(String, DateTime<Utc>)>)>>,
+    inflight: std::sync::Mutex<Inflight>,
     quiet_ms: AtomicU64,
     max_ms: AtomicU64,
 }

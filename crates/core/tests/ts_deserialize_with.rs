@@ -8,18 +8,16 @@ fn has_attribute(tokens: proc_macro2::TokenStream, name: &str, members: &[&str])
     while let Some(token) = tokens.next() {
         match token {
             proc_macro2::TokenTree::Ident(ident) if ident == name => {
-                if let Some(proc_macro2::TokenTree::Group(group)) = tokens.peek() {
-                    if group.stream().into_iter().any(|token| {
+                if let Some(proc_macro2::TokenTree::Group(group)) = tokens.peek()
+                    && group.stream().into_iter().any(|token| {
                         matches!(token, proc_macro2::TokenTree::Ident(ident) if members.iter().any(|member| ident == *member))
-                    }) {
-                        return true;
-                    }
-                }
-            }
-            proc_macro2::TokenTree::Group(group) => {
-                if has_attribute(group.stream(), name, members) {
+                    })
+                {
                     return true;
                 }
+            }
+            proc_macro2::TokenTree::Group(group) if has_attribute(group.stream(), name, members) => {
+                return true;
             }
             _ => {}
         }

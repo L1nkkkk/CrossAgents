@@ -64,16 +64,6 @@ impl FakeHost {
         .await
         .unwrap_or_else(|_| panic!("no notice said {what:?}"));
     }
-
-    async fn wait_for_delivery(&self, agent: AgentId) {
-        tokio::time::timeout(std::time::Duration::from_secs(4), async {
-            while self.delivered_to(agent).await.is_empty() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the report was not delivered");
-    }
 }
 
 #[async_trait]
@@ -899,8 +889,7 @@ async fn reporting_new_work_after_a_pass_checks_it_again_and_relays_the_new_summ
     let told = f.host.notices.lock().await.clone();
     assert!(
         told.iter()
-            .filter(|n| n.contains("waits for your acceptance"))
-            .last()
+            .rfind(|n| n.contains("waits for your acceptance"))
             .is_some_and(|n| n.contains("also fixed b")),
         "the issuer's notice carries the new summary: {told:?}"
     );

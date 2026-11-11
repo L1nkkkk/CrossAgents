@@ -191,6 +191,9 @@ struct Profile {
     /// is offered as it is rather than replaced by what the accounts report.
     pinned_models: bool,
     drivers: Mutex<HashMap<DriverKind, Arc<dyn Driver>>>,
+    /// What a registry with a [`DriverWrap`] hands out for each kind: built once, then the
+    /// same every time (a `RemoteDriver` per `(plugin, kind)`).
+    served: Mutex<HashMap<DriverKind, Arc<dyn Driver>>>,
 }
 
 impl Profile {
@@ -200,6 +203,7 @@ impl Profile {
             config,
             pinned_models,
             drivers: Mutex::default(),
+            served: Mutex::default(),
         }
     }
 
@@ -257,13 +261,30 @@ impl Profile {
     }
 }
 
+/// Wraps the drivers a registry hands out, so the hub's built-in node can serve them
+/// (docs/tasks/B1-NODE.md §8 B1.2). This crate does not depend on the node crate: the hub
+/// supplies the wrapper.
+pub trait DriverWrap: Send + Sync {
+    /// `local` is the plugin's own driver for `kind`; the result is what callers get.
+    fn wrap(&self, plugin: &str, kind: DriverKind, local: Arc<dyn Driver>) -> Arc<dyn Driver>;
+}
+
 /// Plugins by name. Cheap to clone; clones share drivers.
 #[derive(Clone, Default)]
 pub struct PluginRegistry {
     profiles: BTreeMap<String, Arc<Profile>>,
+    /// When set, `driver`, `get` and `defaults` return what it wraps; `local_driver` never does.
+    wrap: Option<Arc<dyn DriverWrap>>,
 }
 
 impl PluginRegistry {
+    /// Hands out wrapped drivers from now on (see [`DriverWrap`]). Clones taken before this
+    /// call keep handing out the plain drivers.
+    pub fn with_wrap(mut self, wrap: Arc<dyn DriverWrap>) -> Self {
+        self.wrap = Some(wrap);
+        self
+    }
+
     /// The built-in plugins, adjusted and extended by `config.toml` entries.
     pub fn with_config(configs: &BTreeMap<String, PluginConfig>) -> Self {
         let mut registry = Self::default();
@@ -341,7 +362,42 @@ impl PluginRegistry {
             Some(driver) => driver.parse()?,
             None => profile.config.default_driver(),
         };
-        profile.resolve(kind)
+        self.serve(profile, kind)
+    }
+
+    /// The plugin's own driver for an agent of plugin `name` (as [`Self::driver`] picks it),
+    /// never wrapped: what the node that serves the wrapped ones runs.
+    pub fn local_driver(
+        &self,
+        name: &str,
+        driver: Option<&str>,
+    ) -> Result<Arc<dyn Driver>, CoreError> {
+        let profile = self.profiles.get(name).ok_or_else(|| CoreError::NotFound {
+            kind: "plugin",
+            id: name.to_owned(),
+        })?;
+        let kind = match driver {
+            Some(driver) => driver.parse()?,
+            None => profile.config.default_driver(),
+        };
+        Ok(profile.resolve(kind)?.driver)
+    }
+
+    /// The driver `kind` of `profile` as this registry hands it out.
+    fn serve(&self, profile: &Profile, kind: DriverKind) -> Result<Resolved, CoreError> {
+        let local = profile.resolve(kind)?;
+        let Some(wrap) = &self.wrap else {
+            return Ok(local);
+        };
+        let mut served = profile.served.lock().expect("served driver cache poisoned");
+        let driver = served
+            .entry(kind)
+            .or_insert_with(|| wrap.wrap(&profile.name, kind, local.driver))
+            .clone();
+        Ok(Resolved {
+            driver,
+            warning: local.warning,
+        })
     }
 
     /// The plugin's default driver.
@@ -358,7 +414,7 @@ impl PluginRegistry {
     pub fn defaults(&self) -> Vec<Arc<dyn Driver>> {
         self.profiles
             .values()
-            .filter_map(|p| p.resolve(p.config.default_driver()).ok())
+            .filter_map(|p| self.serve(p, p.config.default_driver()).ok())
             .map(|r| r.driver)
             .collect()
     }
@@ -672,6 +728,60 @@ mod tests {
                 .driver
                 .kind(),
             DriverKind::AcpGeneric
+        );
+    }
+
+    /// Hands back the driver it was given, counting the calls.
+    #[derive(Default)]
+    struct Counting(std::sync::atomic::AtomicUsize);
+
+    impl DriverWrap for Counting {
+        fn wrap(
+            &self,
+            _plugin: &str,
+            _kind: DriverKind,
+            local: Arc<dyn Driver>,
+        ) -> Arc<dyn Driver> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            local
+        }
+    }
+
+    #[test]
+    fn a_wrapped_registry_wraps_each_driver_once_and_local_drivers_are_never_wrapped() {
+        let plugins = PluginRegistry::with_config(&BTreeMap::new());
+        let counting = Arc::new(Counting::default());
+        let wrapped = plugins.clone().with_wrap(counting.clone());
+
+        let first = wrapped.driver("claude", None).unwrap().driver;
+        let again = wrapped.driver("claude", None).unwrap().driver;
+        assert!(Arc::ptr_eq(&first, &again), "one driver per (plugin, kind)");
+        assert_eq!(counting.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        wrapped.defaults();
+        assert_eq!(
+            counting.0.load(std::sync::atomic::Ordering::SeqCst),
+            plugins.names().len(),
+            "defaults wrap the plugins' drivers, each once"
+        );
+        wrapped.defaults();
+        assert_eq!(
+            counting.0.load(std::sync::atomic::Ordering::SeqCst),
+            plugins.names().len()
+        );
+
+        // The node's own calls go through the local form, which is never wrapped, and a
+        // clone taken before the wrap hands out the plain drivers.
+        let local = wrapped.local_driver("claude", None).unwrap();
+        assert_eq!(local.kind(), DriverKind::ClaudeNative);
+        assert_eq!(
+            counting.0.load(std::sync::atomic::Ordering::SeqCst),
+            plugins.names().len()
+        );
+        assert!(plugins.get("claude").is_some());
+        assert_eq!(
+            counting.0.load(std::sync::atomic::Ordering::SeqCst),
+            plugins.names().len()
         );
     }
 }

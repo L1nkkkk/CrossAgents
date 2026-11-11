@@ -567,6 +567,7 @@ impl Orchestrator {
     /// route, or the return limit (`TaskSpec::max_returns`), has been used up. The task is
     /// `Passed` when this is called. The lead hears one quiet line `head` when it went back,
     /// and a decision (`decide`) when it did not.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn return_work(
         &self,
         run: &Run,
@@ -948,7 +949,7 @@ impl Orchestrator {
             .findings
             .iter()
             .filter(|f| f.blocking)
-            .map(|f| finding_line(f))
+            .map(finding_line)
             .collect();
         if !blocking.is_empty() {
             line.push_str(&format!(
@@ -961,7 +962,7 @@ impl Orchestrator {
             .findings
             .iter()
             .filter(|f| !f.blocking)
-            .map(|f| finding_line(f))
+            .map(finding_line)
             .collect();
         if !registered.is_empty() {
             line.push_str(&format!(
@@ -1260,6 +1261,25 @@ impl Orchestrator {
     }
 }
 
+/// The caps a task is held to: its own `spec.budget`, field by field, else the run's `task_budget`.
+pub(crate) fn task_caps(run: &Run, task: &Task) -> TaskBudget {
+    task.spec
+        .budget
+        .clone()
+        .unwrap_or_default()
+        .with_default(&run.config.policy.task_budget.clone().unwrap_or_default())
+}
+
+/// Why the hub must not send `task` back for rework on its own: its budget allows no more
+/// rounds (`max_rework`). The lead decides then, as it does past the review limit.
+pub(crate) fn rework_stop(run: &Run, task: &Task) -> Option<String> {
+    let max = task_caps(run, task).max_rework?;
+    let done = task.report.rework.len() as u32;
+    (done >= max).then(|| {
+        format!("it has been sent back for rework {done} times, and its budget allows {max} (max_rework)")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1338,23 +1358,4 @@ mod tests {
                 .blocking
         );
     }
-}
-
-/// The caps a task is held to: its own `spec.budget`, field by field, else the run's `task_budget`.
-pub(crate) fn task_caps(run: &Run, task: &Task) -> TaskBudget {
-    task.spec
-        .budget
-        .clone()
-        .unwrap_or_default()
-        .with_default(&run.config.policy.task_budget.clone().unwrap_or_default())
-}
-
-/// Why the hub must not send `task` back for rework on its own: its budget allows no more
-/// rounds (`max_rework`). The lead decides then, as it does past the review limit.
-pub(crate) fn rework_stop(run: &Run, task: &Task) -> Option<String> {
-    let max = task_caps(run, task).max_rework?;
-    let done = task.report.rework.len() as u32;
-    (done >= max).then(|| {
-        format!("it has been sent back for rework {done} times, and its budget allows {max} (max_rework)")
-    })
 }
