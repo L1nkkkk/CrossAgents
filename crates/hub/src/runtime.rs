@@ -478,6 +478,8 @@ pub struct Runtime {
     /// turn (docs/tasks/DELIVERY-AUDIT.md §4).
     clients: Mutex<ClientLog>,
     generation: AtomicU64,
+    /// Where each session's CLI version is recorded as working or broken.
+    cli_runs: Option<Arc<crate::cli_runs::CliRuns>>,
 }
 
 /// Messages to an agent's event forwarder, kept in order with the session's own events.
@@ -549,7 +551,32 @@ impl Runtime {
             replies: std::sync::Mutex::default(),
             clients: Mutex::default(),
             generation: AtomicU64::new(0),
+            cli_runs: None,
         }
+    }
+
+    /// Records what each session's CLI version did (`crate::cli_runs`).
+    pub fn with_cli_runs(mut self, runs: Arc<crate::cli_runs::CliRuns>) -> Self {
+        self.cli_runs = Some(runs);
+        self
+    }
+
+    /// A witness for a session of `agent`, when the runtime records CLI runs and the CLI
+    /// it launches reports where it is and its version.
+    async fn witness(&self, agent: &Agent) -> Option<crate::cli_runs::Witness> {
+        let runs = self.cli_runs.clone()?;
+        let resolved = self
+            .plugins
+            .driver(&agent.plugin, agent.driver.as_deref())
+            .ok()?;
+        let located = resolved.driver.cli_status().await?.located?;
+        let version = located.version?;
+        Some(crate::cli_runs::Witness::new(
+            runs,
+            agent.plugin.clone(),
+            located.path.display().to_string(),
+            version,
+        ))
     }
 
     pub fn with_setup(mut self, setup: Arc<dyn SessionSetup>) -> Self {
@@ -1498,9 +1525,12 @@ impl Runtime {
             steer,
         });
         // The stream rules of the agent's workspace, read as its session starts.
-        let rules = match self.store().get_agent(&AgentKey::Id(id)).await {
-            Ok(agent) => StreamRules::new(stream_rules::load(&agent.cwd, self.home.as_deref())),
-            Err(_) => StreamRules::default(),
+        let (rules, witness) = match self.store().get_agent(&AgentKey::Id(id)).await {
+            Ok(agent) => (
+                StreamRules::new(stream_rules::load(&agent.cwd, self.home.as_deref())),
+                self.witness(&agent).await,
+            ),
+            Err(_) => (StreamRules::default(), None),
         };
         tokio::spawn(forward_events(
             self.bus.clone(),
@@ -1510,6 +1540,7 @@ impl Runtime {
             self.live.clone(),
             generation,
             rules,
+            witness,
         ));
         if adopted.is_some() {
             inbox.busy.store(true, Ordering::SeqCst);
@@ -3316,6 +3347,7 @@ async fn forward_events(
     live: LiveMap,
     generation: u64,
     mut rules: StreamRules,
+    mut witness: Option<crate::cli_runs::Witness>,
 ) {
     let mut out = Coalescer::default();
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
@@ -3329,6 +3361,7 @@ async fn forward_events(
             // be out, and its output must be read after the announcement, not before.
             event = events.recv(), if events_open && control.is_empty() => match event {
                 Some(event) => {
+                    if let Some(witness) = witness.as_mut() { witness.observe(&event); }
                     if let SessionEventKind::Error { message } | SessionEventKind::Exited { message, .. } = &event.kind && unavailable_model_error(message) { turn_error = Some(message.clone()); }
                     let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                     if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
@@ -3348,6 +3381,7 @@ async fn forward_events(
                 // turn before.
                 if !matches!(ctl, Some(Control::TurnStarted(..))) {
                     while let Ok(event) = events.try_recv() {
+                        if let Some(witness) = witness.as_mut() { witness.observe(&event); }
                         if let SessionEventKind::Error { message } | SessionEventKind::Exited { message, .. } = &event.kind && unavailable_model_error(message) { turn_error = Some(message.clone()); }
                         let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                         if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {

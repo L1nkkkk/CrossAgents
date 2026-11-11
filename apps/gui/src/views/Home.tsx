@@ -254,11 +254,14 @@ export function HomeView() {
     !!request.trim() &&
     (mode === "chat" ? !!chosenSession || !!chatModel : !!lead && !!where) &&
     (!sessionUse || sessionUse.selectable);
-  // Effort levels of the vendor picked: the chat's model, or the run's lead. A picked session
-  // keeps its own, so there is nothing to choose.
+  // Effort levels of the vendor and model picked: the chat's model, or the run's lead. A
+  // model the CLI reports levels for takes exactly those; one it does not name takes the
+  // plugin's list. A picked session keeps its own, so there is nothing to choose.
+  const effortPlugin = plugins.data?.find((p) => p.name === (mode === "chat" ? chatModel?.plugin : leadPlugin));
+  const effortModel = mode === "chat" ? chatModel?.model : leadModel;
   const levels = chosenSession
     ? []
-    : effortLevels(plugins.data?.find((p) => p.name === (mode === "chat" ? chatModel?.plugin : leadPlugin))?.efforts);
+    : effortLevels(effortPlugin?.efforts_by_model?.[effortModel ?? ""] ?? effortPlugin?.efforts);
   const effortWanted = effortPick || (mode === "run" && leadAgent ? effortOf(leadAgent.config) ?? "" : "");
   const effortOn = levels.some((l) => l.value === effortWanted) ? effortWanted : "";
   const effort = effortOn || undefined;

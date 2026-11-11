@@ -390,6 +390,8 @@ export const api = {
   installPlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/install`),
   /** The same for its upgrade command. */
   upgradePlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/upgrade`),
+  /** Starts the CLI for one tiny session to see whether this version still speaks our protocol (202). */
+  selfCheckPlugin: (name: string) => request<void>("POST", `/v1/plugins/${enc(name)}/self-check`),
 
   /** Every extension the hub knows, enabled or not; `current` is the snapshot it runs. */
   listExtensions: () => request<ExtensionsResponse>("GET", "/v1/extensions"),

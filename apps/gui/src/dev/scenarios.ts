@@ -279,6 +279,7 @@ export const SCENARIOS: Scenario[] = [
       driver: "acp-generic",
       capabilities: capabilitiesOf("kimi"),
       efforts: [],
+      efforts_by_model: {},
     };
     scene.state.plugins = [...scene.state.plugins, kimi];
     scene.state.quota.accounts = [...scene.state.quota.accounts, signedOutKimi()];

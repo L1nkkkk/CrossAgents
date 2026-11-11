@@ -663,6 +663,13 @@ pub trait Driver: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     /// Models this Profile knows about, for display and validation hints.
     fn models(&self) -> Vec<String>;
+    /// The reasoning effort levels `model` takes, lowest first, when the CLI reports them per
+    /// model (`with-cli model list` does); `Some` with no levels for a model that takes none.
+    /// `None` when the CLI does not say, and the profile's own `efforts` then apply. Asking
+    /// for a level a model does not take fails the turn, so a picker offers only these.
+    fn model_efforts(&self, _model: &str) -> Option<Vec<String>> {
+        None
+    }
     /// Whether the program it launches can be found on this machine. A Profile that is not
     /// installed offers no models, so nothing is started on it only to fail.
     fn installed(&self) -> bool {

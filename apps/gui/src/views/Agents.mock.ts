@@ -27,6 +27,8 @@ export const plugins = (): PluginInfo[] => [
     driver: "claude-native",
     capabilities: capabilitiesOf("claude"),
     efforts: ["low", "medium", "high", "xhigh", "max"],
+    // Claude Code reports no per-model levels: the one list above applies to all of them.
+    efforts_by_model: {},
     cli: {
       installed: true,
       probing: false,
@@ -37,6 +39,9 @@ export const plugins = (): PluginInfo[] => [
       below_minimum: false,
       verified: ["2.1"],
       unverified: false,
+      version_status: "verified",
+      last_ok_at: "2026-11-10T09:12:00Z",
+      self_checking: false,
       install_hint: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\"",
       docs: CLAUDE_DOCS,
       install_command: ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://claude.ai/install.ps1 | iex"],
@@ -55,6 +60,7 @@ export const plugins = (): PluginInfo[] => [
     driver: "codex-native",
     capabilities: capabilitiesOf("codex"),
     efforts: ["low", "medium", "high"],
+    efforts_by_model: {},
     cli: {
       installed: true,
       probing: false,
@@ -65,6 +71,8 @@ export const plugins = (): PluginInfo[] => [
       below_minimum: true,
       verified: ["0.158", "0.166"],
       unverified: false,
+      version_status: "untried",
+      self_checking: false,
       install_hint: "npm install -g @openai/codex",
       docs: "https://github.com/openai/codex",
       installed_via: "npm",
@@ -84,12 +92,14 @@ export const plugins = (): PluginInfo[] => [
     driver: "codebuddy-native",
     capabilities: capabilitiesOf("codebuddy"),
     efforts: ["minimal", "low", "medium", "high", "xhigh", "max"],
+    efforts_by_model: {},
     cli: {
       installed: false,
       probing: false,
       below_minimum: false,
       verified: ["2.173"],
       unverified: false,
+      self_checking: false,
       install_hint: "npm install -g @tencent-ai/codebuddy-code",
       docs: "https://www.codebuddy.ai/",
       install_command: ["npm", "install", "-g", "@tencent-ai/codebuddy-code"],
@@ -108,6 +118,14 @@ export const plugins = (): PluginInfo[] => [
     driver: "with-native",
     capabilities: capabilitiesOf("with"),
     efforts: ["low", "medium", "high", "xhigh", "max"],
+    // `with-cli model list` says what each model takes, and some take none at all.
+    efforts_by_model: {
+      "claude-sonnet-5.5": ["low", "medium", "high", "xhigh", "max"],
+      "gpt-6-sol": ["low", "medium", "high", "xhigh", "max"],
+      "glm-5.3-flash": ["low", "high", "max"],
+      "hy3": ["high"],
+      "deepseek-v3.1": [],
+    },
     cli: {
       installed: true,
       probing: false,
@@ -117,6 +135,12 @@ export const plugins = (): PluginInfo[] => [
       below_minimum: false,
       verified: ["0.31"],
       unverified: true,
+      // Upgraded, and its first run broke on the protocol: the row names the last good one.
+      version_status: "protocol_failed",
+      last_protocol_fail_at: "2026-11-11T02:40:00Z",
+      protocol_fail_message: "with-cli sent no init event before its first turn",
+      last_good_version: "0.29.4",
+      self_checking: false,
       install_hint: "install the With desktop app, which brings with-cli and signs it in",
       docs: "https://with.woa.com",
       can_upgrade: false,
@@ -132,5 +156,6 @@ export const plugins = (): PluginInfo[] => [
     driver: "acp-generic",
     capabilities: capabilitiesOf("mock"),
     efforts: [],
+    efforts_by_model: {},
   },
 ];

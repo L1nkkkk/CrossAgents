@@ -79,4 +79,30 @@ verified?: Array<string>,
  * The CLI's version is outside those series: it still runs, the row says it is
  * unverified. False when no series is named or the version is unknown.
  */
-unverified: boolean, };
+unverified: boolean, 
+/**
+ * How this version stands by what it did here: `verified` (the series the driver was
+ * checked against), `known_good` (a session ran on it), `untried` or `protocol_failed`
+ * (its latest run could not be talked to). Absent when the version is unknown.
+ */
+version_status?: string, 
+/**
+ * When a session last got an event of this version's own.
+ */
+last_ok_at?: string, 
+/**
+ * When this version last failed in a way only a protocol change explains.
+ */
+last_protocol_fail_at?: string, 
+/**
+ * What that failure said, when `version_status` is `protocol_failed`.
+ */
+protocol_fail_message?: string, 
+/**
+ * The version that last worked here, when this one failed.
+ */
+last_good_version?: string, 
+/**
+ * A self-check (`POST /v1/plugins/{name}/self-check`) is running now.
+ */
+self_checking: boolean, };

@@ -16,6 +16,7 @@ const plugin = (name: string, models: string[]): PluginInfo => ({
   driver: "acp-generic",
   capabilities: {} as Capabilities,
   efforts: [],
+  efforts_by_model: {},
 });
 
 const account = (id: string, provider: string, logged_in: boolean): AccountQuota => ({

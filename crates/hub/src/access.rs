@@ -76,6 +76,8 @@ pub fn required(method: &Method, pattern: &str) -> Level {
             | ("POST", "/v1/plugins/{name}/upgrade")
             // It runs the CLIs' version commands, as those do.
             | ("POST", "/v1/plugins/refresh")
+            // It starts the CLI for a real (if tiny) session, spending the account's quota.
+            | ("POST", "/v1/plugins/{name}/self-check")
     ) || is_terminal(pattern)
         || is_extension_trust(method, pattern);
     if admin {
@@ -245,6 +247,10 @@ mod tests {
         );
         // Looking for the CLIs again runs their version commands.
         assert_eq!(required(&Method::POST, "/v1/plugins/refresh"), Level::Admin);
+        assert_eq!(
+            required(&Method::POST, "/v1/plugins/{name}/self-check"),
+            Level::Admin
+        );
         // Asking which paths are inside a workspace reads; nothing changes.
         assert_eq!(
             required(&Method::POST, "/v1/agents/{key}/files/resolve"),

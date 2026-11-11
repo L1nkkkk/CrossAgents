@@ -49,7 +49,7 @@ use tokio::sync::mpsc;
 use crate::launch::{LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
 use crate::process::{hide_console, resolve_program};
-use wire::{ChatArgs, Line, Turn};
+use wire::{ChatArgs, Line, ModelEntry, Turn};
 
 /// How long `with-cli model list` gets.
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -73,8 +73,9 @@ pub struct WithNativeDriver {
     models: Vec<String>,
     /// `models` were written by hand: offered as they are.
     pinned: bool,
-    /// What `with-cli model list` answered, once asked.
-    listed: Arc<Mutex<Vec<String>>>,
+    /// What `with-cli model list` answered, once asked: each model and the effort levels it
+    /// takes.
+    listed: Arc<Mutex<Vec<ModelEntry>>>,
     missing: Option<String>,
 }
 
@@ -141,7 +142,7 @@ impl WithNativeDriver {
             tracing::debug!("with-cli model list did not answer");
             return;
         };
-        let models = wire::parse_model_list(&String::from_utf8_lossy(&output.stdout));
+        let models = wire::parse_model_entries(&String::from_utf8_lossy(&output.stdout));
         if !models.is_empty() {
             *self.listed.lock().expect("model list") = models;
         }
@@ -191,10 +192,24 @@ impl Driver for WithNativeDriver {
         if !self.pinned {
             let listed = self.listed.lock().expect("model list");
             if !listed.is_empty() {
-                return listed.clone();
+                return listed.iter().map(|model| model.id.clone()).collect();
             }
         }
         self.models.clone()
+    }
+
+    /// What `with-cli model list` said about this model, which knows its own levels: a model
+    /// naming none takes no effort at all. `None` before it has answered (the profile's own
+    /// `efforts` then apply) and for a hand-listed model, which comes with no such detail.
+    fn model_efforts(&self, model: &str) -> Option<Vec<String>> {
+        if self.pinned {
+            return None;
+        }
+        let listed = self.listed.lock().expect("model list");
+        listed
+            .iter()
+            .find(|entry| entry.id == model)
+            .map(ModelEntry::efforts)
     }
 
     fn installed(&self) -> bool {
@@ -467,6 +482,12 @@ impl WithSession {
             running.process.start_kill();
         }
         *self.running.lock().expect("running") = None;
+        if turn.unknown > 0 {
+            tracing::info!(
+                unknown = turn.unknown,
+                "with-cli sent event types this driver does not know; they were skipped"
+            );
+        }
 
         let cancelled = self.cancelled.load(Ordering::SeqCst);
         let stop_reason = if cancelled && !turn.finished {
@@ -1005,13 +1026,28 @@ mod tests {
             WithNativeDriver::new("with", Cli::at(vec!["with-cli".into()]), vec!["a".into()]);
         assert_eq!(driver.kind(), DriverKind::WithNative);
         assert_eq!(driver.models(), ["a"]);
-        *driver.listed.lock().unwrap() = vec!["b".into()];
+        // Before the CLI answers, the description's own list is what it offers and no model
+        // knows its levels.
+        assert_eq!(driver.model_efforts("b"), None);
+        *driver.listed.lock().unwrap() = vec![ModelEntry {
+            id: "b".into(),
+            thinking_effort: vec!["low".into(), "high".into()],
+            non_thinking_effort: vec!["low".into()],
+        }];
         assert_eq!(driver.models(), ["b"]);
+        assert_eq!(driver.model_efforts("b"), Some(vec!["low".into(), "high".into()]));
+        // A model the CLI did not name (the list changed under a pick) has no say.
+        assert_eq!(driver.model_efforts("a"), None);
         let pinned =
             WithNativeDriver::new("with", Cli::at(vec!["with-cli".into()]), vec!["a".into()])
                 .pinned(true);
-        *pinned.listed.lock().unwrap() = vec!["b".into()];
+        *pinned.listed.lock().unwrap() = vec![ModelEntry {
+            id: "b".into(),
+            thinking_effort: vec!["low".into()],
+            non_thinking_effort: Vec::new(),
+        }];
         assert_eq!(pinned.models(), ["a"]);
+        assert_eq!(pinned.model_efforts("b"), None);
         let caps = driver.capabilities();
         assert!(caps.resume && caps.set_model && caps.mcp && !caps.permission_callback);
     }

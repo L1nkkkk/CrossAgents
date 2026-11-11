@@ -22,7 +22,9 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
   const display = (m: string) => modelDisplay(agent.plugin, m, quota.data?.accounts ?? [], accountOf(agent));
   const info = plugins.data?.find((p) => p.name === agent.plugin);
   const models = info?.models ?? [];
-  const levels = effortLevels(info?.efforts);
+  // A model the CLI reports levels for takes exactly those, which may be none at all; one it
+  // does not name takes the plugin's list.
+  const levels = effortLevels(info?.efforts_by_model?.[agent.model ?? ""] ?? info?.efforts);
   const effort = effortOf(agent.config);
   const label = effort ? effortLabel(effort) : undefined;
 

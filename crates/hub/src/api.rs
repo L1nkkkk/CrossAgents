@@ -100,6 +100,10 @@ pub struct AppState {
     /// Looks for the CLIs again and asks their versions, in the background; one probe per
     /// plugin at a time.
     pub refresher: Arc<crate::refresh::Refresher>,
+    /// What each CLI version did when it ran (`<home>/cli-runs.json`).
+    pub cli_runs: Arc<crate::cli_runs::CliRuns>,
+    /// One short session per plugin on request, to see whether its CLI still talks.
+    pub self_check: Arc<crate::self_check::SelfCheck>,
     /// The person's terminals on this machine.
     pub terminals: Arc<crate::terminal::Terminals>,
     /// The built-in hole-punching entrance (docs/MULTI-NODE.md §14).
@@ -188,6 +192,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
         .route("/v1/plugins/{name}/install", post(install_plugin))
         .route("/v1/plugins/{name}/upgrade", post(upgrade_plugin))
+        .route("/v1/plugins/{name}/self-check", post(self_check_plugin))
         .route("/v1/usage", get(usage))
         .route("/v1/usage/series", get(usage_series))
         .route("/v1/accounts", get(list_accounts).post(create_account))
@@ -1780,6 +1785,24 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
     } else {
         Vec::new()
     };
+    // What this version did when it ran here; the description's verified series only seeds
+    // it (docs/DESIGN.md §9.4).
+    let standing = status
+        .as_ref()
+        .and_then(|status| status.located.as_ref())
+        .zip(found.as_deref())
+        .map(|(located, version)| {
+            let verified = config.is_some_and(|config| {
+                !config.verified.is_empty() && !config.unverified(Some(version))
+            });
+            state.cli_runs.standing(
+                name,
+                &located.path.display().to_string(),
+                version,
+                verified,
+            )
+        });
+    let self_checking = state.self_check.running(name).await;
     let cli = status.map(|status| CliInfo {
         installed: status.located.is_some(),
         probing: status.probing,
@@ -1806,11 +1829,17 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
             .map(|config| config.verified.clone())
             .filter(|series| !series.is_empty()),
         unverified: config.is_some_and(|config| config.unverified(found.as_deref())),
+        version_status: standing.as_ref().map(|s| s.status.to_owned()),
+        last_ok_at: standing.as_ref().and_then(|s| s.last_ok_at),
+        last_protocol_fail_at: standing.as_ref().and_then(|s| s.last_protocol_fail_at),
+        protocol_fail_message: standing.as_ref().and_then(|s| s.fail_message.clone()),
+        last_good_version: standing.and_then(|s| s.last_good_version),
+        self_checking,
     });
     PluginInfo {
         name: name.to_owned(),
         models,
-        all_models: all,
+        all_models: all.clone(),
         shown: state.models.shown(name),
         models_pinned: registry.models_pinned(name),
         driver: d.kind(),
@@ -1822,6 +1851,15 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
                 .config(name)
                 .map(|c| c.efforts.clone())
                 .unwrap_or_default(),
+        },
+        // What the CLI says each model takes, when it says it at all (`with-cli` does): the
+        // profile's list above is then only the fallback for models it did not name.
+        efforts_by_model: match d.kind() {
+            DriverKind::AcpGeneric => Default::default(),
+            _ => all
+                .iter()
+                .filter_map(|model| d.model_efforts(model).map(|levels| (model.clone(), levels)))
+                .collect(),
         },
         cli,
     }
@@ -1865,6 +1903,41 @@ async fn refresh_plugins(
     };
     for driver in drivers {
         state.refresher.start(state.bus.clone(), driver).await;
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// `POST /v1/plugins/{name}/self-check`: one short session on the plugin's CLI, in the
+/// background, to see whether this version still talks with CrossAgents. `202` at once;
+/// `plugin.changed` says when it started and when it ended, and `GET /v1/plugins` then
+/// reports what it found (`version_status`). `409` while one is running or when the CLI
+/// reports no version.
+///
+/// Admin: it runs the CLI here and spends a little of its quota.
+async fn self_check_plugin(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    let registry = state.runtime.plugins();
+    let driver = registry.get(&name).ok_or_else(|| CoreError::NotFound {
+        kind: "plugin",
+        id: name.clone(),
+    })?;
+    // The cheapest model it offers here, else whatever the CLI picks by itself.
+    let model = state
+        .models
+        .filter(&name, crate::models::available(registry, &state.accounts, &name).await)
+        .into_iter()
+        .find(|model| model.contains("haiku") || model.contains("mini"));
+    let started = state
+        .self_check
+        .start(state.bus.clone(), state.cli_runs.clone(), driver, model)
+        .await;
+    if !started {
+        return Err(CoreError::Conflict(format!(
+            "{name} cannot be checked now: a check is running, or its CLI reports no version"
+        ))
+        .into());
     }
     Ok(StatusCode::ACCEPTED)
 }

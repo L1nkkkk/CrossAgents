@@ -32,6 +32,12 @@ driver: DriverKind, capabilities: Capabilities,
  */
 efforts: Array<string>, 
 /**
+ * Per-model effort levels, when the CLI reports them (`with-cli model list` names the
+ * levels each model takes): a model named here takes exactly these, which may be none at
+ * all; one not named takes `efforts`.
+ */
+efforts_by_model: { [key in string]: Array<string> }, 
+/**
  * Where its CLI is on this machine, for native drivers; `None` for ACP agents
  * (docs/DESIGN.md §9.3).
  */

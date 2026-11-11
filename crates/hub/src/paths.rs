@@ -62,6 +62,10 @@ impl Paths {
     pub fn models(&self) -> PathBuf {
         self.home.join("models.json")
     }
+    /// What each CLI version did when it ran: the evidence behind "works" and "broke".
+    pub fn cli_runs(&self) -> PathBuf {
+        self.home.join("cli-runs.json")
+    }
     /// Homes of accounts created by CrossAgents.
     pub fn accounts(&self) -> PathBuf {
         self.home.join("accounts")

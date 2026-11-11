@@ -149,7 +149,25 @@ function VendorClis() {
   // The POST is out; the probes themselves show in each row's `probing`.
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState<string>();
+  // The self-check POST is out for this plugin; afterwards the row's `self_checking` says it.
+  const [checking, setChecking] = useState<string>();
+  const [checkError, setCheckError] = useState<{ plugin: string; text: string }>();
   const reload = plugins.reload;
+
+  const selfCheck = useCallback(
+    (plugin: string) => {
+      setChecking(plugin);
+      setCheckError(undefined);
+      api
+        .selfCheckPlugin(plugin)
+        .catch((err) => setCheckError({ plugin, text: errorText(err) }))
+        .finally(() => {
+          setChecking(undefined);
+          reload();
+        });
+    },
+    [reload],
+  );
 
   // Asking the hub to look again (`POST /v1/plugins/refresh`) forgets what it remembered for
   // every CLI -- including "this one could not answer just now", whose 60 s retry window is
@@ -315,16 +333,7 @@ function VendorClis() {
                     </span>
                   </div>
                 )}
-                {cli.unverified && !cli.below_minimum && (
-                  <div>
-                    <span
-                      className="chip small warn"
-                      title={`驱动只在 ${(cli.verified ?? []).join("、")} 上验证过，这个版本仍可运行，但可能对不上它的接口`}
-                    >
-                      未验证版本
-                    </span>
-                  </div>
-                )}
+                {!cli.below_minimum && <VersionStanding cli={cli} />}
               </div>
               <div className="cli-actions">
                 {job ? (
@@ -338,6 +347,16 @@ function VendorClis() {
                     )}
                     {cli.installed ? (
                       <>
+                        {cli.version && !cli.below_minimum && (
+                          <button
+                            className="ghost"
+                            disabled={!!busy || cli.self_checking || checking === p.name}
+                            onClick={() => selfCheck(p.name)}
+                            title="用这个 CLI 开一个很短的会话（会用掉一点额度），看这个版本还能不能和 CrossAgents 对上"
+                          >
+                            {cli.self_checking || checking === p.name ? "自检中…" : "立即自检"}
+                          </button>
+                        )}
                         {cli.can_upgrade ? (
                           <button
                             className="ghost"
@@ -396,6 +415,7 @@ function VendorClis() {
                 )}
               </div>
               {refused?.plugin === p.name && <div className="cli-done">{refused.text}</div>}
+              {checkError?.plugin === p.name && <div className="cli-done bad">{checkError.text}</div>}
               {job?.done?.ok && (
                 <div className="cli-done ok">
                   {job.action === "install" ? (
@@ -430,6 +450,64 @@ function describedBy(source?: string): string {
   if (!source || source === "built-in") return "内置描述";
   if (source === "config.toml") return "config.toml 里的覆盖";
   return source;
+}
+
+/**
+ * How this version has done here (docs/DESIGN.md §9.4): runs on this machine say more than the
+ * series the driver was verified on. A version that failed on the protocol says so and names
+ * the last one that worked; one that ran says so; one nobody ran yet says that.
+ */
+function VersionStanding({ cli }: { cli: CliInfo }) {
+  const series = (cli.verified ?? []).join("、");
+  const when = (at?: string) => (at ? new Date(at).toLocaleString() : "");
+  switch (cli.version_status) {
+    case "protocol_failed": {
+      const text = cli.last_ok_at
+        ? `${cli.version} 最近一次运行在协议上失败了，可能与 CrossAgents 不兼容`
+        : `CLI 升级到 ${cli.version} 后首次运行即失败，可能与 CrossAgents 不兼容`;
+      return (
+        <div className="setting-hint" title={cli.protocol_fail_message ?? undefined}>
+          <span className="chip small danger">可能不兼容</span> {text}
+          {cli.last_good_version ? `；上一个可用版本是 ${cli.last_good_version}` : ""}
+          {cli.last_protocol_fail_at ? `（${when(cli.last_protocol_fail_at)}）` : ""}
+        </div>
+      );
+    }
+    case "known_good":
+      return (
+        <div>
+          <span className="chip small ok" title={`在这台机器上跑通过：${when(cli.last_ok_at)}`}>
+            已跑通
+          </span>
+        </div>
+      );
+    case "untried":
+      return (
+        <div>
+          <span
+            className="chip small warn"
+            title={
+              series
+                ? `驱动只在 ${series} 上验证过；这个版本还没在这里跑过，第一次运行或「立即自检」后就知道了`
+                : "这个版本还没在这里跑过，第一次运行或「立即自检」后就知道了"
+            }
+          >
+            这个版本还没跑过
+          </span>
+        </div>
+      );
+    case "verified":
+      return null;
+    default:
+      // A hub that does not report runs yet: only the series says anything.
+      return cli.unverified ? (
+        <div>
+          <span className="chip small warn" title={`驱动只在 ${series} 上验证过，这个版本仍可运行，但可能对不上它的接口`}>
+            未验证版本
+          </span>
+        </div>
+      ) : null;
+  }
 }
 
 /** Why no upgrade button is offered for what was found. */

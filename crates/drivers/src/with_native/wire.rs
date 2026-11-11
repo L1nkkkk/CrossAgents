@@ -114,15 +114,48 @@ pub fn chat_args(args: &ChatArgs<'_>) -> Vec<String> {
     out
 }
 
+/// A model in what `with-cli model list` prints: its id, and the reasoning effort levels it
+/// takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelEntry {
+    pub id: String,
+    /// `thinking_effort=low,medium`: the levels of a thinking turn, which is what the driver
+    /// asks for unless the agent turns thinking off.
+    pub thinking_effort: Vec<String>,
+    /// `non_thinking_effort=low,high`: the levels of a turn without thinking.
+    pub non_thinking_effort: Vec<String>,
+}
+
+impl ModelEntry {
+    /// The levels to offer for this model: a thinking turn's, else a plain turn's; empty when
+    /// it names none, which is a model that takes no effort at all.
+    pub fn efforts(&self) -> Vec<String> {
+        match self.thinking_effort.is_empty() {
+            true => self.non_thinking_effort.clone(),
+            false => self.thinking_effort.clone(),
+        }
+    }
+}
+
 /// The model ids in what `with-cli model list` prints: one per line, indented, the id
 /// first.
 pub fn parse_model_list(text: &str) -> Vec<String> {
-    let mut models = Vec::new();
+    parse_model_entries(text)
+        .into_iter()
+        .map(|model| model.id)
+        .collect()
+}
+
+/// The models in what `with-cli model list` prints: the id first, then its own flags
+/// (`supports-thinking`, `context=`, `thinking_effort=`, `non_thinking_effort=`, ...).
+pub fn parse_model_entries(text: &str) -> Vec<ModelEntry> {
+    let mut models: Vec<ModelEntry> = Vec::new();
     for line in text.lines() {
         if !line.starts_with(' ') || line.contains("[flags]") {
             continue;
         }
-        let Some(id) = line.split_whitespace().next() else {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let Some(id) = tokens.first().copied() else {
             continue;
         };
         let is_id = id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
@@ -130,11 +163,34 @@ pub fn parse_model_list(text: &str) -> Vec<String> {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
             && !id.ends_with(".exe");
-        if is_id && !models.iter().any(|m| m == id) {
-            models.push(id.to_owned());
+        if !is_id || models.iter().any(|model| model.id == id) {
+            continue;
         }
+        let mut model = ModelEntry {
+            id: id.to_owned(),
+            thinking_effort: Vec::new(),
+            non_thinking_effort: Vec::new(),
+        };
+        for token in &tokens[1..] {
+            if let Some(levels) = token.strip_prefix("thinking_effort=") {
+                model.thinking_effort = effort_levels(levels);
+            } else if let Some(levels) = token.strip_prefix("non_thinking_effort=") {
+                model.non_thinking_effort = effort_levels(levels);
+            }
+        }
+        models.push(model);
     }
     models
+}
+
+/// `low,medium,high` → those levels. `no_think` is not a level but "does not think", so it
+/// is left out.
+fn effort_levels(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|level| !level.is_empty() && *level != "no_think")
+        .map(str::to_owned)
+        .collect()
 }
 
 /// One line of output, translated.
@@ -155,6 +211,9 @@ pub struct Turn {
     pub finished: bool,
     /// What `RUN_ERROR` said.
     pub error: Option<String>,
+    /// Lines of a type this driver does not know, skipped: a newer CLI may add some, and
+    /// the turn goes on without them (only the start, result and error must be there).
+    pub unknown: usize,
     hidden: HashSet<String>,
     tools: HashMap<String, Tool>,
 }
@@ -238,7 +297,16 @@ impl Turn {
                 self.error = Some(message.clone());
                 vec![SessionEventKind::Error { message }]
             }
-            _ => Vec::new(),
+            // Known, and nothing to show.
+            "RUN_STARTED" | "TOOL_CALL_END" | "CUSTOM" | "TEXT_MESSAGE_START"
+            | "TEXT_MESSAGE_END" | "THINKING_TEXT_MESSAGE_START"
+            | "THINKING_TEXT_MESSAGE_END" | "THINKING_START" | "THINKING_END"
+            | "STEP_STARTED" => Vec::new(),
+            other => {
+                self.unknown += 1;
+                tracing::debug!(kind = other, "with-cli event type not known; ignored");
+                Vec::new()
+            }
         }
     }
 
@@ -676,6 +744,17 @@ mod tests {
     }
 
     #[test]
+    fn unknown_event_types_are_counted_and_skipped() {
+        let mut turn = Turn::default();
+        assert!(events(&mut turn, r#"{"type":"RUN_STARTED","rawEvent":{}}"#).is_empty());
+        assert!(events(&mut turn, r#"{"type":"SOMETHING_NEW","rawEvent":{"x":1}}"#).is_empty());
+        assert_eq!(turn.unknown, 1);
+        events(&mut turn, r#"{"type":"RUN_FINISHED","rawEvent":{}}"#);
+        assert!(turn.finished);
+        assert_eq!(turn.unknown, 1);
+    }
+
+    #[test]
     fn values_go_with_their_flags() {
         let images = [PathBuf::from(r"C:\a.png")];
         let args = chat_args(&ChatArgs {
@@ -712,6 +791,27 @@ mod tests {
             parse_model_list(text),
             ["claude-haiku-5.5", "kimi-k2.5", "tokenhub_deepseek-v4-pro"]
         );
+    }
+
+    #[test]
+    fn model_list_keeps_the_efforts_each_model_takes() {
+        // What with-cli v0.35.1 printed: a model may name one set of levels, both, or none.
+        let text = "List available models\n\nUsage:\n  with-cli.exe model list [flags]\n\nFlags:\n  -a, --agentId string   specify\n  claude-haiku-5.5              supports-thinking  context=100K,1M    thinking_effort=low,medium,high,xhigh,max  non_thinking_effort=low,medium,high,xhigh,max\n  hy3                                              context=224K                                                  non_thinking_effort=high,no_think\n  claude-opus-5.5               supports-thinking  context=200K,1M    thinking_effort=low,medium,high,xhigh,max\n  kimi-k2.5\n";
+        let models = parse_model_entries(text);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["claude-haiku-5.5", "hy3", "claude-opus-5.5", "kimi-k2.5"]
+        );
+        // A thinking turn's levels win when the model names them.
+        assert_eq!(
+            models[0].efforts(),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        // Otherwise a plain turn's, with `no_think` left out: it is not a level.
+        assert_eq!(models[1].efforts(), ["high"]);
+        assert_eq!(models[2].efforts(), ["low", "medium", "high", "xhigh", "max"]);
+        // A model that names neither takes no effort at all.
+        assert!(models[3].efforts().is_empty());
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod attachments;
 pub mod avatars;
 pub mod browser;
 pub mod budget;
+pub mod cli_runs;
 pub mod collab;
 pub mod devices;
 pub mod event_log;
@@ -35,6 +36,7 @@ pub mod routing;
 pub mod rules;
 pub mod run_cost;
 pub mod runtime;
+pub mod self_check;
 pub mod shadow;
 pub mod shims;
 pub mod snapshot;
@@ -188,8 +190,10 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         shims: shims.clone(),
         orchestrator: Arc::new(OnceLock::new()),
     });
+    let cli_runs = Arc::new(cli_runs::CliRuns::load(paths.cli_runs()));
     let runtime = Arc::new(
         Runtime::new(bus.clone(), plugins)
+            .with_cli_runs(cli_runs.clone())
             .with_setup(setup.clone())
             .with_home(paths.home.clone())
             .with_notice_windows(config.notice_batch_quiet, config.notice_batch_max),
@@ -402,6 +406,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         url: format!("http://{addr}"),
         installer: Arc::new(install::Installer::new()),
         refresher,
+        cli_runs,
+        self_check: Arc::new(self_check::SelfCheck::new()),
         terminals: terminals.clone(),
         link: Arc::new(link::LinkService::new(&paths.home)),
     });

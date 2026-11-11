@@ -787,6 +787,11 @@ pub struct PluginInfo {
     /// Reasoning effort levels its agents may ask for, lowest first; empty when none.
     #[serde(default)]
     pub efforts: Vec<String>,
+    /// Per-model effort levels, when the CLI reports them (`with-cli model list` names the
+    /// levels each model takes): a model named here takes exactly these, which may be none at
+    /// all; one not named takes `efforts`.
+    #[serde(default)]
+    pub efforts_by_model: std::collections::BTreeMap<String, Vec<String>>,
     /// Where its CLI is on this machine, for native drivers; `None` for ACP agents
     /// (docs/DESIGN.md §9.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -871,6 +876,31 @@ pub struct CliInfo {
     /// unverified. False when no series is named or the version is unknown.
     #[serde(default)]
     pub unverified: bool,
+    /// How this version stands by what it did here: `verified` (the series the driver was
+    /// checked against), `known_good` (a session ran on it), `untried` or `protocol_failed`
+    /// (its latest run could not be talked to). Absent when the version is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version_status: Option<String>,
+    /// When a session last got an event of this version's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_ok_at: Option<DateTime<Utc>>,
+    /// When this version last failed in a way only a protocol change explains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_protocol_fail_at: Option<DateTime<Utc>>,
+    /// What that failure said, when `version_status` is `protocol_failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub protocol_fail_message: Option<String>,
+    /// The version that last worked here, when this one failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_good_version: Option<String>,
+    /// A self-check (`POST /v1/plugins/{name}/self-check`) is running now.
+    #[serde(default)]
+    pub self_checking: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
