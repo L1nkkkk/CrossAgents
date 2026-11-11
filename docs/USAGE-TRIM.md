@@ -251,4 +251,14 @@ codebuddy 2.173.0、`deepseek-v4.1-flash`，在临时目录跑两回合（每回
 
 ### 8.5 验证
 
-只有单元测试（[tests_verification.rs](../crates/orchestrator/src/tests_verification.rs) 第 11 组，假宿主、假工作区）：超过阈值换会话且开场消息含 §8.3 各项、事件带上下文与阈值、lead 没有新通知；低于阈值沿用原会话且消息不变；读不到上下文沿用原会话；阈值 0 不换；检查不过的路径；lead 的 `task_rework` 和人的退回两条路径。`handover` 原有测试不变且通过。没有在真实 worker 上跑过换会话。
+单元测试（[tests_verification.rs](../crates/orchestrator/src/tests_verification.rs) 第 11 组，假宿主、假工作区）：超过阈值换会话且开场消息含 §8.3 各项、事件带上下文与阈值、lead 没有新通知；低于阈值沿用原会话且消息不变；读不到上下文沿用原会话；阈值 0 不换；检查不过的路径；lead 的 `task_rework` 和人的退回两条路径。`handover` 原有测试不变且通过。
+
+真实 worker 上跑过的只有「人在评审页退回」这一条（2026-11-11，隔离 hub 与一次性 pytest 仓库，CodeBuddy 2.173.0 + `deepseek-v4.1-flash`，`rework_new_session_tokens = 30000`）：
+
+- 退回：交付时 `used` 44380 > 30000，事件 `task.rework_session` 记 `context_tokens` 44380、`threshold` 30000，随后 `agent.session_started` 换了新的 session id，该 worktree 的会话目录下多出一个 jsonl。
+- 开场消息：5087 字符，§8.3 的 1、2、3、4、6 项都在——任务说明全文、`new session: ... context had reached 44380 tokens` 一行、`Files you changed so far` 四个文件、上次交付的 summary 全文、`Why it came back` 的评审原文与 `attempt: 2`。第 5 项（`Decided since` / `Open questions`）没出现：这是第一次退回，除 spec.interfaces 外没有别的决定（interfaces 已在任务说明里，`work_so_far` 会过滤掉），也没有未答复的提问，`list` 对空列表不输出标题。
+- 新会话的行为：12 次请求、15 次工具调用（读文件 5、改文件 6、跑命令 2、`ToolSearch` 1、`task_complete` 1）。只读了这次要动的 5 个文件（`cli.py`、`counter.py`、`report.py`、`test_textkit.py`、`README.md`，其中 `counter.py` 读过但没再改），改动都是在原文上小段替换（如 `report.py` 294→748 字符、`cli.py` 29→47），没有从头重写，也没有撤掉原改动。首次请求 `prompt_tokens` 28657，原会话最后一次 44380，差 15723，就是每次请求省下的旧上下文。
+- 记账：原会话 18 次请求合计 prompt 689054 / cached 653184 / output 10664，与退回前那条 `agent.usage` 三个数一致；新会话 12 次请求合计 437813 / 429184 / 5494，与返工回合那条 `agent.usage` 一致——返工回合是 CodeBuddy 进程的第一个回合，走 `codebuddy_turn` 的流式请求之和分支，与 transcript 逐次合计相符。
+- lead：退回只给了它一条 `Silent`（`The person sent #top-min-count back to its worker`），没有新通知，与 §8.2 一致。
+
+没验的：检查不过触发（`return_work`）和 lead 的 `task_rework` 两条路径没在真实 worker 上跑过；换会话失败回退的那条警告分支没构造。这是一个小任务，它的数字量不出这个功能总体能省多少，不要据此估比例。
