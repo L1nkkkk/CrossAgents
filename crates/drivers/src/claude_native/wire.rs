@@ -677,8 +677,8 @@ impl Translator {
     /// known; for the first turn of a process (whose total includes every turn before a
     /// `--resume`) and a turn without a total, the sum of its streamed requests.
     fn codebuddy_turn(&mut self, usage: &Value) -> CodebuddyCounts {
-        let streamed = std::mem::take(&mut self.turn_requests)
-            .add(std::mem::take(&mut self.message_request));
+        let streamed =
+            std::mem::take(&mut self.turn_requests).add(std::mem::take(&mut self.message_request));
         let total = CodebuddyCounts::of(usage);
         if total.input == 0 {
             // An interrupted turn: its requests will be in the next total, so they move the
@@ -1849,8 +1849,10 @@ mod tests {
     /// 25 527 / 25 344 / 3 for the resumed one; the hub must report the same.
     #[test]
     fn codebuddy_usage_matches_its_transcript() {
-        let start = |id: &str| json!({ "type": "stream_event", "event": { "type": "message_start", "message": { "id": id,
-            "usage": { "input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0 } } } });
+        let start = |id: &str| {
+            json!({ "type": "stream_event", "event": { "type": "message_start", "message": { "id": id,
+            "usage": { "input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0 } } } })
+        };
         let delta = |input: u64, creation: u64, read: u64, output: u64| {
             json!({ "type": "stream_event", "event": { "type": "message_delta", "usage": {
                 "input_tokens": input, "cache_creation_input_tokens": creation,
@@ -1877,10 +1879,18 @@ mod tests {
         t.translate(&delta(25_230, 0, 2_944, 73));
         t.translate(&start("01a1c98a200b"));
         t.translate(&delta(25_333, 0, 25_088, 26));
-        let (used, tokens) = usage(&t.turn_end(&result(50_563, 22_531, 28_032, 99, 25_333), false).1);
+        let (used, tokens) = usage(
+            &t.turn_end(&result(50_563, 22_531, 28_032, 99, 25_333), false)
+                .1,
+        );
         assert_eq!(used, 25_333);
         assert_eq!(
-            (tokens.input, tokens.cached_input, tokens.cache_write_input, tokens.output),
+            (
+                tokens.input,
+                tokens.cached_input,
+                tokens.cache_write_input,
+                tokens.output
+            ),
             (50_563, 28_032, 0, 99)
         );
 
@@ -1891,10 +1901,18 @@ mod tests {
         t.translate(&delta(25_387, 0, 25_216, 65));
         t.translate(&start("01a1c98a2e1b"));
         t.translate(&delta(25_482, 0, 25_344, 11));
-        let (used, tokens) = usage(&t.turn_end(&result(101_432, 22_840, 78_592, 175, 25_482), false).1);
+        let (used, tokens) = usage(
+            &t.turn_end(&result(101_432, 22_840, 78_592, 175, 25_482), false)
+                .1,
+        );
         assert_eq!(used, 25_482);
         assert_eq!(
-            (tokens.input, tokens.cached_input, tokens.output, tokens.total),
+            (
+                tokens.input,
+                tokens.cached_input,
+                tokens.output,
+                tokens.total
+            ),
             (101_432, 78_592, 175, 101_607)
         );
 
@@ -1903,21 +1921,44 @@ mod tests {
         let mut t = Translator::new(Flavor::Codebuddy);
         t.translate(&start("01a1c98d24ff"));
         t.translate(&delta(25_527, 0, 25_344, 3));
-        let (_, tokens) = usage(&t.turn_end(&result(152_467, 23_187, 129_280, 181, 25_527), false).1);
-        assert_eq!((tokens.input, tokens.cached_input, tokens.output), (25_527, 25_344, 3));
+        let (_, tokens) = usage(
+            &t.turn_end(&result(152_467, 23_187, 129_280, 181, 25_527), false)
+                .1,
+        );
+        assert_eq!(
+            (tokens.input, tokens.cached_input, tokens.output),
+            (25_527, 25_344, 3)
+        );
 
         // An interrupted turn has no total; the next total includes it, counted once.
         t.translate(&start("m-interrupted"));
         t.translate(&delta(26_000, 0, 25_500, 7));
-        t.turn_end(&json!({ "type": "result", "subtype": "error_during_execution" }), true);
+        t.turn_end(
+            &json!({ "type": "result", "subtype": "error_during_execution" }),
+            true,
+        );
         t.translate(&start("m-next"));
         t.translate(&delta(26_100, 0, 26_000, 5));
         let (_, tokens) = usage(
-            &t.turn_end(&result(152_467 + 26_000 + 26_100, 0, 129_280 + 25_500 + 26_000, 181 + 7 + 5, 26_100), false).1,
+            &t.turn_end(
+                &result(
+                    152_467 + 26_000 + 26_100,
+                    0,
+                    129_280 + 25_500 + 26_000,
+                    181 + 7 + 5,
+                    26_100,
+                ),
+                false,
+            )
+            .1,
         );
         assert_eq!(
             (tokens.input, tokens.cached_input, tokens.output),
-            (25_527 + 26_000 + 26_100, 25_344 + 25_500 + 26_000, 3 + 7 + 5)
+            (
+                25_527 + 26_000 + 26_100,
+                25_344 + 25_500 + 26_000,
+                3 + 7 + 5
+            )
         );
     }
 

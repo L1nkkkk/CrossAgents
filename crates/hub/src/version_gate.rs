@@ -73,8 +73,14 @@ mod tests {
             )
         );
         // New enough, and a version in the series the description names: started.
-        assert_eq!(refusal("claude", claude, Some("2.1.317 (Claude Code)")), None);
-        assert_eq!(refusal("codex", builtin::config("codex").unwrap(), Some("0.166.0")), None);
+        assert_eq!(
+            refusal("claude", claude, Some("2.1.317 (Claude Code)")),
+            None
+        );
+        assert_eq!(
+            refusal("codex", builtin::config("codex").unwrap(), Some("0.166.0")),
+            None
+        );
         // The floor may be raised after the agent was made: an old one is then refused too.
         let raised: PluginConfig = toml::from_str("min_version = \"3.0.0\"").unwrap();
         assert!(refusal("claude", &raised, Some("2.1.317 (Claude Code)")).is_some());
@@ -83,7 +89,10 @@ mod tests {
     #[test]
     fn a_cli_that_has_not_answered_its_version_is_started() {
         // The probe had not answered yet (or the file answered nothing): unknown, not old.
-        assert_eq!(refusal("claude", builtin::config("claude").unwrap(), None), None);
+        assert_eq!(
+            refusal("claude", builtin::config("claude").unwrap(), None),
+            None
+        );
         // A description with no floor refuses nothing, whatever the CLI reports.
         let codebuddy = builtin::config("codebuddy").unwrap();
         assert_eq!(refusal("codebuddy", codebuddy, Some("1.0.0")), None);

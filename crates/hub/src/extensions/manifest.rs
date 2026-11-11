@@ -202,8 +202,7 @@ impl Manifest {
         // A rule that does not parse is skipped at session start (with a warning), as a
         // broken project rule is; only a missing or unsafe path is refused here.
         for rule in &m.rules {
-            entry(root, &rule.file)
-                .map_err(|e| anyhow::anyhow!("rule {}: {e}", rule.file))?;
+            entry(root, &rule.file).map_err(|e| anyhow::anyhow!("rule {}: {e}", rule.file))?;
         }
         Ok(m)
     }
@@ -252,7 +251,9 @@ impl Manifest {
                     timeout_secs: h.timeout_secs,
                 })
                 .collect(),
-            service: self.service.as_ref().map(|s| ExtensionServiceInfo { command: s.command.clone() }),
+            service: self.service.as_ref().map(|s| ExtensionServiceInfo {
+                command: s.command.clone(),
+            }),
             gui_entry: self.gui.as_ref().map(|g| g.entry.clone()),
             files,
             bytes,

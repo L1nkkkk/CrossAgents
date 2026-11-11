@@ -1035,7 +1035,10 @@ mod tests {
             non_thinking_effort: vec!["low".into()],
         }];
         assert_eq!(driver.models(), ["b"]);
-        assert_eq!(driver.model_efforts("b"), Some(vec!["low".into(), "high".into()]));
+        assert_eq!(
+            driver.model_efforts("b"),
+            Some(vec!["low".into(), "high".into()])
+        );
         // A model the CLI did not name (the list changed under a pick) has no say.
         assert_eq!(driver.model_efforts("a"), None);
         let pinned =

@@ -1602,11 +1602,13 @@ curl -s -o /dev/null -X POST -H "Authorization: Bearer $CROSSAGENTS_TOKEN" -H 'C
     // going, one run took about 60 s to trip the breaker. 120 s is the cap for that case. It
     // only bounds a failure, since the wait returns as soon as the line is written.
     until_within(Duration::from_secs(120), "the breaker to trip", || {
-        fs::read_to_string(&log_path)
-            .is_ok_and(|log| log.contains("circuit breaker"))
+        fs::read_to_string(&log_path).is_ok_and(|log| log.contains("circuit breaker"))
     })
     .await;
-    until("all admitted hooks to finish", || hub.extension_runner.live_tokens() == 0).await;
+    until("all admitted hooks to finish", || {
+        hub.extension_runner.live_tokens() == 0
+    })
+    .await;
     let capped = lines(&starts);
     assert!(capped >= 2, "the loop never ran: {capped} starts");
     assert!(capped <= 5, "the breaker let {capped} hooks start");

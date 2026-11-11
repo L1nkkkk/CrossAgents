@@ -308,7 +308,9 @@ async fn an_enabled_extensions_rule_reaches_the_session() {
     let mut w = t.watch().await;
 
     t.send(&agent.id.to_string(), "first [sleep 200]").await;
-    let steered = w.until("the rule steered", |e| steered_with(e, "LEMON")).await;
+    let steered = w
+        .until("the rule steered", |e| steered_with(e, "LEMON"))
+        .await;
     let EventKind::AgentSteered { text, .. } = steered.kind else {
         unreachable!()
     };
@@ -366,9 +368,10 @@ async fn a_slow_steer_does_not_hold_back_the_output() {
     let mut w = t.watch().await;
 
     t.send(&agent.id.to_string(), "first [slow]").await;
-    w.until("the rule was taken in", |e| {
-        matches!(&e.kind, EventKind::AgentSteered { text, .. } if text.contains("PLUM"))
-    })
+    w.until(
+        "the rule was taken in",
+        |e| matches!(&e.kind, EventKind::AgentSteered { text, .. } if text.contains("PLUM")),
+    )
     .await;
 
     let output_at = w
@@ -379,7 +382,9 @@ async fn a_slow_steer_does_not_hold_back_the_output() {
     let steered_at = w
         .seen
         .iter()
-        .position(|e| matches!(&e.kind, EventKind::AgentSteered { text, .. } if text.contains("PLUM")))
+        .position(
+            |e| matches!(&e.kind, EventKind::AgentSteered { text, .. } if text.contains("PLUM")),
+        )
         .unwrap();
     assert!(
         output_at < steered_at,

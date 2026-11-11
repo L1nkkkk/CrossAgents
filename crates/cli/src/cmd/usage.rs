@@ -551,7 +551,9 @@ fn print_task_table(usage: &UsageResponse) {
         .map(|r| {
             vec![
                 r.key.clone(),
-                r.run_id.clone().map_or_else(dash, |id| id.chars().take(8).collect()),
+                r.run_id
+                    .clone()
+                    .map_or_else(dash, |id| id.chars().take(8).collect()),
                 r.tokens.map_or_else(dash, |v| v.to_string()),
                 r.new_input.map_or_else(dash, |v| v.to_string()),
                 r.cached_input.map_or_else(dash, |v| v.to_string()),
@@ -562,7 +564,8 @@ fn print_task_table(usage: &UsageResponse) {
                 } else {
                     dash()
                 },
-                r.estimated_cost_usd.map_or_else(dash, |v| format!("${v:.4}")),
+                r.estimated_cost_usd
+                    .map_or_else(dash, |v| format!("${v:.4}")),
                 r.requests.map_or_else(dash, |v| v.to_string()),
                 r.rework.map_or_else(dash, |v| v.to_string()),
                 r.minutes.map_or_else(dash, |v| format!("{v:.1}")),

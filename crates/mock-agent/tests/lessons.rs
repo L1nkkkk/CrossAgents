@@ -294,7 +294,10 @@ async fn a_failure_carries_related_records_and_rest_shows_them() {
         .await;
     let mut w = t.watch().await;
     let plan = json!([{ "key": "a", "title": "task a", "spec": { "goal": "Write a." } }]);
-    let request = format!("Build it. {}", call("plan_submit", json!({ "tasks": plan })));
+    let request = format!(
+        "Build it. {}",
+        call("plan_submit", json!({ "tasks": plan }))
+    );
     let resp = t
         .post(
             "/v1/runs",
@@ -306,10 +309,9 @@ async fn a_failure_carries_related_records_and_rest_shows_them() {
     let run: Value = resp.json().await.unwrap();
     let run_id = run["id"].as_str().unwrap().to_owned();
     let card = w
-        .until(
-            "task handed off",
-            |e| matches!(&e.kind, EventKind::TaskHandedOff { .. }),
-        )
+        .until("task handed off", |e| {
+            matches!(&e.kind, EventKind::TaskHandedOff { .. })
+        })
         .await;
     let EventKind::TaskHandedOff { handoff, .. } = card.kind else {
         unreachable!()
@@ -327,7 +329,14 @@ async fn a_failure_carries_related_records_and_rest_shows_them() {
         "key": "issue/a/7f1e",
         "text": "问题：python exited with code 9009\n处理：改用 node\n结果：临时绕过",
     });
-    turn_until(&t, "boss", boss.id, &call("note_write", issue), "\"written\": true").await;
+    turn_until(
+        &t,
+        "boss",
+        boss.id,
+        &call("note_write", issue),
+        "\"written\": true",
+    )
+    .await;
     events
         .find(
             "issue.recorded",
@@ -355,12 +364,16 @@ async fn a_failure_carries_related_records_and_rest_shows_them() {
         }),
     );
     let out = turn_until(&t, "boss", boss.id, &create, "\"lesson\": \"").await;
-    let at = out.find("\"lesson\": \"").unwrap_or_else(|| panic!("{out}")) + 11;
+    let at = out
+        .find("\"lesson\": \"")
+        .unwrap_or_else(|| panic!("{out}"))
+        + 11;
     let lesson_id = out[at..at + 36].to_owned();
     events
-        .find("lesson.created", |e| {
-            matches!(&e.kind, EventKind::LessonCreated { lesson } if lesson.id == lesson_id)
-        })
+        .find(
+            "lesson.created",
+            |e| matches!(&e.kind, EventKind::LessonCreated { lesson } if lesson.id == lesson_id),
+        )
         .await;
     events
         .find(
@@ -393,7 +406,11 @@ async fn a_failure_carries_related_records_and_rest_shows_them() {
         .unwrap();
     assert_eq!(resp["unsorted"], 0, "{resp}");
     assert_eq!(resp["issues"][0]["triage"]["result"], "lesson", "{resp}");
-    assert_eq!(resp["issues"][0]["triage"]["lesson_id"], json!(lesson_id), "{resp}");
+    assert_eq!(
+        resp["issues"][0]["triage"]["lesson_id"],
+        json!(lesson_id),
+        "{resp}"
+    );
 
     // The project's records: listed, searched, filtered, exported, read and corrected.
     let projects: Value = t.get("/v1/projects").await.json().await.unwrap();
@@ -432,7 +449,10 @@ async fn a_failure_carries_related_records_and_rest_shows_them() {
         .await;
     assert_eq!(resp.status(), 200);
     let markdown = resp.text().await.unwrap();
-    assert!(markdown.contains("## python 是 Windows Store 的占位程序"), "{markdown}");
+    assert!(
+        markdown.contains("## python 是 Windows Store 的占位程序"),
+        "{markdown}"
+    );
     assert!(markdown.contains("改用 node 写脚本"), "{markdown}");
 
     let patch = |body: Value| {
@@ -449,9 +469,10 @@ async fn a_failure_carries_related_records_and_rest_shows_them() {
         .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     events
-        .find("lesson.updated", |e| {
-            matches!(&e.kind, EventKind::LessonUpdated { lesson } if lesson.id == lesson_id)
-        })
+        .find(
+            "lesson.updated",
+            |e| matches!(&e.kind, EventKind::LessonUpdated { lesson } if lesson.id == lesson_id),
+        )
         .await;
     let lesson: Value = t
         .get(&format!("/v1/lessons/{lesson_id}"))
@@ -461,6 +482,8 @@ async fn a_failure_carries_related_records_and_rest_shows_them() {
         .unwrap();
     assert_eq!(lesson["status"], "review", "{lesson}");
     assert_eq!(lesson["keywords"], json!(["9009", "python"]), "{lesson}");
-    let resp = t.get("/v1/lessons/00000000-0000-7000-8000-000000000000").await;
+    let resp = t
+        .get("/v1/lessons/00000000-0000-7000-8000-000000000000")
+        .await;
     assert_eq!(resp.status(), 404);
 }

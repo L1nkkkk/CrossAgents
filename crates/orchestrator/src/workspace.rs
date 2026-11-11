@@ -19,7 +19,9 @@ pub trait WorkspaceProvider: Send + Sync {
     /// Create and check out a branch in an existing checkout.
     async fn create_branch(&self, path: &Path, branch: &str, base: &str) -> Result<(), CoreError> {
         let _ = (path, branch, base);
-        Err(CoreError::Conflict("branch creation is unsupported by this workspace provider".into()))
+        Err(CoreError::Conflict(
+            "branch creation is unsupported by this workspace provider".into(),
+        ))
     }
     /// Creates `branch` from `base` in a new working copy at `path`.
     async fn create(
@@ -1279,9 +1281,15 @@ mod tests {
     async fn creates_round_branch_in_existing_checkout_without_overwriting() {
         let repo = repo().await;
         let ws = GitWorkspaces;
-        ws.create_branch(repo.path(), "round", "main").await.unwrap();
+        ws.create_branch(repo.path(), "round", "main")
+            .await
+            .unwrap();
         assert_eq!(ws.current_branch(repo.path()).await.unwrap(), "round");
-        assert!(ws.create_branch(repo.path(), "round", "main").await.is_err());
+        assert!(
+            ws.create_branch(repo.path(), "round", "main")
+                .await
+                .is_err()
+        );
         assert_eq!(ws.current_branch(repo.path()).await.unwrap(), "round");
     }
 

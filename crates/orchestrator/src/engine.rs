@@ -967,7 +967,9 @@ impl Orchestrator {
         // starts from a scheduled run_next; in the direct path the turn that asked is still
         // running, so the renewal waits for it. Subscribed before the spawn, so no turn end is
         // missed between the two.
-        let renewal = source.is_some().then(|| (self.bus.subscribe(), self.round_wait_limit()));
+        let renewal = source
+            .is_some()
+            .then(|| (self.bus.subscribe(), self.round_wait_limit()));
         tokio::spawn(async move {
             if let Some((events, limit)) = renewal {
                 let _ = renew_for_round(host.as_ref(), events, lead, limit).await;

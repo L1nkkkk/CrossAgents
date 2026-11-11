@@ -1373,7 +1373,17 @@ mod login_tests {
             Ok(Vec::new())
         }
         async fn models(&self, _account: &Account) -> Vec<ModelInfo> {
-            if self.url == "models-test" { vec![ModelInfo { id: "restored".into(), name: "restored".into(), description: None, context_window: None, credit_multiplier: None }] } else { Vec::new() }
+            if self.url == "models-test" {
+                vec![ModelInfo {
+                    id: "restored".into(),
+                    name: "restored".into(),
+                    description: None,
+                    context_window: None,
+                    credit_multiplier: None,
+                }]
+            } else {
+                Vec::new()
+            }
         }
         fn login_command(&self, _account: &Account) -> LoginCommand {
             // `echo` on either system: the tool writes the link to stdout and exits.
@@ -1450,15 +1460,46 @@ mod login_tests {
 
     #[tokio::test]
     async fn model_refresh_clears_only_the_models_returned_for_the_account() {
-        let (accounts, bus, _dir, account) = accounts_with(PrintLogin { logged_in: true, url: "models-test" }).await;
+        let (accounts, bus, _dir, account) = accounts_with(PrintLogin {
+            logged_in: true,
+            url: "models-test",
+        })
+        .await;
         let store = bus.store();
-        store.record_unavailable_model("cursor", &account.id, "restored", "invalid model").await.unwrap();
-        store.record_unavailable_model("cursor", &account.id, "still-missing", "invalid model").await.unwrap();
-        store.record_unavailable_model("cursor", "other", "restored", "invalid model").await.unwrap();
+        store
+            .record_unavailable_model("cursor", &account.id, "restored", "invalid model")
+            .await
+            .unwrap();
+        store
+            .record_unavailable_model("cursor", &account.id, "still-missing", "invalid model")
+            .await
+            .unwrap();
+        store
+            .record_unavailable_model("cursor", "other", "restored", "invalid model")
+            .await
+            .unwrap();
         accounts.models(&account.id).await.unwrap();
-        assert!(store.unavailable_model("cursor", &account.id, "restored").await.unwrap().is_none());
-        assert!(store.unavailable_model("cursor", &account.id, "still-missing").await.unwrap().is_some());
-        assert!(store.unavailable_model("cursor", "other", "restored").await.unwrap().is_some());
+        assert!(
+            store
+                .unavailable_model("cursor", &account.id, "restored")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .unavailable_model("cursor", &account.id, "still-missing")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .unavailable_model("cursor", "other", "restored")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

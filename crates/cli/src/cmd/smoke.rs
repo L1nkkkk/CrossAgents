@@ -223,7 +223,10 @@ async fn exercise(
             Err(_) => bail!("the agent did not answer: {}", why(&client, NAME).await),
         };
         let Some(event) = next else {
-            bail!("the hub stopped sending events: {}", why(&client, NAME).await);
+            bail!(
+                "the hub stopped sending events: {}",
+                why(&client, NAME).await
+            );
         };
         report.events += 1;
         match &event?.kind {
@@ -242,12 +245,7 @@ async fn exercise(
 
 /// `<exe> hub sandbox <action> --dir <dir>`, the command a person runs, so that the smoke
 /// covers the same path (and the same messages) they do. Ends by `budget` at the latest.
-async fn sandbox_command(
-    exe: &Path,
-    action: &str,
-    dir: &Path,
-    budget: Duration,
-) -> Result<String> {
+async fn sandbox_command(exe: &Path, action: &str, dir: &Path, budget: Duration) -> Result<String> {
     let mut command = tokio::process::Command::new(exe);
     command
         .args(["hub", "sandbox", action, "--dir"])
@@ -255,8 +253,9 @@ async fn sandbox_command(
         .stdin(Stdio::null())
         .kill_on_drop(true);
     let output = match tokio::time::timeout(budget, command.output()).await {
-        Ok(output) => output
-            .with_context(|| format!("cannot run {} hub sandbox {action}", exe.display()))?,
+        Ok(output) => {
+            output.with_context(|| format!("cannot run {} hub sandbox {action}", exe.display()))?
+        }
         Err(_) => bail!(
             "`crossagents hub sandbox {action}` did not finish within {}s",
             budget.as_secs()
@@ -383,7 +382,8 @@ fn mock_agent(explicit: Option<PathBuf>) -> Result<PathBuf> {
     let candidate = match explicit {
         Some(path) => path,
         None => {
-            let exe = std::env::current_exe().context("cannot locate the crossagents executable")?;
+            let exe =
+                std::env::current_exe().context("cannot locate the crossagents executable")?;
             let dir = exe
                 .parent()
                 .context("the crossagents executable has no directory")?;
@@ -497,7 +497,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("crossagents-mock-agent"), "{err}");
-        assert!(err.contains("cargo build -p crossagents-mock-agent"), "{err}");
+        assert!(
+            err.contains("cargo build -p crossagents-mock-agent"),
+            "{err}"
+        );
 
         let there = dir.path().join("crossagents-mock-agent");
         std::fs::write(&there, b"not really").unwrap();

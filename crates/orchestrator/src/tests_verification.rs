@@ -669,7 +669,10 @@ async fn only_failed_with_nothing_failed_is_refused() {
         .task_verify(&f.lead, json!({ "task": "a", "only_failed": true }))
         .await
         .unwrap_err();
-    assert!(refused.to_string().contains("no failed checks"), "{refused}");
+    assert!(
+        refused.to_string().contains("no failed checks"),
+        "{refused}"
+    );
     // Nothing changed: the report still waits as it was, and its checks still stand.
     let task = f.task().await;
     assert_eq!(task.status, TaskStatus::Passed, "{task:?}");
@@ -1339,7 +1342,10 @@ async fn a_verdict_on_the_short_form_of_the_round_commit_lands_and_other_commits
             .await
             .unwrap_err();
         assert!(err.to_string().contains("stale"), "{other}: {err}");
-        assert!(err.to_string().contains(commit), "full commit in the refusal: {err}");
+        assert!(
+            err.to_string().contains(commit),
+            "full commit in the refusal: {err}"
+        );
         let after = f.task().await;
         assert_eq!(after.status, TaskStatus::Reviewing, "{other}");
         assert!(after.report.review.is_none(), "{other}: {after:?}");
@@ -1537,16 +1543,15 @@ async fn a_passed_task_cap_tells_the_lead_once_with_its_figures() {
         .find(|n| n.starts_with(&format!("task:{}:budget:tokens", f.task.id)))
         .unwrap_or_else(|| panic!("no budget notice in {told:?}"));
     assert!(line.contains("1200") && line.contains("1000"), "{line}");
-    assert!(line.contains("可能已超出"), "the usage may lag a turn: {line}");
+    assert!(
+        line.contains("可能已超出"),
+        "the usage may lag a turn: {line}"
+    );
     assert!(line.contains("#a"), "{line}");
 
     // A cap the hub cannot measure is said once, as a quiet note.
     f.orchestrator
-        .task_budget_note(
-            f.run.id,
-            f.task.id,
-            "max_usd 没有生效：unlisted 没有价格。",
-        )
+        .task_budget_note(f.run.id, f.task.id, "max_usd 没有生效：unlisted 没有价格。")
         .await
         .unwrap();
     let told = f.host.notices.lock().await.clone();
@@ -1628,7 +1633,10 @@ async fn past_its_max_rework_a_task_goes_to_the_lead_and_not_back_to_the_worker(
 
     let after = f.task().await;
     assert_eq!(after.status, TaskStatus::Passed, "{after:?}");
-    assert!(after.report.rework.is_empty(), "nothing was sent back: {after:?}");
+    assert!(
+        after.report.rework.is_empty(),
+        "nothing was sent back: {after:?}"
+    );
     assert!(
         f.host.delivered_to(f.worker.id).await.is_empty(),
         "the worker got no return"
@@ -1782,7 +1790,10 @@ async fn a_change_request_over_the_threshold_opens_a_new_session_with_the_work_s
         "rework of task #a",
         "attempt: 2",
     ] {
-        assert!(opening.contains(part), "{part:?} is missing from:\n{opening}");
+        assert!(
+            opening.contains(part),
+            "{part:?} is missing from:\n{opening}"
+        );
     }
     // This round's notes are why it came back, not an earlier decision.
     assert_eq!(opening.matches("changes please").count(), 1, "{opening}");
@@ -1884,7 +1895,10 @@ async fn failed_checks_over_the_threshold_open_a_new_session_with_the_check() {
         "The checks did not pass",
         "$ cargo test -p a",
     ] {
-        assert!(opening.contains(part), "{part:?} is missing from:\n{opening}");
+        assert!(
+            opening.contains(part),
+            "{part:?} is missing from:\n{opening}"
+        );
     }
     assert_eq!(rework_sessions(&mut events), vec![(310_000, 150_000)]);
 }

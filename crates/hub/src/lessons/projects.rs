@@ -8,7 +8,9 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::routing::post;
 use axum::{Json, Router};
-use crossagents_api_types::{BindProjectRequest, MergeProjectsRequest, ProjectInfo, ProjectPathInfo};
+use crossagents_api_types::{
+    BindProjectRequest, MergeProjectsRequest, ProjectInfo, ProjectPathInfo,
+};
 use crossagents_core::Project;
 use crossagents_orchestrator::lessons::{bind_project, merge_projects};
 

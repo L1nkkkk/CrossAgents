@@ -33,7 +33,9 @@ impl Version {
         while i < bytes.len() {
             let byte = bytes[i];
             if byte.is_ascii_digit() {
-                number = number.saturating_mul(10).saturating_add(u64::from(byte - b'0'));
+                number = number
+                    .saturating_mul(10)
+                    .saturating_add(u64::from(byte - b'0'));
                 digits += 1;
             } else if byte == b'.' && digits > 0 {
                 numbers.push(number);
@@ -110,7 +112,10 @@ mod tests {
         let v = Version::parse("2.1.317 (Claude Code)").unwrap();
         assert_eq!(v.numbers, [2, 1, 317]);
         assert!(!v.prerelease);
-        assert_eq!(Version::parse("codex-cli 0.158.0").unwrap().numbers, [0, 158, 0]);
+        assert_eq!(
+            Version::parse("codex-cli 0.158.0").unwrap().numbers,
+            [0, 158, 0]
+        );
         assert_eq!(Version::parse("v0.31.0").unwrap().numbers, [0, 31, 0]);
         assert_eq!(Version::parse("2.173.0").unwrap().numbers, [2, 173, 0]);
         assert!(Version::parse("unknown").is_none());

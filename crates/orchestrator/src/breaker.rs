@@ -52,8 +52,9 @@ pub fn record(health: &mut Health, now: chrono::DateTime<Utc>, ok: bool) -> Opti
     if total < MIN_RUNS || (failed as u64) * 100 < (total as u64) * FAILURE_PERCENT {
         return None;
     }
-    let reason =
-        format!("{failed} of {total} runs failed in {WINDOW_DAYS} days (at least {FAILURE_PERCENT}%)");
+    let reason = format!(
+        "{failed} of {total} runs failed in {WINDOW_DAYS} days (at least {FAILURE_PERCENT}%)"
+    );
     health.pause(now, reason.clone());
     Some(reason)
 }
