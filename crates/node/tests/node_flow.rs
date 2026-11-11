@@ -2,13 +2,9 @@
 //!
 //! Most tests run a scripted [`Driver`] that plays the mock agent's event sequence (turn
 //! start, a tool call, output, usage, turn end) and takes [`PermissionHandler`] requests. It
-//! is scripted rather than spawned through `crates/mock-agent` because the ACP driver that
-//! launches that binary lives in `crossagents-drivers`, and clippy wraps workspace members
-//! with the clippy driver: a dev-dependency on it makes `cargo clippy -p crossagents-node --
-//! -D warnings` fail on drivers' own lints (crates/drivers/src/cursor_native/mod.rs:580 at
-//! this commit). The scripted driver covers what the node owns — routing calls, numbering
-//! and replaying events, asking the hub, ordering a turn's return after its events, and
-//! failing calls while the link is down; the mock agent's ACP driver keeps its own tests.
+//! lets a test pause a turn at an exact point (to cut the link, answer a permission request or
+//! time out an `Ask`), which a spawned agent cannot. The real ACP driver over the actual
+//! `crates/mock-agent` binary is covered by `tests/mock_agent.rs`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

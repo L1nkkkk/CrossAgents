@@ -577,7 +577,7 @@ impl ResultUsage {
 
 fn parse_token(value: &Value) -> Option<u64> {
     let n = value.as_f64()?;
-    (n.is_finite() && n >= 0.0 && n.fract() == 0.0).then(|| n as u64)
+    (n.is_finite() && n >= 0.0 && n.fract() == 0.0).then_some(n as u64)
 }
 
 #[cfg(test)]
