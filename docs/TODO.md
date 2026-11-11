@@ -438,20 +438,27 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 
 ## 三十二、借鉴 Tutti
 
-> 2026-11-11 读文档整理，没安装、没运行。叫 Tutti 的项目有两个，都看了：桌面应用
-> [tutti-os/tutti](https://github.com/tutti-os/tutti)（[`207beee`](https://github.com/tutti-os/tutti/tree/207beeea554435618dffd3b579d0ffe112b065c4)）和命令行
-> [nutthouse/tutti](https://github.com/nutthouse/tutti)（[`6b86cca`](https://github.com/nutthouse/tutti/tree/6b86cca7457364888032e6ff9c04f2a87fc14cb2)）。
-> 逐条的出处、它们的做法、不学的和没核实的见 [research/tutti.md](research/tutti.md)。
-> 下面是助手挑的，人还没选。建议顺序：T2 → N1 → T1 → N2 → T3，T4 先核对。助手的意见是只排 T2 和 N1，其余记下不排期（理由见 §三十三）。
+> 2026-11-11 读文档整理，分两遍，没安装、没运行。叫 Tutti 的项目有两个；**人已确认说的是桌面应用
+> [tutti-os/tutti](https://github.com/tutti-os/tutti)**（[`207beee`](https://github.com/tutti-os/tutti/tree/207beeea554435618dffd3b579d0ffe112b065c4)）。命令行
+> [nutthouse/tutti](https://github.com/nutthouse/tutti)（[`6b86cca`](https://github.com/nutthouse/tutti/tree/6b86cca7457364888032e6ff9c04f2a87fc14cb2)）是第一遍没分清时顺带看的，N1、N2 出自它，去留由人定。
+> 逐条的出处、它们的做法、和我们 lead / worker 的对照、不学的和没核实的见 [research/tutti.md](research/tutti.md)。
+> 第二遍读了它的 Tutti Mode（主 agent 带子 agent 的编排）。结论：原则和我们一致（服务不替 agent 做决定），我们已有的 continuation、stuck watch、断路器、`run_finish` 的检查盖住了它的大部分机制；它那套 checkpoint、任务图版本号、叫醒租约不照搬。新增 T5 到 T8。
+> 下面是助手挑的，人还没选。建议顺序：T2 → T5 → T6 → N1，T7、T4 先核对，其余记下不排期。T5、T6 写的后果是读代码推出来的，没有实测。
 
-- [ ] **T2 发送意图先落盘，再投递**（tutti-os）：hub 收下一条消息时，在同一个事务里写一行「待投递」（目标会话、消息 id、内容快照）；agent 开始这一回合后清掉；结果不明的留着。hub 启动时按表重放，并给重放出的回合补上来源。一并解决 §28.5「排队中的消息只在内存里」和 §28.3「重启前排队的消息，重启后的回合没有来源」，Codex 插话的 `outcome_unknown` 也有了对账依据。全是机械规则。先做 §二十四「先读后写的 SQLite 事务」那条，这张表正好是先读后写
-- [ ] **N1 run 开工时在基线上跑一次验收**（从 nutthouse 的 `tt doctor`、`tt verify` 引申）：在基线提交上跑这一轮的验收命令并记下结果。不绿就告诉 lead 和人；之后任务验收失败时拿来比，分清是原有的还是新引入的。对着 §28.8 那四组偶发失败的测试：基线不稳时 worker 会被自己没造成的失败退回，返工一轮就是一轮额度。要先定：基线验收要几分钟，是每轮都跑、按基线提交号缓存，还是只在验收失败时补跑
+- [ ] **T2 发送意图先落盘，再投递**（tutti-os）：hub 收下一条消息时，在同一个事务里写一行「待投递」（目标会话、消息 id、内容快照）；agent 开始这一回合后清掉；结果不明的留着。hub 启动时按表重放，并给重放出的回合补上来源。一并解决 §28.5「排队中的消息只在内存里」和 §28.3「重启前排队的消息，重启后的回合没有来源」，Codex 插话的 `outcome_unknown` 也有了对账依据。全是机械规则。先做 §二十四「先读后写的 SQLite 事务」那条，这张表正好是先读后写。范围比初稿小：通知这条路已有落盘的待投递表（`list_pending_notices`，带 `wake_tries`，只看了名字没读实现），剩下的是人和 agent 发的普通消息，沿用那张表的做法。它另有一条可以照搬：提交标识从记录号确定地算出来，丢了响应按标识查回，不猜
+- [ ] **T5 带着进行中 run 的 lead 不能直接归档**（tutti-os 的源会话保护）：`archive_agent`（`crates/hub/src/api.rs`）现在直接归档，不看这个 agent 是不是未结束 run 的 lead。归档后 worker 交回的结果没人接；continuation 没开时 run 就一直挂着。改成：是 lead 就拒绝，回复里列出 run，界面给「去看这个 run」和「结束这一轮再归档」。和 §28.5「已归档 lead 开新一轮，run 一直不结束」一起修：开新一轮时先恢复 lead，或者直接拒绝
+- [ ] **T6 人按停 lead 的回合之后，自动续跑要停下**（tutti-os：被取消的回合不算活动，不推迟看门狗）：编排器在 lead 空闲时调 `settle_continuation`（`engine.rs` 的 `AgentStatusChanged → Idle`），`continuation.rs` 里没有任何地方看回合是怎么结束的。开了 continuation 的 run，人按停 lead 后过一个间隔又会被叫起来，直到用完 `max_attempts`。改成：lead 的回合以「被人中断」结束时，这个 run 的 continuation 停住（和断路器的 `automation_paused` 同一个机制），人给 lead 发下一条消息或显式放开后才恢复，hub 重启后保持停住。不照它那样把整轮归档
+- [ ] **N1 run 开工时在基线上跑一次验收**（从 nutthouse 的 `tt doctor`、`tt verify` 引申；不是人问的那个 Tutti，助手的意见是留）：在基线提交上跑这一轮的验收命令并记下结果。不绿就告诉 lead 和人；之后任务验收失败时拿来比，分清是原有的还是新引入的。对着 §28.8 那四组偶发失败的测试：基线不稳时 worker 会被自己没造成的失败退回，返工一轮就是一轮额度。要先定：基线验收要几分钟，是每轮都跑、按基线提交号缓存，还是只在验收失败时补跑
 - [ ] **T1 录下真实 CLI 的进出帧，测试里回放**（tutti-os 的 Session Replay，缩小版）：只在驱动拉起子进程的那一层录和放，由 `crates/mock-agent` 回放；匹配消息类型和关键字段，不逐字节比；学 `self_check.rs` 在空的临时目录里用合成的小任务录，录像里不带真实代码。用处：本清单里「只有 mock 验证、真实 agent 没跑过」的条目（§七、§二十五 第 4 条的尾巴、§28.3、§28.4），跑过一次就留下可重复的测试；CLI 升级后重录，和旧录像的差别就是协议变了的地方（§五）。管不了要真机的验收。要先单独开一轮出设计：录像格式、存哪、每个 CLI 版本留几份
-- [ ] **N2 模板写档位，档位到模型的对应放一处**（nutthouse 的 `[roles]`）：模板不再直接写模型 id，写「便宜的 worker」「评审」这类档位；设置里一处写档位对应哪个模型。模型下线时改一行（§二十四 的 Hazel 4 模板至今指向已下线的模型）。模板现在怎么存模型没读，改动面先看
+- [ ] **N2 模板写档位，档位到模型的对应放一处**（nutthouse 的 `[roles]`；不是人问的那个 Tutti，可有可无）：模板不再直接写模型 id，写「便宜的 worker」「评审」这类档位；设置里一处写档位对应哪个模型。模型下线时改一行（§二十四 的 Hazel 4 模板至今指向已下线的模型）。模板现在怎么存模型没读，改动面先看
 - [ ] **T3 `@` 会话、任务、run，插入的是短记号，agent 用到时自己去读**（tutti-os 的 Big @）：现在 `@` 只能点名协作者或模型（`apps/gui/src/mention.tsx`）。照搬它的规矩：显示名只管显示、不作解析依据；解析是实时的；引用只读，不等于授权去执行；解析失败就报失败，不凭旧内容猜。**要人先答**：run 之外的普通对话里，跨会话复制粘贴多不多。不多就不做，run 里 lead 派活本来就带交接卡
 - [ ] **T4（先核对）等人处理的事是否都在一处**（tutti-os 的 Control Center）：「等你回答」卡片已有（`apps/gui/src/questions.tsx`）。核对另外三类在不在同一处：工具权限的批准、等人评审的任务、等人落地的 run。不在就补进同一个区域，不另做一页
+- [ ] **T7（先核对）Codex 带外了结审批时，hub 的待批准项会不会一直挂着**（tutti-os 的 ADR 0006）：Codex 在回合被中断或超时时会自己了结挂着的审批，并发 `serverRequest/resolved`。`docs/research/codex-app-server.md` 记了这条通知，`crates` 里搜不到对它的处理；回合结束时有没有别的路径清掉待批准项没看。有挂住的情况就在驱动里接上。另把它的一条实测记进 `codex-app-server.md`：`codex-cli 0.142.5` 在 `thread/resume` 之后不会重发挂着的服务端请求，被打断的回合不恢复，所以重启后挂着的审批要直接标成过期。归 §六
+- [ ] **T8 起 git 子进程时清掉继承来的 `GIT_DIR`、`GIT_WORK_TREE`**（tutti-os 的排障记录）：它的测试夹具在 linked worktree 里继承了 `GIT_DIR`，把共享仓库改成了 `core.bare=true`。我们起 git 时只设 `GIT_INDEX_FILE`（`hub/src/snapshot.rs`、`orchestrator/src/apply/mod.rs`、`orchestrator/src/snapshot/mod.rs`）。hub 平时由桌面端拉起，环境里一般没有这两个变量，概率低；从 git hook 或 `git rebase --exec` 里起 hub 或跑测试时会中。几行的保险，不急，改到起 git 的地方顺手做
 
-不学的（详见 [research/tutti.md](research/tutti.md) §2.2、§3.2）：应用中心和连接器市场；多人房间与云端状态；产品自己拆任务；替用户装和升级 CLI；压缩命令输出的省额度模式（按 USAGE-TRIM 的实测只省约 7% credit）；配置写死的流程；靠终端屏幕判断空闲；登录失效时自动换账号（限额判定还不准，§28.9）。
+记下不排期的（详见 [research/tutti.md](research/tutti.md) §2.3）：run 级的独立只读评审（拿额度换质量，和 §二十五 跨厂商顾问同理，先看评审闭环的数据）；Side 对话（只有 Codex 有协议支持）；拒绝命令时给稳定的原因码、叫醒提示里带命令示例和恢复上限这几条小规矩，改 lead 工具时参考。
+
+不学的（详见 [research/tutti.md](research/tutti.md) §2.5、§3.2）：checkpoint、任务图版本号、叫醒租约这套围栏（它自己的排障记录里主 agent 反复被围栏挡住）；应用中心和连接器市场；多人房间与云端状态；产品自己拆任务；替用户装和升级 CLI；强制升级；压缩命令输出的省额度模式（按 USAGE-TRIM 的实测只省约 7% credit）；配置写死的流程；靠终端屏幕判断空闲；登录失效时自动换账号（限额判定还不准，§28.9）。
 
 ## 三十三、接下来先做什么（2026-11-11 助手的判断）
 
@@ -480,7 +487,8 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 - §二十四 应用到原目录后的复跑同步阻塞，且不占构建资源（按钮卡几分钟，还可能和人手上的构建撞）
 - §二十四 其余先读后写的 SQLite 事务（偶发的 SQLITE_BUSY）
 - §三十二 T2（重启丢排队的消息）
-- §28.5 已归档 lead 开新一轮，run 一直不结束
+- §28.5 已归档 lead 开新一轮，run 一直不结束；和 §三十二 T5（带着进行中 run 的 lead 能被直接归档）一起修
+- §三十二 T6（人按停 lead 后 continuation 仍会再叫醒它）
 - §28.9 验收通过后 worker 又交一次，检查重跑约 12 分钟
 - §28.8 四组偶发失败的测试：修掉，或者从验收里隔离出来单独跑；验收命令加 `--no-fail-fast`。配合 §三十二 N1
 
