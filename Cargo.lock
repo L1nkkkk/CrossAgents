@@ -822,6 +822,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossagents-node"
+version = "0.2.20"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "crossagents-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "crossagents-orchestrator"
 version = "0.2.20"
 dependencies = [
