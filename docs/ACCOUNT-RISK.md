@@ -21,9 +21,9 @@
 
 ### 配置项
 
-`config.toml` 的 `[accounts]` 段，按下面的优先级从高到低生效：按账号 id 的覆盖 > 按
-provider 的覆盖 > 账号 JSON 里的 `egress` > `egress_default` > provider 默认值。配置
-压过账号自己的值，是为了在默认值判断错时不用逐个改账号。
+`config.toml` 的 `[accounts]` 段，按下面的优先级从高到低生效：按账号 id 的覆盖 > 账号
+JSON 里的 `egress` > 按 provider 的覆盖 > `egress_default` > provider 默认值。越细粒度
+的键越优先：provider 表和默认值只负责兜底，不会推翻某个账号显式写的选择。
 
 - `[accounts] egress_default = "proxy_only"` — 所有没特别指定的账号用哪个策略（不写则按
   provider 推导）。
@@ -33,7 +33,8 @@ provider 的覆盖 > 账号 JSON 里的 `egress` > `egress_default` > provider �
   `claude-work = "allow_direct"`。
 
 另外，Windows 的系统代理现在每 45 秒最多读一次注册表（原来整个 hub 生命周期只读一次），
-在系统里换节点后不必重启 hub。
+在系统里换节点后不必重启 hub。`CROSSAGENTS_EGRESS_POLICY` 这个变量由 hub 自己设置：项目
+`crossagents.toml` 的 `[run] env` 里写同名变量会被忽略，也不会被传给厂家的 CLI。
 
 ### 这套机制能做什么，不能做什么
 

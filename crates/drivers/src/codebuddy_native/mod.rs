@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, EGRESS_ENV,
-    EgressPolicy, SessionSpec,
+    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, EgressPolicy,
+    SessionSpec,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -30,7 +30,7 @@ use tokio::process::Command;
 use crate::claude_native::ClaudeNativeDriver;
 use crate::claude_native::wire::{self, Flavor};
 use crate::locate::Cli;
-use crate::process::{check_proxy, hide_console, system_proxy_env};
+use crate::process::{check_proxy, hide_console, system_proxy_env, without_internal_env};
 
 /// How long [`probe`] waits for the CLI to answer `initialize`.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -311,11 +311,7 @@ pub async fn probe(command: &[String], env: &[(String, String)]) -> Result<Value
         .unwrap_or_else(|| EgressPolicy::default_for_provider(Flavor::Codebuddy.program()));
     let direct = check_proxy(env, Some(&api_host), egress).await?;
     let mut process_env = system_proxy_env();
-    process_env.extend(
-        env.iter()
-            .filter(|(key, _)| !key.eq_ignore_ascii_case(EGRESS_ENV))
-            .cloned(),
-    );
+    process_env.extend(without_internal_env(env));
     process_env.extend(direct);
     let mut child = Command::new(program);
     for key in prepare_env(&mut process_env) {

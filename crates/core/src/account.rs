@@ -24,6 +24,7 @@ pub struct Account {
     /// `None` takes [`EgressPolicy::default_for_provider`]'s answer, so accounts stored
     /// before the policy existed read as their provider's default (docs/ACCOUNT-RISK.md).
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub egress: Option<EgressPolicy>,
     /// Unique, same rules as agent names (e.g. `codex-main`).
     pub id: String,

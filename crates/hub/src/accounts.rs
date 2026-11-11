@@ -130,10 +130,10 @@ impl Accounts {
         self
     }
 
-    /// The egress policy for an account: a per-account override, then a per-provider one,
-    /// then what the account itself stores, then `[accounts] egress_default`, then the
-    /// provider default. Config wins over the stored value so a bad default can be fixed
-    /// without editing every account.
+    /// The egress policy for an account: a per-account override, then what the account
+    /// itself stores, then a per-provider override, then `[accounts] egress_default`, then
+    /// the provider default. The finer key wins: a broad provider table must not overturn
+    /// an account's explicit choice.
     fn egress_for(&self, account: &Account) -> EgressPolicy {
         let settings = self
             .egress
@@ -143,8 +143,8 @@ impl Accounts {
             .by_account
             .get(&account.id)
             .copied()
-            .or_else(|| settings.by_provider.get(&account.provider).copied())
             .or(account.egress)
+            .or_else(|| settings.by_provider.get(&account.provider).copied())
             .or(settings.default)
             .unwrap_or_else(|| EgressPolicy::default_for_provider(&account.provider))
     }
@@ -2325,7 +2325,8 @@ mod egress_tests {
             )),
             EgressPolicy::AllowDirect
         );
-        // Config overrides the stored value: that is how a wrong default is fixed.
+        // The finer key wins: the per-account override beats everything, and a provider
+        // table does not overturn an account's explicit choice.
         let overridden = accounts(
             Some(EgressPolicy::ProxyOnly),
             &[("claude", EgressPolicy::AllowDirect)],
@@ -2342,6 +2343,10 @@ mod egress_tests {
                 "claude-other",
                 Some(EgressPolicy::ProxyOnly)
             )),
+            EgressPolicy::ProxyOnly
+        );
+        assert_eq!(
+            overridden.egress_for(&account("claude", "claude-third", None)),
             EgressPolicy::AllowDirect
         );
         assert_eq!(

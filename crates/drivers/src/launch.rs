@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossagents_core::process::Job;
-use crossagents_core::{CoreError, ExitCause};
+use crossagents_core::{CoreError, EGRESS_ENV, ExitCause};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Command;
 use tokio::sync::{Notify, watch};
@@ -166,7 +166,11 @@ impl Drop for ProcessHandle {
 
 /// Starts `spec`: in a runtime host when it has an owner and hosts are enabled, else as a
 /// direct child.
-pub async fn launch(spec: LaunchSpec) -> Result<Launched, CoreError> {
+pub async fn launch(mut spec: LaunchSpec) -> Result<Launched, CoreError> {
+    // The hub puts the account's egress policy in the session environment for the driver to
+    // read; it is internal and must not reach the vendor CLI, whichever driver launches it.
+    spec.env
+        .retain(|(key, _)| !key.eq_ignore_ascii_case(EGRESS_ENV));
     if let Some(owner) = &spec.owner
         && let Some(settings) = host::settings()
     {
@@ -326,5 +330,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(exit.cause, ExitCause::Killed);
+    }
+
+    #[tokio::test]
+    async fn the_internal_egress_policy_does_not_reach_the_cli() {
+        let (program, args) = if cfg!(windows) {
+            (
+                "powershell",
+                vec![
+                    "-NoProfile".to_owned(),
+                    "-Command".to_owned(),
+                    "[Console]::Out.WriteLine($env:CROSSAGENTS_EGRESS_POLICY); [Console]::Out.WriteLine($env:KEEP_ME)".to_owned(),
+                ],
+            )
+        } else {
+            (
+                "sh",
+                vec![
+                    "-c".to_owned(),
+                    "printf '%s\\n' \"$CROSSAGENTS_EGRESS_POLICY\"; printf '%s\\n' \"$KEEP_ME\""
+                        .to_owned(),
+                ],
+            )
+        };
+        let spec = LaunchSpec {
+            program: crate::process::resolve_program(program),
+            args,
+            cwd: std::env::temp_dir(),
+            env: vec![
+                (EGRESS_ENV.to_owned(), "allow_direct".to_owned()),
+                ("KEEP_ME".to_owned(), "yes".to_owned()),
+            ],
+            label: "env".into(),
+            ..LaunchSpec::default()
+        };
+        let Launched {
+            stdout,
+            stdin,
+            process,
+            ..
+        } = launch(spec).await.unwrap();
+        drop(stdin);
+        let mut lines = BufReader::new(stdout).lines();
+        assert_eq!(
+            lines.next_line().await.unwrap().unwrap_or_default().trim(),
+            "",
+            "the internal policy variable reached the CLI"
+        );
+        assert_eq!(
+            lines.next_line().await.unwrap().unwrap_or_default().trim(),
+            "yes"
+        );
+        process.start_kill();
+        let _ = process.exit_within(Duration::from_secs(20)).await;
     }
 }

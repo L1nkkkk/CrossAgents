@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use crossagents_core::{
     AgentCommand, AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind,
-    DriverSession, EGRESS_ENV, EgressPolicy, MessageId, PermissionHandler, PermissionPolicy,
-    Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
+    DriverSession, EgressPolicy, MessageId, PermissionHandler, PermissionPolicy, Prompt,
+    SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -30,7 +30,9 @@ use tokio::sync::{mpsc, oneshot};
 use self::wire::{Flavor, Launch, Start, Translator};
 use crate::launch::{self, BoxRead, BoxWrite, ExitWatch, LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
-use crate::process::{StderrTail, check_proxy, hide_console, system_proxy_env};
+use crate::process::{
+    StderrTail, check_proxy, hide_console, system_proxy_env, without_internal_env,
+};
 
 /// `entrypoint` of the sessions CrossAgents starts, in Claude Code's transcripts.
 pub const ENTRYPOINT: &str = "crossagents";
@@ -966,14 +968,9 @@ impl ClaudeSession {
             ("CLAUDE_CODE_ENTRYPOINT".to_owned(), ENTRYPOINT.to_owned()),
         ];
         env.extend(system_proxy_env());
-        // The account's egress policy travels in this variable (set by the hub, which knows
-        // the account); it is consumed here and not passed on to the CLI.
-        env.extend(
-            spec.env
-                .iter()
-                .filter(|(key, _)| !key.eq_ignore_ascii_case(EGRESS_ENV))
-                .cloned(),
-        );
+        env.extend(spec.env.iter().cloned());
+        // The account's egress policy travels in this environment (set by the hub, which
+        // knows the account); `launch` drops it before the CLI starts.
         let egress = EgressPolicy::from_env(&spec.env)
             .unwrap_or_else(|| EgressPolicy::default_for_provider(flavor.program()));
         // A CLI pointed at a dead proxy starts fine and then cannot reach its API; the
@@ -1364,7 +1361,7 @@ pub async fn auth_status(program: &Path, env: &[(String, String)]) -> Option<Val
     command
         .args(["auth", "status"])
         .envs(system_proxy_env())
-        .envs(env.iter().cloned())
+        .envs(without_internal_env(env))
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .kill_on_drop(true);
@@ -1396,7 +1393,7 @@ pub async fn probe_account(
             wire::DEFAULT_SETTING_SOURCES,
         ])
         .envs(system_proxy_env())
-        .envs(env.iter().cloned())
+        .envs(without_internal_env(env))
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

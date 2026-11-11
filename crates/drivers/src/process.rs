@@ -310,6 +310,17 @@ pub async fn check_proxy(
     Err(err)
 }
 
+/// `env` without the hub-internal [`crossagents_core::EGRESS_ENV`] entries.
+///
+/// The hub passes an account's egress policy to drivers in that variable; it is not meant
+/// for the vendor CLI, so every path that hands `env` to a process strips it here.
+pub fn without_internal_env(env: &[(String, String)]) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case(crossagents_core::EGRESS_ENV))
+        .cloned()
+        .collect()
+}
+
 /// Hosts the proxy could not reach but a direct connection could, with when that was
 /// found: later launches go direct at once instead of waiting out [`REACH_TIMEOUT`] again.
 static DIRECT_HOSTS: std::sync::LazyLock<
