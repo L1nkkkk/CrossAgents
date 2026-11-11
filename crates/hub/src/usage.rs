@@ -10,8 +10,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crossagents_api_types::{UsageGroup, UsageResponse, UsageRow};
 use chrono::{DateTime, Utc};
+use crossagents_api_types::{UsageGroup, UsageResponse, UsageRow};
 use crossagents_core::{
     AgentId, AgentStatus, CoreError, EventKind, Role, RunId, Store, TaskId, TokenUsage,
 };
@@ -317,7 +317,11 @@ async fn task_row(
     spend: &TaskSpend,
     now: DateTime<Utc>,
 ) -> UsageRow {
-    let rework = store.get_task(id).await.ok().map(|t| t.report.rework.len() as u32);
+    let rework = store
+        .get_task(id)
+        .await
+        .ok()
+        .map(|t| t.report.rework.len() as u32);
     let requests_known = spend.requests_seen && !spend.requests_missing;
     let mut notes = Vec::new();
     if !spend.unpriced.is_empty() {
@@ -364,6 +368,7 @@ mod tests {
 
     fn agent(name: &str, role: Role, model: &str) -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,

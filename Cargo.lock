@@ -758,6 +758,7 @@ dependencies = [
  "crossagents-core",
  "crossagents-drivers",
  "crossagents-link",
+ "crossagents-node",
  "crossagents-orchestrator",
  "crossagents-plugins",
  "crossagents-store-sqlite",
@@ -819,6 +820,20 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "crossagents-node"
+version = "0.2.20"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "crossagents-core",
+ "crossagents-drivers",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -85,6 +85,7 @@ mod tests {
 
     fn agent(plugin: &str, cwd: &Path, config: serde_json::Value) -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name: "Luna".into(),
             name_source: NameSource::Chosen,

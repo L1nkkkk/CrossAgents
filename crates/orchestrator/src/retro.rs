@@ -384,10 +384,7 @@ fn records_lines(r: &Records) -> Vec<String> {
             .map(|n| format!("`{}`", n.key))
             .collect::<Vec<_>>()
             .join("、");
-        lines.push(format!(
-            "- 还没整理 {} 条问题：{keys}",
-            r.unsorted.len()
-        ));
+        lines.push(format!("- 还没整理 {} 条问题：{keys}", r.unsorted.len()));
         lines.push(
             "  - 用 `issue_pending` 读原文，再 `lesson_create` 新建（写 `files` 让后来人知道哪些文件变了）、`lesson_merge` 并入已有记录、`issue_keep` 只留 run。"
                 .to_owned(),
@@ -428,7 +425,9 @@ pub async fn document(store: &dyn Store, run: &Run) -> Result<RetroDoc, CoreErro
         after = last;
         events.extend(page);
     }
-    Ok(render_with(run, &tasks, &events, &issues, &triage, &lessons))
+    Ok(render_with(
+        run, &tasks, &events, &issues, &triage, &lessons,
+    ))
 }
 
 /// The records of the project `run` belongs to, looked up by its repository the way the
@@ -1287,12 +1286,25 @@ mod tests {
             updated_at: at,
         };
         let issues = vec![
-            note("issue/api/1", "问题：error[E0277] the trait bound is not satisfied"),
+            note(
+                "issue/api/1",
+                "问题：error[E0277] the trait bound is not satisfied",
+            ),
             note("issue/api/2", "问题：npm ci 退出，ELIFECYCLE"),
         ];
         let lessons = vec![
-            record("l1aaaaaa", "trait bound", LessonStatus::Active, "error[E0277]"),
-            record("l2bbbbbb", "npm lifecycle", LessonStatus::Review, "ELIFECYCLE"),
+            record(
+                "l1aaaaaa",
+                "trait bound",
+                LessonStatus::Active,
+                "error[E0277]",
+            ),
+            record(
+                "l2bbbbbb",
+                "npm lifecycle",
+                LessonStatus::Review,
+                "ELIFECYCLE",
+            ),
         ];
         let doc = render_with(
             &run,

@@ -88,7 +88,10 @@ pub async fn run(ctx: &Context, cmd: LessonsCommand) -> Result<()> {
         LessonsCommand::Export(args) => {
             let project = resolve_project(&client, args.project.as_deref()).await?;
             let markdown = client
-                .get_text(&format!("/v1/projects/{}/lessons/export", encode(&project.id)))
+                .get_text(&format!(
+                    "/v1/projects/{}/lessons/export",
+                    encode(&project.id)
+                ))
                 .await?;
             if ctx.json {
                 return print_json(&serde_json::json!({ "markdown": markdown }));
@@ -143,7 +146,9 @@ fn pick_project(
         let named: Vec<_> = projects.iter().filter(|p| p.name == wanted).collect();
         return match named.as_slice() {
             [one] => Ok((*one).clone()),
-            [] => bail!("no project {wanted}; `crossagents lessons ls --project <id>` takes an id or name"),
+            [] => bail!(
+                "no project {wanted}; `crossagents lessons ls --project <id>` takes an id or name"
+            ),
             _ => bail!("several projects are called {wanted}; give its id"),
         };
     }
@@ -209,7 +214,9 @@ fn print_list(ctx: &Context, list: ListLessonsResponse) -> Result<()> {
             l.title
         );
     }
-    println!("\nA record is reference, not a rule: check its conditions (`crossagents lessons show <id>`).");
+    println!(
+        "\nA record is reference, not a rule: check its conditions (`crossagents lessons show <id>`)."
+    );
     Ok(())
 }
 
@@ -228,7 +235,10 @@ fn render_lesson(l: &Lesson) -> String {
     if !l.keywords.is_empty() {
         out.push_str(&format!("keywords:  {}\n", l.keywords.join(", ")));
     }
-    out.push_str(&format!("updated:   {}\n", l.updated_at.format("%Y-%m-%d %H:%M")));
+    out.push_str(&format!(
+        "updated:   {}\n",
+        l.updated_at.format("%Y-%m-%d %H:%M")
+    ));
     out.push_str(&format!("\nSymptom\n{}\n", l.symptom.trim()));
     if !l.conditions.trim().is_empty() {
         out.push_str(&format!("\nConditions\n{}\n", l.conditions.trim()));
@@ -314,20 +324,34 @@ mod tests {
 
     #[test]
     fn the_project_is_named_or_found_from_the_directory() {
-        let ps = vec![project("p1", "alpha", "/src/alpha"), project("p2", "beta", "/src/beta")];
+        let ps = vec![
+            project("p1", "alpha", "/src/alpha"),
+            project("p2", "beta", "/src/beta"),
+        ];
         assert_eq!(pick_project(ps.clone(), Some("p2"), None).unwrap().id, "p2");
-        assert_eq!(pick_project(ps.clone(), Some("alpha"), None).unwrap().id, "p1");
+        assert_eq!(
+            pick_project(ps.clone(), Some("alpha"), None).unwrap().id,
+            "p1"
+        );
         assert!(pick_project(ps.clone(), Some("nope"), None).is_err());
         let cwd = Path::new("/src/beta/crates/x");
         assert_eq!(pick_project(ps.clone(), None, Some(cwd)).unwrap().id, "p2");
         assert!(pick_project(ps.clone(), None, Some(Path::new("/elsewhere"))).is_err());
         let one = vec![project("p1", "alpha", "/src/alpha")];
-        assert_eq!(pick_project(one, None, Some(Path::new("/elsewhere"))).unwrap().id, "p1");
+        assert_eq!(
+            pick_project(one, None, Some(Path::new("/elsewhere")))
+                .unwrap()
+                .id,
+            "p1"
+        );
     }
 
     #[test]
     fn list_paths_carry_the_query_and_status() {
-        assert_eq!(list_path("p1", None, None).unwrap(), "/v1/projects/p1/lessons");
+        assert_eq!(
+            list_path("p1", None, None).unwrap(),
+            "/v1/projects/p1/lessons"
+        );
         assert_eq!(
             list_path("p1", Some("E0425 link"), Some("Active")).unwrap(),
             "/v1/projects/p1/lessons?q=E0425%20link&status=active"

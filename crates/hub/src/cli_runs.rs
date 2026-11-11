@@ -330,8 +330,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("cli-runs.json");
         let runs = CliRuns::load(file.clone());
-        assert_eq!(runs.standing("with", "/w", "1.0.0", false).status, "untried");
-        assert_eq!(runs.standing("with", "/w", "1.0.0", true).status, "verified");
+        assert_eq!(
+            runs.standing("with", "/w", "1.0.0", false).status,
+            "untried"
+        );
+        assert_eq!(
+            runs.standing("with", "/w", "1.0.0", true).status,
+            "verified"
+        );
 
         runs.record_ok("with", "/w", "1.0.0");
         assert_eq!(
@@ -340,11 +346,21 @@ mod tests {
         );
 
         std::thread::sleep(std::time::Duration::from_millis(5));
-        runs.record_protocol_fail("with", "/w", "1.1.0", "with-cli exited before the turn ended");
+        runs.record_protocol_fail(
+            "with",
+            "/w",
+            "1.1.0",
+            "with-cli exited before the turn ended",
+        );
         let failed = runs.standing("with", "/w", "1.1.0", false);
         assert_eq!(failed.status, "protocol_failed");
         assert_eq!(failed.last_good_version.as_deref(), Some("1.0.0"));
-        assert!(failed.fail_message.unwrap().contains("before the turn ended"));
+        assert!(
+            failed
+                .fail_message
+                .unwrap()
+                .contains("before the turn ended")
+        );
         // A failure beats the seed list.
         assert_eq!(
             runs.standing("with", "/w", "1.1.0", true).status,
@@ -367,7 +383,9 @@ mod tests {
         assert!(protocol_failure("error: unexpected argument '--foo' found"));
         assert!(protocol_failure("with-cli crashed (exit code 2)"));
         assert!(!protocol_failure("429 Too Many Requests"));
-        assert!(!protocol_failure("rate limit reached before the turn ended"));
+        assert!(!protocol_failure(
+            "rate limit reached before the turn ended"
+        ));
         assert!(!protocol_failure("network error: connection reset"));
         assert!(!protocol_failure("model gpt-x is not available"));
         assert!(!protocol_failure("You have hit your usage limit"));
@@ -400,7 +418,10 @@ mod tests {
         );
         assert_eq!(witness.observe(&parsed), Some(true));
         assert_eq!(witness.observe(&parsed), None);
-        assert_eq!(runs.standing("with", "/w", "2.0.0", false).status, "known_good");
+        assert_eq!(
+            runs.standing("with", "/w", "2.0.0", false).status,
+            "known_good"
+        );
 
         let mut broken = Witness::new(runs.clone(), "with".into(), "/w".into(), "2.1.0".into());
         assert_eq!(

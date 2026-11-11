@@ -12,8 +12,8 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
 use crossagents_core::{
-    estimate_tokens, Candidate, CandidateStatus, EntryKind, EntryStatus, ExpertiseEntry,
-    UsageOutcome, UsageRecord,
+    Candidate, CandidateStatus, EntryKind, EntryStatus, ExpertiseEntry, UsageOutcome, UsageRecord,
+    estimate_tokens,
 };
 
 /// The per-domain ceiling for judgements (EXPERTISE §4.3).
@@ -201,13 +201,10 @@ pub fn stale_scan(
         let reworked = entry.stats.reworked;
         let rework_rate = (used > 0).then(|| round_to(f64::from(reworked) / f64::from(used), 3));
 
-        let (suggested, reason) = if reworked > 0 && recently_reworked.contains(entry.id.as_str())
-        {
+        let (suggested, reason) = if reworked > 0 && recently_reworked.contains(entry.id.as_str()) {
             (
                 EntryStatus::Review,
-                format!(
-                    "最近 {RECENT_FAILURE_DAYS} 天有返工（{reworked}/{used} 次）"
-                ),
+                format!("最近 {RECENT_FAILURE_DAYS} 天有返工（{reworked}/{used} 次）"),
             )
         } else if used >= REWORK_RATE_MIN_SAMPLE
             && rework_rate.is_some_and(|rate| rate >= REWORK_RATE_THRESHOLD)
@@ -308,9 +305,7 @@ pub fn expertise_card(
     let first_try_rate = rate(merged_first_try, sample);
     let first_try_rate_30d_ago = rate(merged_then, sample_then);
     let delta_points = match (first_try_rate, first_try_rate_30d_ago) {
-        (Some(now_rate), Some(then_rate)) => {
-            Some(round_to((now_rate - then_rate) * 100.0, 1))
-        }
+        (Some(now_rate), Some(then_rate)) => Some(round_to((now_rate - then_rate) * 100.0, 1)),
         _ => None,
     };
 
@@ -319,8 +314,12 @@ pub fn expertise_card(
     let over_budget_domains = budgets.iter().filter(|budget| budget.over).count();
 
     let count_kind = |kind: EntryKind| entries.iter().filter(|entry| entry.kind == kind).count();
-    let count_status =
-        |status: EntryStatus| entries.iter().filter(|entry| entry.status == status).count();
+    let count_status = |status: EntryStatus| {
+        entries
+            .iter()
+            .filter(|entry| entry.status == status)
+            .count()
+    };
 
     ExpertiseCard {
         first_try_rate,
@@ -603,7 +602,12 @@ mod tests {
         }
     }
 
-    fn usage(id: &str, entry_id: &str, days_ago: i64, outcome: Option<UsageOutcome>) -> UsageRecord {
+    fn usage(
+        id: &str,
+        entry_id: &str,
+        days_ago: i64,
+        outcome: Option<UsageOutcome>,
+    ) -> UsageRecord {
         UsageRecord {
             id: id.into(),
             entry_id: entry_id.into(),
@@ -655,7 +659,13 @@ mod tests {
 
     #[test]
     fn budget_ignores_superseded_judgements() {
-        let mut old = entry("a", "rust", EntryKind::Judgment, "旧判断", &"x".repeat(8000));
+        let mut old = entry(
+            "a",
+            "rust",
+            EntryKind::Judgment,
+            "旧判断",
+            &"x".repeat(8000),
+        );
         old.status = EntryStatus::Superseded;
         let live = entry("b", "rust", EntryKind::Judgment, "t", "");
         let report = budget_report(&[old, live]);
@@ -776,14 +786,7 @@ mod tests {
         ];
 
         let hints = stale_scan(
-            &[
-                unused,
-                fresh,
-                reworked,
-                reviewed,
-                new_entry,
-                already_stale,
-            ],
+            &[unused, fresh, reworked, reviewed, new_entry, already_stale],
             &usages,
             now(),
         );
@@ -852,15 +855,17 @@ mod tests {
         review.status = EntryStatus::Review;
         let mut gone = entry("g", "rust", EntryKind::Judgment, "被替代", "");
         gone.status = EntryStatus::Superseded;
-        let over = entry("o", "rust", EntryKind::Judgment, "长篇判断", &"x".repeat(6400));
+        let over = entry(
+            "o",
+            "rust",
+            EntryKind::Judgment,
+            "长篇判断",
+            &"x".repeat(6400),
+        );
         let example = entry("x", "gui", EntryKind::Example, "例子", "");
         let limit = entry("l", "gui", EntryKind::Limit, "边界", "");
 
-        let card = expertise_card(
-            &[stale, review, gone, over, example, limit],
-            &usages,
-            now(),
-        );
+        let card = expertise_card(&[stale, review, gone, over, example, limit], &usages, now());
 
         assert_eq!(card.first_try_rate, Some(0.625));
         assert_eq!(card.first_try_rate_30d_ago, Some(0.5));

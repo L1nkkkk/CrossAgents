@@ -1,7 +1,7 @@
 # B1 任务书：节点（每台机器的 CLI 在本机跑，hub 汇总）
 
 > 依据：[MULTI-NODE.md](../MULTI-NODE.md) §0、§3、§7、§11、§12「B1」、§15 · 相关：[PROCESS-SUPERVISION.md](../PROCESS-SUPERVISION.md)、[MACOS.md](MACOS.md) §4 ·
-> 来源：2026-11-12 对话（人：「每个机器的 cli 跟着 gui 走，hub 来汇总」）· 状态：§3 与 §9 的选择人已确认（2026-11-12，按推荐），未开工
+> 来源：2026-11-12 对话（人：「每个机器的 cli 跟着 gui 走，hub 来汇总」）· 状态：§3 与 §9 的选择人已确认（2026-11-12，按推荐）· **B1.1、B1.2 已完成（2026-11-12）**：B1.1 提交 `936df53`…`c2a6556`，B1.2 提交 `cf79447`…`117e367`（run 分支 `crossagents/c3cec636`）。真实冒烟（2026-11-12，`builtin_node` 默认 true，独立 home，Claude haiku 与 Codex gpt-5.6-luna）：**Claude 通过**，**Codex 通过**——各自开会话、一轮对话、运行中 steer（两边都读到并回应）、interrupt（turn 以 cancelled 结束）、hub 在一轮进行中停掉再起，两边 adopt 接回并跑完该轮，重启后再对话一轮，且都记得重启前的内容。未跑 `builtin_node = false` 对照。
 
 ## 1. 要做成什么样
 

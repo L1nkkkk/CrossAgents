@@ -342,6 +342,7 @@ impl AgentHost for HubHost {
         let mut config = template.config.clone();
         crossagents_orchestrator::relations::mark_session(&mut config, &template, None);
         let agent = Agent {
+            node: None,
             id: AgentId::new(),
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,

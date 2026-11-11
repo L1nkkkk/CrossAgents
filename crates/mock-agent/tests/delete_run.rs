@@ -220,7 +220,10 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     assert!(repo.path().join("notes.txt").exists(), "landed on main");
     // Landed into base: the checkout has nothing left to give, so it goes with the copy.
-    assert!(!Path::new(&checkout).exists(), "landing removes the checkout");
+    assert!(
+        !Path::new(&checkout).exists(),
+        "landing removes the checkout"
+    );
     let landed = agent(&t, &lead).await;
     assert!(!landed["archived_at"].is_null(), "{landed}");
 

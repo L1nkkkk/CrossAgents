@@ -165,6 +165,7 @@ pub fn kickoff(
 
 /// [`kickoff`] with the machine its toolchain line describes (docs/tasks/SELF.md B4): a test
 /// gives a fake one, and the hub gives what it probed.
+#[allow(clippy::too_many_arguments)]
 pub fn kickoff_with(
     run: &Run,
     team: &[Agent],
@@ -700,6 +701,7 @@ mod tests {
 
     fn agent(name: &str) -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,

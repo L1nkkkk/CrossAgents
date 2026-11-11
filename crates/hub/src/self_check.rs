@@ -85,6 +85,7 @@ async fn check(driver: Arc<dyn Driver>, model: Option<String>, mut witness: Witn
     let (events, mut rx) = mpsc::unbounded_channel();
     let spec = SessionSpec {
         agent: Agent {
+            node: None,
             id: AgentId::new(),
             name: "self-check".into(),
             name_source: NameSource::Chosen,
@@ -118,16 +119,15 @@ async fn check(driver: Arc<dyn Driver>, model: Option<String>, mut witness: Witn
     });
     let failure = match driver.open(spec).await {
         Ok(session) => {
-            let failure = match tokio::time::timeout(TURN_TIMEOUT, session.prompt("Reply with OK."))
-                .await
-            {
-                Ok(Ok(_)) => None,
-                Ok(Err(err)) => Some(err.to_string()),
-                Err(_) => {
-                    let _ = session.interrupt().await;
-                    None
-                }
-            };
+            let failure =
+                match tokio::time::timeout(TURN_TIMEOUT, session.prompt("Reply with OK.")).await {
+                    Ok(Ok(_)) => None,
+                    Ok(Err(err)) => Some(err.to_string()),
+                    Err(_) => {
+                        let _ = session.interrupt().await;
+                        None
+                    }
+                };
             session.shutdown().await;
             drop(session);
             failure

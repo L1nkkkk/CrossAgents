@@ -1200,7 +1200,11 @@ impl Orchestrator {
                 let mut out = json!({ "run_id": run.id, "status": run.status, "tasks": run.plan.len(), "next": next });
                 let empty = plan::empty_scope_keys(&run.plan);
                 if !empty.is_empty() {
-                    let keys = empty.iter().map(|k| format!("#{k}")).collect::<Vec<_>>().join(", ");
+                    let keys = empty
+                        .iter()
+                        .map(|k| format!("#{k}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     let verb = if empty.len() == 1 { "has" } else { "have" };
                     out["scope_warning"] = json!(format!(
                         "{keys} {verb} an empty spec.scope.allow: the scheduler treats that as \"may touch any file\", so each of them runs one after another with every other task. To let them run in parallel, list the files each will change in spec.scope.allow, with no overlap between tasks."

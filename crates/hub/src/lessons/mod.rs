@@ -11,8 +11,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use chrono::Utc;
 use crossagents_api_types::{
-    Lesson, LessonStatus, ListLessonsResponse, ListRunIssuesResponse, RunIssue,
-    UpdateLessonRequest,
+    Lesson, LessonStatus, ListLessonsResponse, ListRunIssuesResponse, RunIssue, UpdateLessonRequest,
 };
 use crossagents_core::{CoreError, EventKind, ISSUE_PREFIX, NoteScope};
 use crossagents_orchestrator::lessons::{export_markdown, files_changed, search_terms};
@@ -152,10 +151,7 @@ async fn update_lesson(
 }
 
 /// The project's lessons as Markdown (`text/markdown`); empty when it has none.
-async fn export(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> ApiResult<Response> {
+async fn export(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResult<Response> {
     let store = state.bus.store();
     let lessons = store.list_lessons(&id).await?;
     let name = store

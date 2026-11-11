@@ -47,7 +47,13 @@ impl Orchestrator {
         if noted {
             earlier.pop();
         }
-        let decisions = task.spec.interfaces.iter().cloned().chain(earlier).collect();
+        let decisions = task
+            .spec
+            .interfaces
+            .iter()
+            .cloned()
+            .chain(earlier)
+            .collect();
         let facts = self
             .left_by_worker(run, task, Some(worker))
             .await

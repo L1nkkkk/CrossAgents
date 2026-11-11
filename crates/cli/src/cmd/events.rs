@@ -201,12 +201,18 @@ pub fn summary(kind: &EventKind) -> String {
             format!("{} {what} {percent}%", short_tail(id))
         }
         EventKind::TaskBudget {
-            key, what, used, max, ..
+            key,
+            what,
+            used,
+            max,
+            ..
         } => format!("#{key} {what} {used:.2} of {max:.2}"),
         EventKind::TaskReviewer { key, reviewer, .. } => {
             format!("#{key} reviewed by {}", short_tail(reviewer))
         }
-        EventKind::TaskCheckTimed { key, duration_ms, .. } => {
+        EventKind::TaskCheckTimed {
+            key, duration_ms, ..
+        } => {
             format!("#{key} checks took {duration_ms} ms")
         }
         EventKind::TaskReworkSession {

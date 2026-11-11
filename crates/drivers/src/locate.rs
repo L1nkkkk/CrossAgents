@@ -1455,10 +1455,7 @@ mod tests {
         };
         std::fs::write(
             path,
-            format!(
-                "@echo off\r\necho run>>\"{}\"\r\n{answer}",
-                runs.display()
-            ),
+            format!("@echo off\r\necho run>>\"{}\"\r\n{answer}", runs.display()),
         )
         .unwrap();
     }
@@ -2402,7 +2399,11 @@ mod tests {
         for _ in 0..3 {
             assert!(!cli.status_in(&machine).await.probing);
         }
-        assert_eq!(run_count(&log), 1, "nothing was asked again within the window");
+        assert_eq!(
+            run_count(&log),
+            1,
+            "nothing was asked again within the window"
+        );
         // The person clicks "detect again": the failure is forgotten and the CLI is asked.
         cli.forget();
         assert!(cli.status_in(&machine).await.probing);
@@ -2416,7 +2417,9 @@ mod tests {
     #[test]
     fn a_forgotten_probe_does_not_clear_the_newer_flag() {
         let dir = tempfile::tempdir().unwrap();
-        let program = dir.path().join(if cfg!(windows) { "agent.cmd" } else { "agent" });
+        let program = dir
+            .path()
+            .join(if cfg!(windows) { "agent.cmd" } else { "agent" });
         touch(&program);
         let locator: Locator = toml::from_str(r#"commands = ["agent"]"#).unwrap();
         let cli = Cli::new(Vec::new(), locator, Install::default());

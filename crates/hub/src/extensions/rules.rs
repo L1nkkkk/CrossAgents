@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::stream_rules::{parse, Rule, RuleSource};
+use crate::stream_rules::{Rule, RuleSource, parse};
 
 /// A rule file's size limit: a rule is a few lines of guidance, not a document.
 const RULE_LIMIT: u64 = 64 * 1024;
@@ -63,15 +63,16 @@ impl RuleSource for ExtensionRuleFiles {
 /// extension's name, so two extensions can ship the same rule name.
 fn read_rule(dir: &Path, extension: &str, file: &str) -> Result<Rule, String> {
     let path = dir.join(file);
-    let meta = std::fs::metadata(&path).map_err(|err| format!("cannot read the rule file: {err}"))?;
+    let meta =
+        std::fs::metadata(&path).map_err(|err| format!("cannot read the rule file: {err}"))?;
     if !meta.is_file() {
         return Err("not a regular file".into());
     }
     if meta.len() > RULE_LIMIT {
         return Err(format!("larger than {RULE_LIMIT} bytes"));
     }
-    let text =
-        std::fs::read_to_string(&path).map_err(|err| format!("cannot read the rule file: {err}"))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("cannot read the rule file: {err}"))?;
     let stem = Path::new(file)
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -140,10 +141,7 @@ mod tests {
         let home = home(
             "standup",
             false,
-            &[(
-                "rules/one.md",
-                "---\nmatch: sleeping\n---\nPoll instead.\n",
-            )],
+            &[("rules/one.md", "---\nmatch: sleeping\n---\nPoll instead.\n")],
         );
         assert!(
             ExtensionRuleFiles::new(home.path())

@@ -151,6 +151,7 @@ impl Orchestrator {
         let mut config = serde_json::Map::new();
         config.insert(SPAWNED_BY.into(), json!(run.id));
         let agent = Agent {
+            node: None,
             id: AgentId::new(),
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,
@@ -312,6 +313,7 @@ impl Orchestrator {
             config.insert("account".into(), account.clone());
         }
         let agent = Agent {
+            node: None,
             id: AgentId::new(),
             name: a.name.unwrap_or_default(),
             name_source: crossagents_core::NameSource::Chosen,

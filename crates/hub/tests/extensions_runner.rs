@@ -105,6 +105,7 @@ fn approve(registry: &Registry, name: &str) -> String {
 
 fn agent(name: &str) -> Agent {
     Agent {
+        node: None,
         id: AgentId::new(),
         name_source: NameSource::Chosen,
         topic: None,
@@ -1305,10 +1306,10 @@ async fn extensions_http_stopping_the_hub_ends_a_tool_a_request_is_waiting_for()
     assert!(stopping.elapsed() < Duration::from_secs(20));
     assert_eq!(runner.live_tokens(), 0);
     // The request got an answer (an error), and the tool's tree is gone.
-    if let Ok(Ok(resp)) = tokio::time::timeout(Duration::from_secs(5), waiting).await {
-        if let Ok(resp) = resp {
-            assert!(!resp.status().is_success());
-        }
+    if let Ok(Ok(resp)) = tokio::time::timeout(Duration::from_secs(5), waiting).await
+        && let Ok(resp) = resp
+    {
+        assert!(!resp.status().is_success());
     }
     let size = fs::metadata(&beat).unwrap().len();
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -1602,11 +1603,13 @@ curl -s -o /dev/null -X POST -H "Authorization: Bearer $CROSSAGENTS_TOKEN" -H 'C
     // going, one run took about 60 s to trip the breaker. 120 s is the cap for that case. It
     // only bounds a failure, since the wait returns as soon as the line is written.
     until_within(Duration::from_secs(120), "the breaker to trip", || {
-        fs::read_to_string(&log_path)
-            .is_ok_and(|log| log.contains("circuit breaker"))
+        fs::read_to_string(&log_path).is_ok_and(|log| log.contains("circuit breaker"))
     })
     .await;
-    until("all admitted hooks to finish", || hub.extension_runner.live_tokens() == 0).await;
+    until("all admitted hooks to finish", || {
+        hub.extension_runner.live_tokens() == 0
+    })
+    .await;
     let capped = lines(&starts);
     assert!(capped >= 2, "the loop never ran: {capped} starts");
     assert!(capped <= 5, "the breaker let {capped} hooks start");

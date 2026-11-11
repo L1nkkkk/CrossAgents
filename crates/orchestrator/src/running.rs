@@ -334,13 +334,19 @@ mod tests {
         let now = Utc::now();
         let mut activity = AgentActivity::default();
         let mut call = event(EventKind::AgentToolCall {
-            id: agent, tool_call_id: "edit".into(), title: "edit".into(),
-            kind: Some("edit".into()), status: ToolStatus::InProgress,
+            id: agent,
+            tool_call_id: "edit".into(),
+            title: "edit".into(),
+            kind: Some("edit".into()),
+            status: ToolStatus::InProgress,
         });
         call.ts = now - Duration::hours(3);
         activity.push(&call);
         let mut update = event(EventKind::AgentToolCallUpdated {
-            id: agent, tool_call_id: "edit".into(), title: None, status: Some(ToolStatus::InProgress),
+            id: agent,
+            tool_call_id: "edit".into(),
+            title: None,
+            status: Some(ToolStatus::InProgress),
         });
         update.ts = now;
         activity.push(&update);

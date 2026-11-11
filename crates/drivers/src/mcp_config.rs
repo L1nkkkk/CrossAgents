@@ -182,7 +182,10 @@ mod tests {
     #[test]
     fn codebuddy_is_left_to_load_its_own_file() {
         let dir = tempfile::tempdir().unwrap();
-        let env = vec![("CODEBUDDY_CONFIG_DIR".to_owned(), dir.path().display().to_string())];
+        let env = vec![(
+            "CODEBUDDY_CONFIG_DIR".to_owned(),
+            dir.path().display().to_string(),
+        )];
         std::fs::write(
             dir.path().join("mcp.json"),
             r#"{"mcpServers":{"playwright":{"type":"stdio","command":"npx"}}}"#,
@@ -219,7 +222,10 @@ mod tests {
         assert!(codebuddy.ends_with(".codebuddy/mcp.json"), "{codebuddy:?}");
         // The account's directory wins, whichever case the variable is written in.
         let dir = tempfile::tempdir().unwrap();
-        let env = vec![("claude_config_dir".to_owned(), dir.path().display().to_string())];
+        let env = vec![(
+            "claude_config_dir".to_owned(),
+            dir.path().display().to_string(),
+        )];
         assert_eq!(
             user_config(Flavor::Claude, &env).unwrap(),
             dir.path().join(".claude.json")

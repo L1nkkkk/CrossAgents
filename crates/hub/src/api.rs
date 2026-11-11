@@ -917,6 +917,7 @@ async fn create_agent(
         .map(|t| t.trim().chars().take(120).collect::<String>())
         .filter(|t| !t.is_empty());
     let agent = Agent {
+        node: None,
         id,
         name_source,
         topic,
@@ -1795,12 +1796,9 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
             let verified = config.is_some_and(|config| {
                 !config.verified.is_empty() && !config.unverified(Some(version))
             });
-            state.cli_runs.standing(
-                name,
-                &located.path.display().to_string(),
-                version,
-                verified,
-            )
+            state
+                .cli_runs
+                .standing(name, &located.path.display().to_string(), version, verified)
         });
     let self_checking = state.self_check.running(name).await;
     let cli = status.map(|status| CliInfo {
@@ -1926,7 +1924,10 @@ async fn self_check_plugin(
     // The cheapest model it offers here, else whatever the CLI picks by itself.
     let model = state
         .models
-        .filter(&name, crate::models::available(registry, &state.accounts, &name).await)
+        .filter(
+            &name,
+            crate::models::available(registry, &state.accounts, &name).await,
+        )
         .into_iter()
         .find(|model| model.contains("haiku") || model.contains("mini"));
     let started = state
@@ -3759,155 +3760,6 @@ async fn cancel_extension_call(
         .map(Json)
         .ok_or_else(|| no_such_call(&id))
 }
-#[cfg(test)]
-mod candidate_policy_tests {
-    use chrono::Utc;
-    use crossagents_core::{
-        Agent, AgentId, AgentStatus, ApprovalPolicy, Role, Run, RunConfig, RunId, RunPolicy,
-        RunStatus,
-    };
-
-    #[tokio::test]
-    async fn conflicting_plans_without_run_query_return_candidates() {
-        let home = tempfile::tempdir().unwrap();
-        let repo = home.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        let hub = crate::start(crate::HubConfig::new(crate::Paths::new(home.path()), 0))
-            .await
-            .unwrap();
-        let now = Utc::now();
-        let agent = Agent {
-            id: AgentId::new(),
-            name: "Cursor".into(),
-            name_source: Default::default(),
-            plugin: "cursor".into(),
-            driver: None,
-            model: None,
-            role: Role::Worker,
-            home: repo.clone(),
-            cwd: repo.clone(),
-            config: serde_json::json!({}),
-            status: AgentStatus::Stopped,
-            created_at: now,
-            profile: Default::default(),
-            topic: None,
-            archived_at: None,
-        };
-        hub.bus.store().insert_agent(&agent).await.unwrap();
-        let mut run = Run {
-            origin_chat_id: None,
-            work_id: None,
-            continuation: None,
-            id: RunId::new(),
-            title: "plan".into(),
-            request: "work".into(),
-            planner: agent.id,
-            status: RunStatus::AwaitingApproval,
-            config: RunConfig {
-                worker: agent.id,
-                escalate: None,
-                reviewer: None,
-                auto_approve: false,
-                max_parallel: 1,
-                max_attempts: 1,
-                team: vec![agent.id],
-                policy: RunPolicy::default(),
-            },
-            repo: repo.clone(),
-            base_branch: "main".into(),
-            branch: "run/test".into(),
-            in_place: false,
-            mode: None,
-            note: None,
-            plan: Vec::new(),
-            lead_note: None,
-            landed: None,
-            summary: None,
-            checks: Vec::new(),
-            checks_state: None,
-            checks_snapshot: None,
-            created_at: now,
-            updated_at: now,
-        };
-        hub.bus.store().insert_run(&run).await.unwrap();
-        let guard_run = run.id;
-        run.id = RunId::new();
-        run.config.policy.approvals = ApprovalPolicy::Off;
-        hub.bus.store().insert_run(&run).await.unwrap();
-
-        let mut url =
-            reqwest::Url::parse(&format!("http://{}/v1/session-candidates", hub.addr)).unwrap();
-        url.query_pairs_mut()
-            .append_pair("repo", repo.to_str().unwrap());
-        let response = reqwest::Client::new()
-            .get(url)
-            .bearer_auth(&hub.token)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert!(body.get("error").is_none(), "{body}");
-        let candidates = body["sessions"].as_array().unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert!(candidates[0].get("unusable").is_none());
-        let client = reqwest::Client::new();
-        let settings = format!("http://{}/v1/agents/{}/settings", hub.addr, agent.id);
-        if cfg!(windows) {
-            let refused = client
-                .post(&settings)
-                .bearer_auth(&hub.token)
-                .json(&serde_json::json!({"permission":"guard"}))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
-            assert!(
-                refused
-                    .text()
-                    .await
-                    .unwrap()
-                    .contains("cannot ask before each action on Windows")
-            );
-        }
-        let set = client
-            .post(&settings)
-            .bearer_auth(&hub.token)
-            .json(&serde_json::json!({"permission":"bypass"}))
-            .send()
-            .await
-            .unwrap();
-        assert!(set.status().is_success());
-        let mut url =
-            reqwest::Url::parse(&format!("http://{}/v1/session-candidates", hub.addr)).unwrap();
-        url.query_pairs_mut()
-            .append_pair("repo", repo.to_str().unwrap())
-            .append_pair("run", &guard_run.to_string());
-        let body: serde_json::Value = client
-            .get(url)
-            .bearer_auth(&hub.token)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(body["sessions"][0]["unguarded"], true);
-        assert!(body["sessions"][0].get("unusable").is_none());
-        let body: serde_json::Value = client
-            .get(format!("http://{}/v1/agents?run={guard_run}", hub.addr))
-            .bearer_auth(&hub.token)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(body["agents"][0]["unguarded"], true);
-        hub.shutdown();
-        hub.wait().await.unwrap();
-    }
-}
 
 async fn list_devices(
     State(state): State<Arc<AppState>>,
@@ -4045,16 +3897,166 @@ async fn revoke_device(
         .await
         .map_err(|e| CoreError::Agent(format!("terminal task failed: {e}")))?;
     tracing::info!(device = %device.name, level = ?device.level, kind = ?device.kind, "device revoked");
-    if newly_revoked {
-        if let Err(error) = state
+    if newly_revoked
+        && let Err(error) = state
             .bus
             .publish(EventKind::DeviceRevoked {
                 device: device.clone(),
             })
             .await
-        {
-            tracing::error!(device = %device.name, %error, "failed to publish device revoked event");
-        }
+    {
+        tracing::error!(device = %device.name, %error, "failed to publish device revoked event");
     }
     Ok(Json(device))
+}
+
+#[cfg(test)]
+mod candidate_policy_tests {
+    use chrono::Utc;
+    use crossagents_core::{
+        Agent, AgentId, AgentStatus, ApprovalPolicy, Role, Run, RunConfig, RunId, RunPolicy,
+        RunStatus,
+    };
+
+    #[tokio::test]
+    async fn conflicting_plans_without_run_query_return_candidates() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let hub = crate::start(crate::HubConfig::new(crate::Paths::new(home.path()), 0))
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let agent = Agent {
+            node: None,
+            id: AgentId::new(),
+            name: "Cursor".into(),
+            name_source: Default::default(),
+            plugin: "cursor".into(),
+            driver: None,
+            model: None,
+            role: Role::Worker,
+            home: repo.clone(),
+            cwd: repo.clone(),
+            config: serde_json::json!({}),
+            status: AgentStatus::Stopped,
+            created_at: now,
+            profile: Default::default(),
+            topic: None,
+            archived_at: None,
+        };
+        hub.bus.store().insert_agent(&agent).await.unwrap();
+        let mut run = Run {
+            origin_chat_id: None,
+            work_id: None,
+            continuation: None,
+            id: RunId::new(),
+            title: "plan".into(),
+            request: "work".into(),
+            planner: agent.id,
+            status: RunStatus::AwaitingApproval,
+            config: RunConfig {
+                worker: agent.id,
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: 1,
+                max_attempts: 1,
+                team: vec![agent.id],
+                policy: RunPolicy::default(),
+            },
+            repo: repo.clone(),
+            base_branch: "main".into(),
+            branch: "run/test".into(),
+            in_place: false,
+            mode: None,
+            note: None,
+            plan: Vec::new(),
+            lead_note: None,
+            landed: None,
+            summary: None,
+            checks: Vec::new(),
+            checks_state: None,
+            checks_snapshot: None,
+            created_at: now,
+            updated_at: now,
+        };
+        hub.bus.store().insert_run(&run).await.unwrap();
+        let guard_run = run.id;
+        run.id = RunId::new();
+        run.config.policy.approvals = ApprovalPolicy::Off;
+        hub.bus.store().insert_run(&run).await.unwrap();
+
+        let mut url =
+            reqwest::Url::parse(&format!("http://{}/v1/session-candidates", hub.addr)).unwrap();
+        url.query_pairs_mut()
+            .append_pair("repo", repo.to_str().unwrap());
+        let response = reqwest::Client::new()
+            .get(url)
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body.get("error").is_none(), "{body}");
+        let candidates = body["sessions"].as_array().unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].get("unusable").is_none());
+        let client = reqwest::Client::new();
+        let settings = format!("http://{}/v1/agents/{}/settings", hub.addr, agent.id);
+        if cfg!(windows) {
+            let refused = client
+                .post(&settings)
+                .bearer_auth(&hub.token)
+                .json(&serde_json::json!({"permission":"guard"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert!(
+                refused
+                    .text()
+                    .await
+                    .unwrap()
+                    .contains("cannot ask before each action on Windows")
+            );
+        }
+        let set = client
+            .post(&settings)
+            .bearer_auth(&hub.token)
+            .json(&serde_json::json!({"permission":"bypass"}))
+            .send()
+            .await
+            .unwrap();
+        assert!(set.status().is_success());
+        let mut url =
+            reqwest::Url::parse(&format!("http://{}/v1/session-candidates", hub.addr)).unwrap();
+        url.query_pairs_mut()
+            .append_pair("repo", repo.to_str().unwrap())
+            .append_pair("run", &guard_run.to_string());
+        let body: serde_json::Value = client
+            .get(url)
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["sessions"][0]["unguarded"], true);
+        assert!(body["sessions"][0].get("unusable").is_none());
+        let body: serde_json::Value = client
+            .get(format!("http://{}/v1/agents?run={guard_run}", hub.addr))
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["agents"][0]["unguarded"], true);
+        hub.shutdown();
+        hub.wait().await.unwrap();
+    }
 }

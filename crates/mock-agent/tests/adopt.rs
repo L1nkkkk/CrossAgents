@@ -14,7 +14,7 @@ use crossagents_hub::{HubConfig, Paths};
 use crossagents_plugins::PluginConfig;
 use serde_json::{Value, json};
 
-fn config(paths: &Paths) -> HubConfig {
+fn config(paths: &Paths, builtin_node: bool) -> HubConfig {
     let mut config = HubConfig::new(paths.clone(), 0);
     config.plugins = mock_plugins();
     config.plugins.insert(
@@ -43,6 +43,8 @@ fn config(paths: &Paths) -> HubConfig {
     }
     // No collaboration tools: nothing here calls them.
     config.mcp_command = Some(Vec::new());
+    // The hub runs its own node or drives the drivers directly (B1.2); each scenario runs both ways.
+    config.builtin_node = builtin_node;
     config.runtime_host = Some(vec![
         crossagents_bin().display().to_string(),
         "runtime-host".into(),
@@ -50,10 +52,12 @@ fn config(paths: &Paths) -> HubConfig {
     config
 }
 
-async fn start(home: tempfile::TempDir) -> TestHub {
+async fn start(home: tempfile::TempDir, builtin_node: bool) -> TestHub {
     let paths = Paths::new(home.path());
     let permit = hub_permit().await;
-    let hub = crossagents_hub::start(config(&paths)).await.unwrap();
+    let hub = crossagents_hub::start(config(&paths, builtin_node))
+        .await
+        .unwrap();
     let base = format!("http://{}", hub.addr);
     TestHub {
         hub,
@@ -113,12 +117,27 @@ async fn add(t: &TestHub, name: &str, plugin: &str, model: &str) {
 /// Runtime host settings are process-wide: these tests take turns.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+// Each scenario runs with the hub's built-in node on (the default) and off (B1.2): the
+// same takeover must work either way.
+
 #[tokio::test]
 async fn a_restarted_hub_takes_over_running_agents() {
     takes_over(
         "codex",
         "mock-codex",
         "echo(model=mock-codex,effort=medium): [sleep 6000] long",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_restarted_hub_takes_over_running_agents_without_the_built_in_node() {
+    takes_over(
+        "codex",
+        "mock-codex",
+        "echo(model=mock-codex,effort=medium): [sleep 6000] long",
+        false,
     )
     .await;
 }
@@ -129,6 +148,18 @@ async fn a_restarted_hub_takes_over_claude_code() {
         "claude",
         "mock-claude",
         "echo(model=mock-claude): [sleep 6000] long",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_restarted_hub_takes_over_claude_code_without_the_built_in_node() {
+    takes_over(
+        "claude",
+        "mock-claude",
+        "echo(model=mock-claude): [sleep 6000] long",
+        false,
     )
     .await;
 }
@@ -139,15 +170,37 @@ async fn a_restarted_hub_takes_over_codebuddy() {
         "codebuddy",
         "mock-codebuddy",
         "echo(model=mock-codebuddy): [sleep 6000] long",
+        true,
     )
     .await;
 }
 
+#[tokio::test]
+async fn a_restarted_hub_takes_over_codebuddy_without_the_built_in_node() {
+    takes_over(
+        "codebuddy",
+        "mock-codebuddy",
+        "echo(model=mock-codebuddy): [sleep 6000] long",
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_turn_whose_host_died_is_interrupted() {
+    host_died_is_interrupted(true).await;
+}
+
+#[tokio::test]
+async fn a_turn_whose_host_died_is_interrupted_without_the_built_in_node() {
+    host_died_is_interrupted(false).await;
+}
+
 /// A hub stops while the agent's long turn runs; the next hub takes the process over, the
 /// turn ends there with the answer `echo`, and the same process serves the next turn.
-async fn takes_over(plugin: &str, model: &str, echo: &str) {
+async fn takes_over(plugin: &str, model: &str, echo: &str, builtin_node: bool) {
     let _serial = SERIAL.lock().await;
-    let t = start(tempfile::tempdir().unwrap()).await;
+    let t = start(tempfile::tempdir().unwrap(), builtin_node).await;
     let name = "worker";
     add(&t, name, plugin, model).await;
 
@@ -176,7 +229,7 @@ async fn takes_over(plugin: &str, model: &str, echo: &str) {
     );
 
     // The next hub takes it over; the long turn ends there.
-    let t = start(home).await;
+    let t = start(home, builtin_node).await;
     let agent: Value = t
         .get(&format!("/v1/agents/{name}"))
         .await
@@ -240,10 +293,9 @@ async fn takes_over(plugin: &str, model: &str, echo: &str) {
     }
 }
 
-#[tokio::test]
-async fn a_turn_whose_host_died_is_interrupted() {
+async fn host_died_is_interrupted(builtin_node: bool) {
     let _serial = SERIAL.lock().await;
-    let t = start(tempfile::tempdir().unwrap()).await;
+    let t = start(tempfile::tempdir().unwrap(), builtin_node).await;
     add_codex(&t).await;
     let mut w = t.watch().await;
     let sent = t.send("cx", "[slow]").await;
@@ -265,7 +317,7 @@ async fn a_turn_whose_host_died_is_interrupted() {
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let t = start(home).await;
+    let t = start(home, builtin_node).await;
     let events = history(&t).await;
     let completed = events.iter().find_map(|e| match &e.kind {
         EventKind::AgentTurnCompleted {

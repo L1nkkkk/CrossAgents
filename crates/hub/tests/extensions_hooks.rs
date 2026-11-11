@@ -33,7 +33,9 @@ fn capture_script(version: &str) -> String {
     }
     #[cfg(not(windows))]
     {
-        format!("cat > \"$CROSSAGENTS_EXTENSION_DATA/{version}.tmp\"\nmv \"$CROSSAGENTS_EXTENSION_DATA/{version}.tmp\" \"$CROSSAGENTS_EXTENSION_DATA/{version}\"\n")
+        format!(
+            "cat > \"$CROSSAGENTS_EXTENSION_DATA/{version}.tmp\"\nmv \"$CROSSAGENTS_EXTENSION_DATA/{version}.tmp\" \"$CROSSAGENTS_EXTENSION_DATA/{version}\"\n"
+        )
     }
 }
 
