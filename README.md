@@ -15,6 +15,17 @@ CrossAgents 是一个分层的多 agent 编码编排器：**强模型（Opus / G
 - 可选的停滞恢复与持续推进：[docs/CONTINUATION.md](docs/CONTINUATION.md)
 - Mac 安装（不带 hub，连另一台电脑上的 hub）：[docs/INSTALL-MAC.md](docs/INSTALL-MAC.md)
 
+## 下载
+
+安装包在 [CrossAgents-releases](https://github.com/L1nkkkk/CrossAgents-releases/releases/latest)：
+
+| 文件 | 说明 |
+|---|---|
+| `CrossAgents-Setup-<版本>.exe` | Windows，带 hub，装好后自动更新 |
+| `CrossAgents-<版本>-arm64.dmg` / `.zip` | Apple 芯片的 Mac，不带 hub、ad-hoc 签名、不自动更新，连另一台电脑上的 hub（[说明](docs/INSTALL-MAC.md)） |
+
+Intel Mac 和 Linux 没有现成的包，按下面从源码构建。
+
 ## 准备
 
 | 需要 | 用途 |
@@ -107,7 +118,7 @@ npm run preview:mock       # 不起 hub，在浏览器里用假数据看界面�
 npm run electron:build     # 产出 release/win-unpacked/CrossAgents.exe（免安装，未签名）
 ```
 
-Mac 没有现成的安装包：在 Mac 上用 `npm run electron:build:mac` 打 dmg / zip（不带 hub、ad-hoc 签名、不能自动更新），装好后连另一台电脑上的 hub，步骤见 [Mac 安装说明](docs/INSTALL-MAC.md)。
+Apple 芯片的 Mac 包由 [`.github/workflows/mac.yml`](.github/workflows/mac.yml) 在推 tag 时自动打好、传到发布页；Intel Mac 在本机用 `npm run electron:build:mac` 打 dmg / zip（不带 hub、ad-hoc 签名、不能自动更新），装好后连另一台电脑上的 hub，步骤见 [Mac 安装说明](docs/INSTALL-MAC.md)。
 
 令牌只在 Electron 主进程里使用，不会进入页面。详见 [V2 任务书](docs/tasks/V2-GUI.md)（外壳与安全）和 [V3 任务书](docs/tasks/V3-GUI.md)（对话式界面）；
 [V6 任务书](docs/tasks/V6-GUI.md)：mock 预览、视觉层次、按轮 diff 与工具列。
@@ -218,3 +229,10 @@ node scripts/release.mjs             # 补丁位 +1，也可以写死 node scrip
 
 对齐 `Cargo.toml` 与 `apps/gui/package.json` 的版本号、提交、打 tag、打包发到
 `CrossAgents-releases`，发布成功之后才 push，最后核对安装包和 `latest.yml` 在不在。
+tag 推上去后，GitHub Actions 的 `mac` 工作流在 macOS runner 上打 arm64 的 dmg / zip，传到同一个 release
+（要在仓库 secrets 里配 `RELEASES_TOKEN`：只对 `CrossAgents-releases` 有 Contents 读写权限的 fine-grained token）。
+漏了某个版本，在 Actions 里手动运行 `mac`、填上 tag 即可补传。
+
+## 许可证
+
+[Apache License 2.0](LICENSE)。版权声明见 [NOTICE](NOTICE)。

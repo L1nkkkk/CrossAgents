@@ -4,8 +4,8 @@ Mac 上装的是一个**不带 hub** 的桌面 GUI：hub 和 agent 跑在另一�
 
 先说清楚几点：
 
-- 发布页（[CrossAgents-releases](https://github.com/L1nkkkk/CrossAgents-releases/releases)）只有 Windows 安装包。Mac 版要在 Mac 上自己打包。
-- 包是 ad-hoc 签名（没有 Apple 开发者证书），不能自动更新。更新就是重新打包、替换，见第 5 节。
+- 发布页（[CrossAgents-releases](https://github.com/L1nkkkk/CrossAgents-releases/releases)）有 Apple 芯片的 Mac 包（`CrossAgents-<版本>-arm64.dmg` / `.zip`，推 tag 时由 GitHub Actions 打）。Apple 芯片的 Mac 直接下载，跳过第 1、2 节；Intel Mac 没有现成的包，按第 1、2 节自己打。
+- 包是 ad-hoc 签名（没有 Apple 开发者证书），不能自动更新。更新就是重新下载（或重新打包）、替换，见第 5 节。
 - 包里没有 hub，也不连这台 Mac 上另外运行的 hub，只能连另一台电脑上的 hub。
 - 标了「要实测」的地方还没在 Mac 上跑过；实际结果不一样的，记下来改这份文档。
 
@@ -15,7 +15,7 @@ Mac 上：
 
 | 需要 | 说明 |
 |---|---|
-| git | `xcode-select --install` 会装上。主仓库是私有的，clone 前先用有权限的账号登录 GitHub（例如 `gh auth login`） |
+| git | `xcode-select --install` 会装上 |
 | Node.js 22.12 或更新（带 npm） | Vite 8 的要求；20.x 要 20.19 以上。Windows 那台用的是 24 |
 | Rust（rustup） | `curl https://sh.rustup.rs -sSf | sh`。打包脚本先 `cargo build --release -p crossagents-link`：包里要带打洞程序 crossagents-link（4.0）。不编 hub |
 | 一把 SSH 密钥 | 只有走 SSH（4.1 起）才要；没有就 `ssh-keygen -t ed25519` |
@@ -163,7 +163,7 @@ Mac 和中心不在一个网络里时，两台都装 Tailscale（Mac 装 Tailsca
 
 ## 5. 更新
 
-Mac 版不能自动更新（Squirrel.Mac 不接受 ad-hoc 签名的包），设置里的更新卡片也是这么写的，托盘里没有「检查更新」。中心升级以后，Mac 上重新打包：
+Mac 版不能自动更新（Squirrel.Mac 不接受 ad-hoc 签名的包），设置里的更新卡片也是这么写的，托盘里没有「检查更新」。中心升级以后，Apple 芯片的 Mac 到发布页下载同版本的 arm64 包；自己打包的，重新打包：
 
 ```sh
 cd CrossAgents

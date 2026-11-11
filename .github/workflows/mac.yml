@@ -1,0 +1,98 @@
+# 推 vX.Y.Z tag 时在 macOS runner 上打 Apple 芯片（arm64）的 dmg / zip，传到 CrossAgents-releases 的同名 release。
+#
+# Windows 安装包仍由本机 `node scripts/release.mjs` 发：它先在 CrossAgents-releases 建好 release、传完安装包，
+# 最后才推 tag，所以这里触发时 release 已经在了。Mac 包不带 hub、ad-hoc 签名、不自动更新（docs/INSTALL-MAC.md）。
+#
+# 传到另一个仓库要一个 secret `RELEASES_TOKEN`：fine-grained PAT，只给 L1nkkkk/CrossAgents-releases 的 Contents: Read and write。
+# 没配这个 secret 时只打包，产物留在本次运行的 Artifacts 里。
+#
+# 只出 arm64：包里的 crossagents-link 按 runner 本机架构编，x64 的包里那份跑不起来。Intel Mac 仍按文档自己打包。
+
+name: mac
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要补 Mac 包的 tag，例如 v0.2.20"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      RELEASES_REPO: L1nkkkk/CrossAgents-releases
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Rust（按 rust-toolchain.toml）
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/gui/package-lock.json
+
+      - name: 版本号与 tag 一致
+        run: |
+          v=$(node -p "require('./apps/gui/package.json').version")
+          test "v$v" = "$TAG" || { echo "apps/gui/package.json 是 $v，tag 是 $TAG"; exit 1; }
+
+      - run: npm --prefix apps/gui ci
+
+      - name: 打包（arm64）
+        working-directory: apps/gui
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          cargo build --release -p crossagents-link
+          node scripts/check-version.mjs --without-hub
+          npm run build
+          npm run electron:compile
+          npx electron-builder --mac dmg:arm64 zip:arm64 --publish never
+          ls -la release
+
+      - name: 包里有 crossagents-link
+        working-directory: apps/gui/release
+        run: |
+          bin=mac-arm64/CrossAgents.app/Contents/Resources/bin/crossagents-link
+          test -x "$bin" || { echo "缺 $bin"; exit 1; }
+          "$bin" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrossAgents-${{ env.TAG }}-mac-arm64
+          path: |
+            apps/gui/release/*.dmg
+            apps/gui/release/*.zip
+          if-no-files-found: error
+
+      - name: 传到 CrossAgents-releases
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::没有 RELEASES_TOKEN，只留在 Artifacts，没传到 $RELEASES_REPO"
+            exit 0
+          fi
+          gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1 \
+            || { echo "$RELEASES_REPO 还没有 $TAG：先跑 node scripts/release.mjs"; exit 1; }
+          gh release upload "$TAG" apps/gui/release/*.dmg apps/gui/release/*.zip --repo "$RELEASES_REPO" --clobber
