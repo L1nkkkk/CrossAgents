@@ -22,7 +22,7 @@ CrossAgents 是一个分层的多 agent 编码编排器：**强模型（Opus / G
 | 文件 | 说明 |
 |---|---|
 | `CrossAgents-Setup-<版本>.exe` | Windows，带 hub，装好后自动更新 |
-| `CrossAgents-<版本>-arm64.dmg` / `.zip` | Apple 芯片的 Mac，不带 hub、ad-hoc 签名、不自动更新，连另一台电脑上的 hub（[说明](docs/INSTALL-MAC.md)） |
+| `CrossAgents-<版本>-arm64.dmg` / `.zip` | Apple 芯片的 Mac，不带 hub、ad-hoc 签名，连另一台电脑上的 hub（[说明](docs/INSTALL-MAC.md)）。GUI 自己不会更新，用 [`scripts/mac-update.sh`](scripts/mac-update.sh) 更新，`--install-agent` 让它每天自动查 |
 
 Intel Mac 和 Linux 没有现成的包，按下面从源码构建。
 

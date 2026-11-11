@@ -96,3 +96,20 @@ jobs:
           gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1 \
             || { echo "$RELEASES_REPO 还没有 $TAG：先跑 node scripts/release.mjs"; exit 1; }
           gh release upload "$TAG" apps/gui/release/*.dmg apps/gui/release/*.zip --repo "$RELEASES_REPO" --clobber
+          echo "UPLOADED=yes" >> "$GITHUB_ENV"
+
+      # 端到端测一遍 scripts/mac-update.sh：在这台干净的 runner 上从发布页装刚传上去的版本。
+      # 补旧 tag 时最新版不是它，跳过。
+      - name: 用 mac-update.sh 从发布页装一遍
+        if: env.UPLOADED == 'yes'
+        run: |
+          latest=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$RELEASES_REPO/releases/latest")
+          if [ "${latest##*/}" != "$TAG" ]; then echo "最新版是 ${latest##*/}，不是 $TAG，跳过"; exit 0; fi
+          # 用 main 上的脚本：补旧 tag 时 checkout 出来的版本里可能还没有它。
+          s="$RUNNER_TEMP/mac-update.sh"
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/mac-update.sh" -o "$s"
+          bash "$s" --check
+          bash "$s"
+          test "$(defaults read /Applications/CrossAgents.app/Contents/Info CFBundleShortVersionString)" = "${TAG#v}"
+          bash "$s" | tee "$RUNNER_TEMP/again.log"
+          grep -q "已是最新" "$RUNNER_TEMP/again.log"

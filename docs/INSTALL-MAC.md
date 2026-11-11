@@ -163,6 +163,21 @@ Mac 和中心不在一个网络里时，两台都装 Tailscale（Mac 装 Tailsca
 
 ## 5. 更新
 
+**Apple 芯片的 Mac：用脚本。** 不用 clone 仓库：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/L1nkkkk/CrossAgents/main/scripts/mac-update.sh | bash                    # 现在更新
+curl -fsSL https://raw.githubusercontent.com/L1nkkkk/CrossAgents/main/scripts/mac-update.sh | bash -s -- --install-agent  # 以后自动更新
+```
+
+它查发布页的最新版，比 `/Applications/CrossAgents.app` 新就下载 arm64 的 zip，核对版本、签名和包里的 crossagents-link，
+退出正在运行的 CrossAgents、替换、去掉隔离标记，原来开着就重新打开。`--check` 只看不装。
+`--install-agent` 装一个 LaunchAgent，登录时和每天 9:00 各查一次；这时 CrossAgents 开着就跳过，不会在你用的时候把它关掉。
+日志在 `~/Library/Logs/CrossAgents-updater.log`，`--uninstall-agent` 卸掉。国内网络先设 `HTTPS_PROXY`，装 LaunchAgent 时会一起记下。
+发版时 Mac 包比 Windows 包晚几分钟（GitHub Actions 在打），这期间脚本会说「还没有 Mac 包」，下次再试。
+
+**手动，或者 Intel Mac：**
+
 Mac 版不能自动更新（Squirrel.Mac 不接受 ad-hoc 签名的包），设置里的更新卡片也是这么写的，托盘里没有「检查更新」。中心升级以后，Apple 芯片的 Mac 到发布页下载同版本的 arm64 包；自己打包的，重新打包：
 
 ```sh
