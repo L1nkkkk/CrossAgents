@@ -183,7 +183,13 @@ async fn a_renewed_session_is_the_one_resumed_and_the_old_one_stays_recorded() {
     let after = t.agent("Rex").await;
     assert_eq!(after.id, rex.id);
     assert_eq!(after.name, "Rex");
-    let events = t.hub.bus.store().agent_events(rex.id, 0, 10_000).await.unwrap();
+    let events = t
+        .hub
+        .bus
+        .store()
+        .agent_events(rex.id, 0, 10_000)
+        .await
+        .unwrap();
     let started: Vec<String> = events
         .into_iter()
         .filter_map(|event| match event.kind {
@@ -193,7 +199,13 @@ async fn a_renewed_session_is_the_one_resumed_and_the_old_one_stays_recorded() {
         .collect();
     assert!(started.contains(&old), "{started:?}");
     assert!(started.contains(&new), "{started:?}");
-    let warnings = t.hub.bus.store().agent_events(rex.id, 0, 10_000).await.unwrap();
+    let warnings = t
+        .hub
+        .bus
+        .store()
+        .agent_events(rex.id, 0, 10_000)
+        .await
+        .unwrap();
     assert!(
         warnings.iter().all(|event| !matches!(
             &event.kind,

@@ -489,8 +489,7 @@ mod tests {
     fn config_can_replace_the_version_range() {
         let over: PluginConfig =
             toml::from_str("min_version = \"3.0.0\"\nverified = [\"3.0\"]").unwrap();
-        let registry =
-            PluginRegistry::with_config(&BTreeMap::from([("claude".to_owned(), over)]));
+        let registry = PluginRegistry::with_config(&BTreeMap::from([("claude".to_owned(), over)]));
         let claude = registry.config("claude").unwrap();
         assert_eq!(claude.min_version.as_deref(), Some("3.0.0"));
         assert_eq!(claude.verified, ["3.0"]);

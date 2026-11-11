@@ -1795,12 +1795,9 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
             let verified = config.is_some_and(|config| {
                 !config.verified.is_empty() && !config.unverified(Some(version))
             });
-            state.cli_runs.standing(
-                name,
-                &located.path.display().to_string(),
-                version,
-                verified,
-            )
+            state
+                .cli_runs
+                .standing(name, &located.path.display().to_string(), version, verified)
         });
     let self_checking = state.self_check.running(name).await;
     let cli = status.map(|status| CliInfo {
@@ -1926,7 +1923,10 @@ async fn self_check_plugin(
     // The cheapest model it offers here, else whatever the CLI picks by itself.
     let model = state
         .models
-        .filter(&name, crate::models::available(registry, &state.accounts, &name).await)
+        .filter(
+            &name,
+            crate::models::available(registry, &state.accounts, &name).await,
+        )
         .into_iter()
         .find(|model| model.contains("haiku") || model.contains("mini"));
     let started = state

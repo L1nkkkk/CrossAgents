@@ -133,7 +133,10 @@ impl TaskLedger {
 
     /// Makes `agent` the task's reviewer for the review it is in.
     fn set_reviewer(&mut self, task: TaskId, agent: AgentId) {
-        let old = std::mem::replace(&mut self.hands.entry(task).or_default().reviewer, Some(agent));
+        let old = std::mem::replace(
+            &mut self.hands.entry(task).or_default().reviewer,
+            Some(agent),
+        );
         if old == Some(agent) {
             return;
         }
@@ -195,7 +198,11 @@ impl TaskLedger {
                 state.model.clone_from(&agent.model);
             }
             EventKind::AgentUpdated { agent } => {
-                self.agents.entry(agent.id).or_default().model.clone_from(&agent.model);
+                self.agents
+                    .entry(agent.id)
+                    .or_default()
+                    .model
+                    .clone_from(&agent.model);
             }
             EventKind::AgentModelChanged { id, model, .. } => {
                 self.agents.entry(*id).or_default().model.clone_from(model);
@@ -291,7 +298,13 @@ impl TaskLedger {
         }
     }
 
-    fn usage(&mut self, agent: AgentId, cost: Option<f64>, tokens: Option<&TokenUsage>, at: DateTime<Utc>) {
+    fn usage(
+        &mut self,
+        agent: AgentId,
+        cost: Option<f64>,
+        tokens: Option<&TokenUsage>,
+        at: DateTime<Utc>,
+    ) {
         let Some(state) = self.agents.get_mut(&agent) else {
             return;
         };
@@ -307,7 +320,9 @@ impl TaskLedger {
             let previous = std::mem::take(&mut state.tokens);
             let input = counts.input.saturating_sub(previous.input);
             cached = counts.cached_input.saturating_sub(previous.cached_input);
-            write = counts.cache_write_input.saturating_sub(previous.cache_write_input);
+            write = counts
+                .cache_write_input
+                .saturating_sub(previous.cache_write_input);
             output = counts.output.saturating_sub(previous.output);
             total = counts.total.saturating_sub(previous.total);
             fresh = input.saturating_sub(cached).saturating_sub(write);
@@ -415,9 +430,13 @@ impl TaskLedger {
         };
         let usd = (spend.saw_usage && spend.unpriced.is_empty()).then_some(spend.estimated_usd);
         check("usd", usd, caps.max_usd);
-        check("tokens", spend.saw_usage.then_some(spend.tokens as f64), caps.max_tokens.map(|m| m as f64));
-        let requests = (spend.requests_seen && !spend.requests_missing)
-            .then_some(spend.requests as f64);
+        check(
+            "tokens",
+            spend.saw_usage.then_some(spend.tokens as f64),
+            caps.max_tokens.map(|m| m as f64),
+        );
+        let requests =
+            (spend.requests_seen && !spend.requests_missing).then_some(spend.requests as f64);
         check("requests", requests, caps.max_requests.map(|m| m as f64));
         check(
             "minutes",
@@ -551,7 +570,10 @@ mod tests {
 
     impl Log {
         fn new() -> Self {
-            Self { seq: 0, events: Vec::new() }
+            Self {
+                seq: 0,
+                events: Vec::new(),
+            }
         }
         fn push(&mut self, minute: i64, kind: EventKind) {
             self.seq += 1;
@@ -585,18 +607,49 @@ mod tests {
         let (run, task) = (RunId::new(), TaskId::new());
         let (first, second) = (agent("priced"), agent("priced"));
         let mut log = Log::new();
-        log.push(0, EventKind::AgentCreated { agent: first.clone() });
-        log.push(0, EventKind::AgentCreated { agent: second.clone() });
+        log.push(
+            0,
+            EventKind::AgentCreated {
+                agent: first.clone(),
+            },
+        );
+        log.push(
+            0,
+            EventKind::AgentCreated {
+                agent: second.clone(),
+            },
+        );
         log.push(1, assign(run, task, first.id));
-        log.push(2, EventKind::AgentStatusChanged { id: first.id, from: AgentStatus::Stopped, to: AgentStatus::Starting });
+        log.push(
+            2,
+            EventKind::AgentStatusChanged {
+                id: first.id,
+                from: AgentStatus::Stopped,
+                to: AgentStatus::Starting,
+            },
+        );
         log.push(3, usage(first.id, Some(0.10), Some(counts(400, Some(2)))));
         log.push(4, usage(first.id, Some(0.25), Some(counts(1000, Some(5)))));
         // The first worker is replaced: the task's spend keeps adding up.
         log.push(5, assign(run, task, second.id));
-        log.push(6, EventKind::AgentStatusChanged { id: second.id, from: AgentStatus::Stopped, to: AgentStatus::Starting });
+        log.push(
+            6,
+            EventKind::AgentStatusChanged {
+                id: second.id,
+                from: AgentStatus::Stopped,
+                to: AgentStatus::Starting,
+            },
+        );
         log.push(7, usage(second.id, Some(0.05), Some(counts(200, Some(1)))));
         // The first worker's session restarts: its counts start from zero again.
-        log.push(8, EventKind::AgentStatusChanged { id: first.id, from: AgentStatus::Stopped, to: AgentStatus::Starting });
+        log.push(
+            8,
+            EventKind::AgentStatusChanged {
+                id: first.id,
+                from: AgentStatus::Stopped,
+                to: AgentStatus::Starting,
+            },
+        );
         log.push(9, usage(first.id, Some(0.03), Some(counts(100, None))));
 
         let ledger = {
@@ -612,7 +665,10 @@ mod tests {
         assert_eq!(spend.tokens, 1000 + 200 + 100);
         assert!((spend.reported_usd - (0.25 + 0.05 + 0.03)).abs() < 1e-9);
         assert_eq!(spend.requests, 5 + 1, "the restarted session reported none");
-        assert!(spend.requests_missing, "a session without counts makes the sum a lower bound");
+        assert!(
+            spend.requests_missing,
+            "a session without counts makes the sum a lower bound"
+        );
         assert_eq!(spend.agents.len(), 2);
         assert!(spend.unpriced.is_empty());
         assert!(spend.estimated_usd > 0.0, "priced tokens are estimated");
@@ -623,9 +679,17 @@ mod tests {
         let (run, task) = (RunId::new(), TaskId::new());
         let worker = agent("unlisted");
         let mut log = Log::new();
-        log.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        log.push(
+            0,
+            EventKind::AgentCreated {
+                agent: worker.clone(),
+            },
+        );
         log.push(1, assign(run, task, worker.id));
-        log.push(2, usage(worker.id, Some(99.0), Some(counts(5_000_000, Some(9)))));
+        log.push(
+            2,
+            usage(worker.id, Some(99.0), Some(counts(5_000_000, Some(9)))),
+        );
         let mut ledger = TaskLedger::new(prices());
         for event in &log.events {
             ledger.apply(event);
@@ -647,7 +711,12 @@ mod tests {
         let (run, task) = (RunId::new(), TaskId::new());
         let worker = agent("priced");
         let mut log = Log::new();
-        log.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        log.push(
+            0,
+            EventKind::AgentCreated {
+                agent: worker.clone(),
+            },
+        );
         log.push(1, assign(run, task, worker.id));
         log.push(2, usage(worker.id, None, Some(counts(100, None))));
         let mut ledger = TaskLedger::new(prices());
@@ -667,11 +736,31 @@ mod tests {
         let (run, task) = (RunId::new(), TaskId::new());
         let worker = agent("priced");
         let mut log = Log::new();
-        log.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        log.push(
+            0,
+            EventKind::AgentCreated {
+                agent: worker.clone(),
+            },
+        );
         log.push(1, assign(run, task, worker.id));
-        log.push(2, EventKind::AgentStatusChanged { id: worker.id, from: AgentStatus::Stopped, to: AgentStatus::Starting });
+        log.push(
+            2,
+            EventKind::AgentStatusChanged {
+                id: worker.id,
+                from: AgentStatus::Stopped,
+                to: AgentStatus::Starting,
+            },
+        );
         log.push(4, usage(worker.id, Some(0.5), Some(counts(600, Some(3)))));
-        log.push(5, EventKind::TaskCheckTimed { run_id: run, id: task, key: "a".into(), duration_ms: 90_000 });
+        log.push(
+            5,
+            EventKind::TaskCheckTimed {
+                run_id: run,
+                id: task,
+                key: "a".into(),
+                duration_ms: 90_000,
+            },
+        );
         let mut ledger = TaskLedger::new(prices());
         for event in &log.events {
             ledger.apply(event);
@@ -755,7 +844,12 @@ mod tests {
         let (run, task) = (RunId::new(), TaskId::new());
         let worker = agent("priced");
         let mut log = Log::new();
-        log.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        log.push(
+            0,
+            EventKind::AgentCreated {
+                agent: worker.clone(),
+            },
+        );
         log.push(1, assign(run, task, worker.id));
         log.push(2, turn_started(worker.id));
         // A 25-minute turn: a tool call every few minutes, its usage only when it ends.
@@ -767,15 +861,26 @@ mod tests {
         assert!(ledger.breaches(task, &idle_cap(20), at(30)).is_empty());
         // At 48 the calls have stopped for 21 minutes: now it is idle.
         let breaches = ledger.breaches(task, &idle_cap(20), at(48));
-        assert_eq!(breaches.iter().map(|b| b.what).collect::<Vec<_>>(), ["idle"]);
+        assert_eq!(
+            breaches.iter().map(|b| b.what).collect::<Vec<_>>(),
+            ["idle"]
+        );
 
         // The same turn without its tool calls is over the cap already at 30.
         let mut silent = Log::new();
-        silent.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        silent.push(
+            0,
+            EventKind::AgentCreated {
+                agent: worker.clone(),
+            },
+        );
         silent.push(1, assign(run, task, worker.id));
         silent.push(2, turn_started(worker.id));
         let breaches = ledger_of(&silent).breaches(task, &idle_cap(20), at(30));
-        assert_eq!(breaches.iter().map(|b| b.what).collect::<Vec<_>>(), ["idle"]);
+        assert_eq!(
+            breaches.iter().map(|b| b.what).collect::<Vec<_>>(),
+            ["idle"]
+        );
     }
 
     #[test]
@@ -783,10 +888,18 @@ mod tests {
         let (run, task) = (RunId::new(), TaskId::new());
         let worker = agent("priced");
         let mut log = Log::new();
-        log.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        log.push(
+            0,
+            EventKind::AgentCreated {
+                agent: worker.clone(),
+            },
+        );
         log.push(1, assign(run, task, worker.id));
         let ledger = ledger_of(&log);
-        assert!(ledger.breaches(task, &idle_cap(20), at(20)).is_empty(), "19 minutes idle");
+        assert!(
+            ledger.breaches(task, &idle_cap(20), at(20)).is_empty(),
+            "19 minutes idle"
+        );
         let breaches = ledger.breaches(task, &idle_cap(20), at(21));
         assert_eq!(breaches.len(), 1);
         assert_eq!(breaches[0].what, "idle");
@@ -827,8 +940,12 @@ mod tests {
         let (run, task) = (RunId::new(), TaskId::new());
         let (worker, judge) = (agent("priced"), agent("priced"));
         let kinds = [
-            EventKind::AgentCreated { agent: worker.clone() },
-            EventKind::AgentCreated { agent: judge.clone() },
+            EventKind::AgentCreated {
+                agent: worker.clone(),
+            },
+            EventKind::AgentCreated {
+                agent: judge.clone(),
+            },
             assign(run, task, worker.id),
             turn_started(worker.id),
             tool_call(worker.id),
@@ -845,8 +962,14 @@ mod tests {
         let replayed = TaskLedger::replay(&store, prices()).await.unwrap();
         let now = Utc::now();
         assert_eq!(live.spend(task), replayed.spend(task));
-        assert_eq!(live.idle_minutes(task, now), replayed.idle_minutes(task, now));
-        assert!(live.idle_minutes(task, now).is_some(), "the task is under review");
+        assert_eq!(
+            live.idle_minutes(task, now),
+            replayed.idle_minutes(task, now)
+        );
+        assert!(
+            live.idle_minutes(task, now).is_some(),
+            "the task is under review"
+        );
     }
 
     #[test]
@@ -854,7 +977,12 @@ mod tests {
         let (run, task) = (RunId::new(), TaskId::new());
         let worker = agent("priced");
         let mut log = Log::new();
-        log.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        log.push(
+            0,
+            EventKind::AgentCreated {
+                agent: worker.clone(),
+            },
+        );
         log.push(1, assign(run, task, worker.id));
         log.push(
             6,

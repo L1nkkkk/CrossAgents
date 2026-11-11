@@ -147,19 +147,32 @@ async fn starting_a_proposed_work_runs_it_on_its_own_branch() {
 async fn starting_card_waits_for_proposer_to_finish_answering() {
     let repo = git_repo();
     let t = TestHub::start().await;
-    t.add_agent_in("lyra", Some("opus"), "worker", repo.path()).await;
+    t.add_agent_in("lyra", Some("opus"), "worker", repo.path())
+        .await;
     let item = propose(&t).await;
     let mut events = t.watch().await;
     t.send("lyra", "[slow] wait until interrupted").await;
-    let turn = events.until("proposer is running", |e| matches!(e.kind, EventKind::AgentTurnStarted { .. })).await;
+    let turn = events
+        .until("proposer is running", |e| {
+            matches!(e.kind, EventKind::AgentTurnStarted { .. })
+        })
+        .await;
     let (agent_id, message_id) = match turn.kind {
         EventKind::AgentTurnStarted { id, message_id } => (id, message_id),
         _ => unreachable!(),
     };
     let answering = start(&t, &item);
     tokio::pin!(answering);
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(300), &mut answering).await.is_err());
-    t.hub.runtime.stop(&crossagents_core::AgentKey::parse("lyra")).await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut answering)
+            .await
+            .is_err()
+    );
+    t.hub
+        .runtime
+        .stop(&crossagents_core::AgentKey::parse("lyra"))
+        .await
+        .unwrap();
     events.until("stopped turn is closed", |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, message_id: m, .. } if id == agent_id && m == message_id)).await;
     let run = answering.await;
     assert_eq!(run["title"], "Add notes");
@@ -175,33 +188,76 @@ async fn api_next_round_respects_person_talking_to_retained_lead() {
     let lead = ended["planner"].as_str().unwrap();
     let mut events = t.watch().await;
     t.send(lead, "[slow] still talking").await;
-    events.until("lead is answering", |e| matches!(e.kind, EventKind::AgentTurnStarted { .. })).await;
-    let response = t.post(&format!("/v1/works/{}/runs", ended["work_id"].as_str().unwrap()), json!({"request":"next round"})).await;
+    events
+        .until("lead is answering", |e| {
+            matches!(e.kind, EventKind::AgentTurnStarted { .. })
+        })
+        .await;
+    let response = t
+        .post(
+            &format!("/v1/works/{}/runs", ended["work_id"].as_str().unwrap()),
+            json!({"request":"next round"}),
+        )
+        .await;
     assert_eq!(response.status(), 409, "{}", response.text().await.unwrap());
-    t.hub.runtime.stop(&crossagents_core::AgentKey::parse(lead)).await.unwrap();
+    t.hub
+        .runtime
+        .stop(&crossagents_core::AgentKey::parse(lead))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn cancelling_run_closes_archived_workers_turn_in_trace() {
     let repo = git_repo();
     let t = TestHub::start().await;
-    t.add_agent_in("boss", Some("opus"), "planner", repo.path()).await;
-    t.add_agent_in("coder", Some("opus"), "worker", repo.path()).await;
+    t.add_agent_in("boss", Some("opus"), "planner", repo.path())
+        .await;
+    t.add_agent_in("coder", Some("opus"), "worker", repo.path())
+        .await;
     let mut events = t.watch().await;
-    let plan = r#"[call plan_submit {"tasks":[{"key":"a","title":"A","spec":{"goal":"\u005bslow]"}}]}]"#;
+    let plan =
+        r#"[call plan_submit {"tasks":[{"key":"a","title":"A","spec":{"goal":"\u005bslow]"}}]}]"#;
     let response = t.post("/v1/runs", json!({"request":plan,"planner":"boss","worker":"coder","policy":{"plan_approval":"auto"}})).await;
     assert_eq!(response.status(), 201, "{}", response.text().await.unwrap());
     let run: Value = response.json().await.unwrap();
     let run_id = run["id"].as_str().unwrap();
     let assigned = events.until("worker assigned", |e| matches!(&e.kind, EventKind::TaskStatusChanged { key, assignee: Some(_), to: crossagents_api_types::TaskStatus::Running, .. } if key == "a")).await;
-    let worker = match assigned.kind { EventKind::TaskStatusChanged { assignee: Some(id), .. } => id, _ => unreachable!() };
-    events.until("worker started", |e| matches!(e.kind, EventKind::AgentTurnStarted { id, .. } if id == worker)).await;
-    let response = t.post(&format!("/v1/runs/{run_id}/cancel"), json!({})).await;
+    let worker = match assigned.kind {
+        EventKind::TaskStatusChanged {
+            assignee: Some(id), ..
+        } => id,
+        _ => unreachable!(),
+    };
+    events
+        .until(
+            "worker started",
+            |e| matches!(e.kind, EventKind::AgentTurnStarted { id, .. } if id == worker),
+        )
+        .await;
+    let response = t
+        .post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
+        .await;
     assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
-    events.until("worker turn closed", |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == worker)).await;
-    let trace: Value = t.get(&format!("/v1/runs/{run_id}/trace")).await.json().await.unwrap();
+    events
+        .until(
+            "worker turn closed",
+            |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == worker),
+        )
+        .await;
+    let trace: Value = t
+        .get(&format!("/v1/runs/{run_id}/trace"))
+        .await
+        .json()
+        .await
+        .unwrap();
     let turns = trace["tasks"][0]["lane"]["turns"].as_array().unwrap();
-    assert!(turns.iter().any(|turn| turn["agent"] == json!(worker) && !turn["completed_at"].is_null()), "{trace}");
+    assert!(
+        turns
+            .iter()
+            .any(|turn| turn["agent"] == json!(worker) && !turn["completed_at"].is_null()),
+        "{trace}"
+    );
 }
 
 #[tokio::test]

@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, CoreError, EventKind, Evidence, ISSUE_PREFIX, IssueRef, Lesson,
-    LessonOutcome, LessonStatus, NoteScope, Project, ProjectPath, RelatedLesson, Run, RunId, Store,
-    Task, Triage, TriageStep,
+    Agent, AgentId, CoreError, EventKind, Evidence, ISSUE_PREFIX, IssueRef, Lesson, LessonOutcome,
+    LessonStatus, NoteScope, Project, ProjectPath, RelatedLesson, Run, RunId, Store, Task, Triage,
+    TriageStep,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -73,11 +73,42 @@ fn is_error_code(word: &str) -> bool {
 
 /// Errno names tools print (Node, libc, npm); a list, since `ERROR` or `EXPECTED` look alike.
 const ERRNO: &[&str] = &[
-    "ENOENT", "EACCES", "EPERM", "EEXIST", "EADDRINUSE", "EADDRNOTAVAIL", "ECONNREFUSED",
-    "ECONNRESET", "ECONNABORTED", "ETIMEDOUT", "ENOTFOUND", "EPIPE", "EMFILE", "ENFILE",
-    "ENOSPC", "EBUSY", "ENOTDIR", "EISDIR", "ENOTEMPTY", "EAI_AGAIN", "EINVAL", "EAGAIN",
-    "ELIFECYCLE", "ERESOLVE", "EINTEGRITY", "ENOTSUP", "EROFS", "EXDEV", "ELOOP", "ENAMETOOLONG",
-    "EHOSTUNREACH", "ENETUNREACH", "ECANCELED", "ENOMEM", "ESRCH", "ECHILD",
+    "ENOENT",
+    "EACCES",
+    "EPERM",
+    "EEXIST",
+    "EADDRINUSE",
+    "EADDRNOTAVAIL",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "ECONNABORTED",
+    "ETIMEDOUT",
+    "ENOTFOUND",
+    "EPIPE",
+    "EMFILE",
+    "ENFILE",
+    "ENOSPC",
+    "EBUSY",
+    "ENOTDIR",
+    "EISDIR",
+    "ENOTEMPTY",
+    "EAI_AGAIN",
+    "EINVAL",
+    "EAGAIN",
+    "ELIFECYCLE",
+    "ERESOLVE",
+    "EINTEGRITY",
+    "ENOTSUP",
+    "EROFS",
+    "EXDEV",
+    "ELOOP",
+    "ENAMETOOLONG",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "ECANCELED",
+    "ENOMEM",
+    "ESRCH",
+    "ECHILD",
 ];
 
 /// Whether `word` names an exception or error type: `ModuleNotFoundError`,
@@ -105,7 +136,10 @@ pub fn error_terms(output: &str) -> (Vec<String>, Vec<String>) {
     let mut strong: Vec<String> = Vec::new();
     let mut weak: Vec<String> = Vec::new();
     for line in output.lines() {
-        let words: Vec<&str> = line.split(|c: char| !ident_char(c)).filter(|w| !w.is_empty()).collect();
+        let words: Vec<&str> = line
+            .split(|c: char| !ident_char(c))
+            .filter(|w| !w.is_empty())
+            .collect();
         for (i, word) in words.iter().enumerate() {
             if is_error_code(word)
                 || is_exception(word)
@@ -349,8 +383,7 @@ pub fn path_key(path: &str) -> String {
 /// The record's files that `changed` (paths as git reports them) names, in the record's
 /// order.
 pub fn changed_among(files: &[String], changed: &[String]) -> Vec<String> {
-    let changed: std::collections::HashSet<String> =
-        changed.iter().map(|c| path_key(c)).collect();
+    let changed: std::collections::HashSet<String> = changed.iter().map(|c| path_key(c)).collect();
     files
         .iter()
         .filter(|f| changed.contains(&path_key(f)))
@@ -597,9 +630,12 @@ pub async fn bind_project(
     let projects = store.list_projects().await?;
     let mut project = project_of(&projects, id)?;
     if split {
-        let given = path.map(str::trim).filter(|p| !p.is_empty()).ok_or_else(|| {
-            CoreError::Conflict("name the checkout that is another project".into())
-        })?;
+        let given = path
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| {
+                CoreError::Conflict("name the checkout that is another project".into())
+            })?;
         let at = dunce::canonicalize(given)
             .map_err(|e| CoreError::Conflict(format!("cannot read {given}: {e}")))?;
         let mut fresh = Project {
@@ -665,9 +701,8 @@ pub async fn bind_project(
         }
     }
     if let Some(given) = path.map(str::trim).filter(|p| !p.is_empty()) {
-        let at = dunce::canonicalize(given).map_err(|e| {
-            CoreError::Conflict(format!("cannot read {given}: {e}"))
-        })?;
+        let at = dunce::canonicalize(given)
+            .map_err(|e| CoreError::Conflict(format!("cannot read {given}: {e}")))?;
         // A checkout is bound to one project: take it from wherever else it was.
         for other in projects.iter().filter(|p| p.id != project.id) {
             if other.paths.iter().any(|bound| same_path(&bound.path, &at)) {
@@ -676,7 +711,11 @@ pub async fn bind_project(
                 store.put_project(&other).await?;
             }
         }
-        if !project.paths.iter().any(|bound| same_path(&bound.path, &at)) {
+        if !project
+            .paths
+            .iter()
+            .any(|bound| same_path(&bound.path, &at))
+        {
             project.paths.push(ProjectPath {
                 node: LOCAL_NODE.into(),
                 path: at,
@@ -692,7 +731,11 @@ pub async fn bind_project(
 /// and sources go with it — becomes `into`'s, `from`'s checkouts and remotes join `into`'s,
 /// and `from` is left with none, so no later run resolves to it. Repeating a merge that was
 /// interrupted writes the same result: the lessons have moved and the path lists are sets.
-pub async fn merge_projects(store: &dyn Store, from: &str, into: &str) -> Result<Project, CoreError> {
+pub async fn merge_projects(
+    store: &dyn Store,
+    from: &str,
+    into: &str,
+) -> Result<Project, CoreError> {
     if from == into {
         return Err(CoreError::Conflict(
             "a project cannot be merged into itself".into(),
@@ -706,7 +749,11 @@ pub async fn merge_projects(store: &dyn Store, from: &str, into: &str) -> Result
         store.update_lesson(&lesson).await?;
     }
     for at in &source.paths {
-        if !target.paths.iter().any(|bound| same_path(&bound.path, &at.path)) {
+        if !target
+            .paths
+            .iter()
+            .any(|bound| same_path(&bound.path, &at.path))
+        {
             target.paths.push(at.clone());
         }
     }
@@ -736,7 +783,11 @@ impl Orchestrator {
         bounded_related(self.find_related(dir, output), RELATED_TIMEOUT).await
     }
 
-    async fn find_related(&self, dir: &Path, output: &str) -> Result<Vec<RelatedLesson>, CoreError> {
+    async fn find_related(
+        &self,
+        dir: &Path,
+        output: &str,
+    ) -> Result<Vec<RelatedLesson>, CoreError> {
         let (strong, weak) = error_terms(output);
         if strong.is_empty() {
             return Ok(Vec::new());
@@ -770,7 +821,8 @@ impl Orchestrator {
         key: &str,
         author: AgentId,
     ) {
-        if let (NoteScope::Run, Some(run_id), true) = (scope, run_id, key.starts_with(ISSUE_PREFIX)) {
+        if let (NoteScope::Run, Some(run_id), true) = (scope, run_id, key.starts_with(ISSUE_PREFIX))
+        {
             self.publish(EventKind::IssueRecorded {
                 run_id,
                 key: key.to_owned(),
@@ -1275,20 +1327,37 @@ mod tests {
         );
         assert_eq!(
             strong,
-            ["E0277", "9009", "ModuleNotFoundError", "ENOENT", "0x80070005"]
+            [
+                "E0277",
+                "9009",
+                "ModuleNotFoundError",
+                "ENOENT",
+                "0x80070005"
+            ]
         );
         assert!(weak.contains(&"trait".to_owned()) && weak.contains(&"Serialize".to_owned()));
         assert!(!weak.iter().any(|w| w == "the" || w == "120"));
         // Line numbers, ports and plain words are not strong.
-        let (strong, _) = error_terms("listening on 8080\nat line 1234\nError: something went wrong");
+        let (strong, _) =
+            error_terms("listening on 8080\nat line 1234\nError: something went wrong");
         assert!(strong.is_empty(), "{strong:?}");
     }
 
     #[test]
     fn failed_checks_that_name_a_recorded_error_get_its_record() {
         let lessons = vec![
-            record("a", "python 9009 on Windows", "`python` exited with code 9009", &["WindowsApps"]),
-            record("b", "trait bound", "error[E0277] when deriving", &["E0277", "Serialize"]),
+            record(
+                "a",
+                "python 9009 on Windows",
+                "`python` exited with code 9009",
+                &["WindowsApps"],
+            ),
+            record(
+                "b",
+                "trait bound",
+                "error[E0277] when deriving",
+                &["E0277", "Serialize"],
+            ),
         ];
         let output = "error[E0277]: the trait bound `Foo: Serialize` is not satisfied";
         let (strong, weak) = error_terms(output);
@@ -1516,7 +1585,10 @@ mod tests {
         ];
         assert_eq!(
             changed_among(&lesson.files, &changed),
-            vec!["crates/hub/src/api.rs".to_owned(), "apps\\gui\\src\\api.ts".to_owned()]
+            vec![
+                "crates/hub/src/api.rs".to_owned(),
+                "apps\\gui\\src\\api.ts".to_owned()
+            ]
         );
         // Nothing of it changed: no clue, and so no mark.
         assert!(changed_among(&lesson.files, &["README.md".to_owned()]).is_empty());
@@ -1538,23 +1610,54 @@ mod tests {
                 .current_dir(dir.path())
                 .output()
                 .expect("git runs");
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             String::from_utf8_lossy(&out.stdout).trim().to_owned()
         };
         git(&["init", "-q"]);
         std::fs::write(dir.path().join("changed.rs"), "a").unwrap();
         std::fs::write(dir.path().join("same.rs"), "a").unwrap();
         git(&["add", "."]);
-        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "one",
+        ]);
         let first = git(&["rev-parse", "HEAD"]);
         std::fs::write(dir.path().join("changed.rs"), "b").unwrap();
-        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "two"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-am",
+            "two",
+        ]);
         // An edit that is still in the working tree counts too.
         std::fs::write(dir.path().join("changed.rs"), "c").unwrap();
         let changed = changed_since(dir.path(), &first).await;
         assert_eq!(changed, vec!["changed.rs".to_owned()], "{changed:?}");
         // A commit at the working tree's content names nothing.
-        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "three"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-am",
+            "three",
+        ]);
         let head = git(&["rev-parse", "HEAD"]);
         assert!(changed_since(dir.path(), &head).await.is_empty());
         // A directory without git says nothing rather than guessing.
@@ -1654,13 +1757,25 @@ mod tests {
         // A checkout belongs to one project: binding it elsewhere moves it.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap().to_owned();
-        bind_project(&store, "b", None, Some(&path), false).await.unwrap();
-        bind_project(&store, "a", None, Some(&path), false).await.unwrap();
+        bind_project(&store, "b", None, Some(&path), false)
+            .await
+            .unwrap();
+        bind_project(&store, "a", None, Some(&path), false)
+            .await
+            .unwrap();
         let projects = store.list_projects().await.unwrap();
         let b = projects.iter().find(|p| p.id == "b").unwrap();
-        assert!(!b.paths.iter().any(|at| at.path == dir.path()), "{:?}", b.paths);
+        assert!(
+            !b.paths.iter().any(|at| at.path == dir.path()),
+            "{:?}",
+            b.paths
+        );
         let a = projects.iter().find(|p| p.id == "a").unwrap();
-        assert!(a.paths.iter().any(|at| at.path == dir.path()), "{:?}", a.paths);
+        assert!(
+            a.paths.iter().any(|at| at.path == dir.path()),
+            "{:?}",
+            a.paths
+        );
     }
 
     #[tokio::test]
@@ -1677,7 +1792,10 @@ mod tests {
             .unwrap();
         assert_ne!(fresh.id, "a");
         // The remote that was waiting belongs to the checkout, so it goes with it.
-        assert_eq!(fresh.remotes, vec!["github.com/someone/CrossAgents".to_owned()]);
+        assert_eq!(
+            fresh.remotes,
+            vec!["github.com/someone/CrossAgents".to_owned()]
+        );
         assert!(fresh.unconfirmed_remote.is_none());
         let projects = store.list_projects().await.unwrap();
         let old = projects.iter().find(|p| p.id == "a").unwrap();

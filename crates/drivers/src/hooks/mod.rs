@@ -73,7 +73,9 @@ mod tests {
         assert!(!allowed(&json!({ "allow_hooks": 1 })));
         assert!(allowed(&json!({ "allow_hooks": true })));
         // Other config keys are not read as this one.
-        assert!(!allowed(&json!({ "setting_sources": "user,project,local" })));
+        assert!(!allowed(
+            &json!({ "setting_sources": "user,project,local" })
+        ));
     }
 
     #[test]

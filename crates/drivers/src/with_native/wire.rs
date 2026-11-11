@@ -298,9 +298,15 @@ impl Turn {
                 vec![SessionEventKind::Error { message }]
             }
             // Known, and nothing to show.
-            "RUN_STARTED" | "TOOL_CALL_END" | "CUSTOM" | "TEXT_MESSAGE_START"
-            | "TEXT_MESSAGE_END" | "THINKING_TEXT_MESSAGE_START"
-            | "THINKING_TEXT_MESSAGE_END" | "THINKING_START" | "THINKING_END"
+            "RUN_STARTED"
+            | "TOOL_CALL_END"
+            | "CUSTOM"
+            | "TEXT_MESSAGE_START"
+            | "TEXT_MESSAGE_END"
+            | "THINKING_TEXT_MESSAGE_START"
+            | "THINKING_TEXT_MESSAGE_END"
+            | "THINKING_START"
+            | "THINKING_END"
             | "STEP_STARTED" => Vec::new(),
             other => {
                 self.unknown += 1;
@@ -809,7 +815,10 @@ mod tests {
         );
         // Otherwise a plain turn's, with `no_think` left out: it is not a level.
         assert_eq!(models[1].efforts(), ["high"]);
-        assert_eq!(models[2].efforts(), ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(
+            models[2].efforts(),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
         // A model that names neither takes no effort at all.
         assert!(models[3].efforts().is_empty());
     }

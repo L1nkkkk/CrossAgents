@@ -770,7 +770,10 @@ mod tests {
             marks,
             [
                 (LaneMarkKind::Compacted, "170k → 40k".to_owned()),
-                (LaneMarkKind::ModelChanged, "sonnet → opus (high)".to_owned()),
+                (
+                    LaneMarkKind::ModelChanged,
+                    "sonnet → opus (high)".to_owned()
+                ),
                 (LaneMarkKind::Asked, "用哪个库？".to_owned()),
                 (LaneMarkKind::Answered, "serde".to_owned()),
             ]

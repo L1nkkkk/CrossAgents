@@ -10,12 +10,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, AttachmentSupport, Capabilities, CoreError,
-    DeliveryState, DeliveryStatus, DiffSource, DriverSession, EXTERNAL_PLUGIN, Envelope, EventBus,
-    CarriedNotice, EventKind, McpServerSpec, MessageId, MessageSource, NameSource, NoticeClass,
-    OutputStream,
-    PendingNotice, PermissionPolicy, Prompt, QueuedReason, SessionEvent, SessionEventKind,
-    SessionSpec, StopReason, Store, validate_agent_name,
+    Agent, AgentId, AgentKey, AgentStatus, AttachmentSupport, Capabilities, CarriedNotice,
+    CoreError, DeliveryState, DeliveryStatus, DiffSource, DriverSession, EXTERNAL_PLUGIN, Envelope,
+    EventBus, EventKind, McpServerSpec, MessageId, MessageSource, NameSource, NoticeClass,
+    OutputStream, PendingNotice, PermissionPolicy, Prompt, QueuedReason, SessionEvent,
+    SessionEventKind, SessionSpec, StopReason, Store, validate_agent_name,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -631,7 +630,10 @@ impl Runtime {
         };
         // A wake that never started is rebuilt from the table. A turn this hub takes over
         // keeps its notices, so poll does not open a second one.
-        let keep: Vec<MessageId> = unfinished.values().filter_map(|work| work.running).collect();
+        let keep: Vec<MessageId> = unfinished
+            .values()
+            .filter_map(|work| work.running)
+            .collect();
         if let Err(err) = self.store().release_stranded_notices(&keep).await {
             tracing::warn!(error = %err, "cannot release notices the previous hub left");
         }
@@ -1426,9 +1428,10 @@ impl Runtime {
     /// running turn here is the next one, started from the line; the turn that ended never
     /// counts.
     pub async fn has_queued(&self, id: AgentId) -> bool {
-        let live = self.live.lock().await.get(&id).map(|live| {
-            live.inbox.has_waiting() || live.inbox.running.lock().unwrap().is_some()
-        });
+        let live =
+            self.live.lock().await.get(&id).map(|live| {
+                live.inbox.has_waiting() || live.inbox.running.lock().unwrap().is_some()
+            });
         match live {
             Some(queued) => queued,
             None => self.carried_waiting(id).await,
@@ -2150,8 +2153,7 @@ impl Runtime {
         live.inbox
             .push((message_id, Prompt { text, attachments }), first);
         if let Some(carried) = &carried {
-            self.mark_carried(agent.id, message_id, &carried.rows)
-                .await;
+            self.mark_carried(agent.id, message_id, &carried.rows).await;
         }
         drop(admission);
         // The announcement is what clients show as "busy"/"next"; it reads the inbox, so it
@@ -2979,7 +2981,8 @@ impl Runtime {
 
     /// Drops the [`crossagents_core::CONTEXT_LOST`] mark once a new session has opened.
     async fn forget_lost_context(&self, agent: AgentId) {
-        self.forget_mark(agent, crossagents_core::CONTEXT_LOST).await;
+        self.forget_mark(agent, crossagents_core::CONTEXT_LOST)
+            .await;
     }
 
     /// Drops one of the agent's session marks (`key` in its config) once a session has opened.
@@ -3193,9 +3196,7 @@ async fn run_turns(
             None => Ok(StopReason::Interrupted),
         };
         let ended = matches!(&result, Ok(StopReason::EndTurn));
-        notices
-            .settle(store.as_ref(), message_id, ended)
-            .await;
+        notices.settle(store.as_ref(), message_id, ended).await;
         inbox.finish_turn();
         if !report_turn(&control, message_id, result, None).await {
             return;
@@ -4095,8 +4096,14 @@ mod tests {
     fn a_running_turn_keeps_the_queue_open_and_a_closed_one_hands_out_nothing() {
         let inbox = Inbox::default();
         inbox.push((MessageId::new(), Prompt::text("one")), false);
-        assert!(inbox.pop_turn().is_some(), "the first message starts a turn");
-        assert!(!inbox.close_if_idle(), "a running turn keeps the queue open");
+        assert!(
+            inbox.pop_turn().is_some(),
+            "the first message starts a turn"
+        );
+        assert!(
+            !inbox.close_if_idle(),
+            "a running turn keeps the queue open"
+        );
         assert!(!inbox.is_closed());
         inbox.finish_turn();
         inbox.push((MessageId::new(), Prompt::text("two")), false);
@@ -4106,7 +4113,11 @@ mod tests {
             inbox.pop_turn().is_none(),
             "a closed queue starts no turn, so the message is not taken by the old session"
         );
-        assert_eq!(queued(&inbox), 1, "what waits stays for the session that takes it over");
+        assert_eq!(
+            queued(&inbox),
+            1,
+            "what waits stays for the session that takes it over"
+        );
     }
 
     #[test]
@@ -4119,7 +4130,10 @@ mod tests {
         assert_eq!(queued(&new), 1);
         assert_eq!(queued(&old), 0);
         new.closed.store(false, Ordering::SeqCst);
-        assert!(new.pop_turn().is_some(), "the new session starts with the carried message");
+        assert!(
+            new.pop_turn().is_some(),
+            "the new session starts with the carried message"
+        );
     }
 
     const INCIDENT: &str = "400 model [deepseek-v4.1-flash-sg] service info not found (01a1b1fcef287ba683c3c502e76f1bb3/29fac42c-1b53-4461-8bab-4f8b3c92723f)\nCurrently supported models for your account:\n  - hy4free\n  - hy4std\n  - hy3\n  - hy3-x\n  - deepseek-v4.1-flash\n  - glm-5.3\n  - glm-5.3-flash\n  - glm-5.2\n  - space-bunny\n  - minimax-m3.1-flash\n  - minimax-m2.7\n  - kimi-k3.1-pro\n  - kimi-k3-1\n  - kimi-k2.8-preview\n  - deepseek-v4-pro\n  - step-5-preview\n  - mimo-v2.6-pro\nPlease use --model <model_id> to specify a valid model.";
@@ -4642,21 +4656,14 @@ mod tests {
     #[tokio::test]
     async fn an_archived_agent_is_not_delivered_and_keeps_the_row() {
         let (store, runtime, agent) = harness("lea").await;
-        crossagents_store_sqlite::sqlx::query(
-            "UPDATE agents SET archived_at = ?1 WHERE id = ?2",
-        )
-        .bind(Utc::now().to_rfc3339())
-        .bind(agent.id.to_string())
-        .execute(store.pool())
-        .await
-        .unwrap();
+        crossagents_store_sqlite::sqlx::query("UPDATE agents SET archived_at = ?1 WHERE id = ?2")
+            .bind(Utc::now().to_rfc3339())
+            .bind(agent.id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
         runtime
-            .notify(
-                &AgentKey::Id(agent.id),
-                "need",
-                "kept",
-                NoticeClass::Decide,
-            )
+            .notify(&AgentKey::Id(agent.id), "need", "kept", NoticeClass::Decide)
             .await
             .unwrap();
         runtime.poll_notice_wakes().await.unwrap();
@@ -4795,7 +4802,11 @@ mod tests {
             .unwrap();
         runtime.take_external(agent.id).await;
         let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
-        assert_eq!(rows.len(), 1, "the replacement was deleted with the old wake");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the replacement was deleted with the old wake"
+        );
         assert_eq!(rows[0].line, "replaced");
         assert!(rows[0].carried_by.is_none());
     }
@@ -4978,12 +4989,17 @@ mod tests {
             .unwrap();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
-            let withdrawn = store.events_since(0, 40).await.unwrap().iter().any(|event| {
-                matches!(
-                    &event.kind,
-                    EventKind::AgentInputWithdrawn { message_id, .. } if *message_id == message
-                )
-            });
+            let withdrawn = store
+                .events_since(0, 40)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    matches!(
+                        &event.kind,
+                        EventKind::AgentInputWithdrawn { message_id, .. } if *message_id == message
+                    )
+                });
             if withdrawn {
                 break;
             }

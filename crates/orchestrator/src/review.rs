@@ -578,7 +578,12 @@ impl Orchestrator {
         decide: &str,
     ) -> Result<(), CoreError> {
         let issuer = task.issuer_or(run.planner);
-        let stop = task.report.budget_over.clone().map(|over| format!("its budget is used up: {over}")).or_else(|| rework_stop(run, task));
+        let stop = task
+            .report
+            .budget_over
+            .clone()
+            .map(|over| format!("its budget is used up: {over}"))
+            .or_else(|| rework_stop(run, task));
         if let Some(why) = stop {
             self.decide(
                 issuer,
@@ -1002,18 +1007,13 @@ impl Orchestrator {
         else {
             return Err(CoreError::Conflict(format!(
                 "say which commit you reviewed: pass reviewed_sha, the one your brief names ({}). A verdict without it cannot be bound to review round {} of #{}; nothing changed.",
-                current,
-                task.report.review_attempt,
-                task.key
+                current, task.report.review_attempt, task.key
             )));
         };
         if !same_commit(sha, &current) {
             return Err(CoreError::Conflict(format!(
                 "your review is of commit {}, but review round {} of #{} is of {}: the task changed since, so this review is stale and nothing changed. Review the commit the brief names.",
-                sha,
-                task.report.review_attempt,
-                task.key,
-                current
+                sha, task.report.review_attempt, task.key, current
             )));
         }
         let mut findings = submission.findings;

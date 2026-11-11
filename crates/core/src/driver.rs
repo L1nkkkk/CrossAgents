@@ -159,7 +159,7 @@ impl PermissionPolicy {
 }
 
 /// An agent asking before it acts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionRequest {
     /// The vendor's id for the request.
     pub id: String,
@@ -282,7 +282,7 @@ pub enum ToolStatus {
 }
 
 /// How a turn ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnOutcome {
     pub stop_reason: StopReason,
     /// The vendor's id for the turn, for [`DriverSession::fork`] and
@@ -434,7 +434,7 @@ pub struct RateLimits {
 }
 
 /// Something that happened inside a session, in the hub's own terms.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionEvent {
     pub kind: SessionEventKind,
     /// The vendor message this was translated from, for consumers that want detail the
@@ -457,7 +457,8 @@ impl From<SessionEventKind> for SessionEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
 pub enum SessionEventKind {
     /// The vendor's id for this session: an ACP session id, a Codex thread id. Joins
     /// CrossAgents sessions to vendor usage logs, and is what [`Driver::resume`] takes.

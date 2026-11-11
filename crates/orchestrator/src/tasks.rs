@@ -2037,7 +2037,10 @@ mod tests {
         let rerun = vec![check("b", true)];
         let merged = merge_recheck(&acceptance, &previous, &rerun);
         assert_eq!(
-            merged.iter().map(|c| (c.command.as_str(), c.passed)).collect::<Vec<_>>(),
+            merged
+                .iter()
+                .map(|c| (c.command.as_str(), c.passed))
+                .collect::<Vec<_>>(),
             [("a", true), ("b", true), ("c", false)]
         );
     }

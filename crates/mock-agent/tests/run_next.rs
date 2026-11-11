@@ -1090,12 +1090,19 @@ async fn a_persons_message_during_run_next_is_handled_once_before_the_kickoff() 
     completed(&mut w, &second).await;
 
     let out = w.output();
-    assert_eq!(out.matches("PERSON-WAITING-7f").count(), 1, "handled once: {out}");
+    assert_eq!(
+        out.matches("PERSON-WAITING-7f").count(),
+        1,
+        "handled once: {out}"
+    );
     let person = out.find("PERSON-WAITING-7f").unwrap();
     let kickoff = out
         .find("run: second (run_id")
         .unwrap_or_else(|| panic!("no kickoff in {out}"));
-    assert!(person < kickoff, "the person's message comes before the kickoff: {out}");
+    assert!(
+        person < kickoff,
+        "the person's message comes before the kickoff: {out}"
+    );
     let events = t
         .hub
         .bus

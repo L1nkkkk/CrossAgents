@@ -268,7 +268,10 @@ async fn extensions_http_routes_poll_and_events() {
     assert_eq!(version.tools[0].command, ["never-execute-this"]);
     assert_eq!(version.hooks[0].event, "run.landed");
     assert_eq!(version.hooks[0].command, ["node", "notify.mjs"]);
-    assert_eq!(version.service.as_ref().unwrap().command, ["node", "server.mjs"]);
+    assert_eq!(
+        version.service.as_ref().unwrap().command,
+        ["node", "server.mjs"]
+    );
     let fp = list.extensions[0]
         .pending
         .as_ref()
