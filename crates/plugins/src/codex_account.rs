@@ -814,6 +814,7 @@ pub(crate) mod tests {
     fn account(home: &Path) -> Account {
         Account {
             codebuddy_site: None,
+            egress: None,
             id: "codex-main".into(),
             provider: "codex".into(),
             label: "main".into(),

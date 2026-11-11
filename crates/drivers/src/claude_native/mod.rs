@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use crossagents_core::{
     AgentCommand, AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind,
-    DriverSession, MessageId, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
-    SessionEventKind, SessionSpec, StopReason, TurnOutcome,
+    DriverSession, EGRESS_ENV, EgressPolicy, MessageId, PermissionHandler, PermissionPolicy,
+    Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -966,12 +966,22 @@ impl ClaudeSession {
             ("CLAUDE_CODE_ENTRYPOINT".to_owned(), ENTRYPOINT.to_owned()),
         ];
         env.extend(system_proxy_env());
-        env.extend(spec.env.iter().cloned());
+        // The account's egress policy travels in this variable (set by the hub, which knows
+        // the account); it is consumed here and not passed on to the CLI.
+        env.extend(
+            spec.env
+                .iter()
+                .filter(|(key, _)| !key.eq_ignore_ascii_case(EGRESS_ENV))
+                .cloned(),
+        );
+        let egress = EgressPolicy::from_env(&spec.env)
+            .unwrap_or_else(|| EgressPolicy::default_for_provider(flavor.program()));
         // A CLI pointed at a dead proxy starts fine and then cannot reach its API; the
         // turn would stall instead of saying why. Fail here, where the proxy can be named.
         let api_host = flavor.api_host(&spec.env);
-        // A host the proxy cannot reach but a direct connection can is exempted instead.
-        env.extend(check_proxy(&spec.env, Some(&api_host)).await?);
+        // `allow_direct` may exempt a host the proxy cannot reach but a direct connection
+        // can; `proxy_only` never does, so the account is not exposed (docs/ACCOUNT-RISK.md).
+        env.extend(check_proxy(&spec.env, Some(&api_host), egress).await?);
         let env_remove = if flavor == Flavor::Codebuddy {
             crate::codebuddy_native::prepare_env(&mut env)
         } else {

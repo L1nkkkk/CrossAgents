@@ -445,6 +445,7 @@ mod tests {
         let accounts = ClaudeAccounts::default();
         let account = |home: PathBuf| Account {
             codebuddy_site: None,
+            egress: None,
             id: "claude".into(),
             provider: "claude".into(),
             label: String::new(),
