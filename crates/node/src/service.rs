@@ -107,6 +107,7 @@ impl NodeService {
 
                     // Register first, then everything the hub may have missed.
                     let register = ToHub::Register {
+                        epoch: self.register.epoch.clone(),
                         node_version: self.register.node_version.clone(),
                         os: self.register.os.clone(),
                         hostname: self.register.hostname.clone(),
@@ -138,9 +139,21 @@ impl NodeService {
 }
 
 struct SessionState {
+    /// The node's handle for it; a `Return` a dropped-frame warning names uses this.
+    handle: String,
     session: Arc<dyn DriverSession>,
     /// The commands last reported to the hub, so only changes ride along.
     commands: Mutex<Option<Vec<AgentCommand>>>,
+    /// A call's `Return` goes through the session's pump, so it cannot overtake the events
+    /// the driver sent before it returned (a direct driver always has them queued first).
+    ordered: mpsc::UnboundedSender<PendingReturn>,
+}
+
+/// A `Return` waiting behind the session's events.
+struct PendingReturn {
+    id: String,
+    result: WireResult,
+    commands: Option<Vec<AgentCommand>>,
 }
 
 impl SessionState {
@@ -170,15 +183,18 @@ impl Shared {
     }
 
     fn session(&self, handle: &str) -> Result<Arc<SessionState>, CoreError> {
+        self.find(handle).ok_or_else(|| CoreError::NotFound {
+            kind: "session",
+            id: handle.to_owned(),
+        })
+    }
+
+    fn find(&self, handle: &str) -> Option<Arc<SessionState>> {
         self.sessions
             .lock()
             .expect("sessions lock poisoned")
             .get(handle)
             .cloned()
-            .ok_or_else(|| CoreError::NotFound {
-                kind: "session",
-                id: handle.to_owned(),
-            })
     }
 }
 
@@ -340,12 +356,7 @@ fn on_line(
             let shared = shared.clone();
             tokio::spawn(async move {
                 let (result, commands, session) = execute(&source, &shared, op).await;
-                let _ = shared.out.send(Outgoing::Return {
-                    session,
-                    id,
-                    result,
-                    commands,
-                });
+                deliver_return(&shared, session, id, result, commands);
             });
         }
     }
@@ -355,7 +366,14 @@ async fn execute(
     source: &Arc<dyn DriverSource>,
     shared: &Arc<Shared>,
     op: Op,
-) -> (WireResult, Option<Vec<AgentCommand>>, Option<String>) {
+) -> (
+    WireResult,
+    Option<Vec<AgentCommand>>,
+    Option<Arc<SessionState>>,
+) {
+    // Remember which session the call named: even when it fails, its `Return` has to follow
+    // what the driver already reported for that session.
+    let session = op.session().and_then(|handle| shared.find(handle));
     match run_op(source, shared, op).await {
         Ok((reply, commands, session)) => (WireResult::Ok { reply }, commands, session),
         Err(err) => (
@@ -363,12 +381,21 @@ async fn execute(
                 error: WireError::from(&err),
             },
             None,
-            None,
+            session,
         ),
     }
 }
 
-type OpResult = Result<(WireReply, Option<Vec<AgentCommand>>, Option<String>), CoreError>;
+/// The reply, the commands to ride along, and the session whose events the reply must
+/// follow (so the pump sends it, not the call task).
+type OpResult = Result<
+    (
+        WireReply,
+        Option<Vec<AgentCommand>>,
+        Option<Arc<SessionState>>,
+    ),
+    CoreError,
+>;
 
 async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) -> OpResult {
     match op {
@@ -381,8 +408,8 @@ async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) ->
             let handle = shared.new_handle();
             let (spec, events) = make_spec(shared, &handle, *spec);
             let session: Arc<dyn DriverSession> = Arc::from(driver.open(spec).await?);
-            let info = finish_open(shared, handle.clone(), session, events);
-            Ok((WireReply::Session { session: info }, None, Some(handle)))
+            let (info, state) = finish_open(shared, handle, session, events);
+            Ok((WireReply::Session { session: info }, None, Some(state)))
         }
         Op::Resume {
             plugin,
@@ -395,8 +422,8 @@ async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) ->
             let (spec, events) = make_spec(shared, &handle, *spec);
             let session: Arc<dyn DriverSession> =
                 Arc::from(driver.resume(&session_id, spec).await?);
-            let info = finish_open(shared, handle.clone(), session, events);
-            Ok((WireReply::Session { session: info }, None, Some(handle)))
+            let (info, state) = finish_open(shared, handle, session, events);
+            Ok((WireReply::Session { session: info }, None, Some(state)))
         }
         Op::Adopt {
             plugin,
@@ -411,8 +438,8 @@ async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) ->
             match driver.adopt(&session_id, turn_running, spec).await? {
                 Some(session) => {
                     let session: Arc<dyn DriverSession> = Arc::from(session);
-                    let info = finish_open(shared, handle.clone(), session, events);
-                    Ok((WireReply::Session { session: info }, None, Some(handle)))
+                    let (info, state) = finish_open(shared, handle, session, events);
+                    Ok((WireReply::Session { session: info }, None, Some(state)))
                 }
                 None => Ok((WireReply::NoSession, None, None)),
             }
@@ -424,13 +451,13 @@ async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) ->
                 Some(Err(err)) => return Err(err),
                 None => None,
             };
-            Ok((WireReply::MaybeTurn { outcome }, None, Some(session)))
+            Ok((WireReply::MaybeTurn { outcome }, None, Some(state)))
         }
         Op::Prompt { session, prompt } => {
             let state = shared.session(&session)?;
             let outcome = state.session.prompt_with(&prompt.into()).await?;
             let commands = state.changed_commands();
-            Ok((WireReply::Turn { outcome }, commands, Some(session)))
+            Ok((WireReply::Turn { outcome }, commands, Some(state)))
         }
         Op::Steer {
             session,
@@ -441,15 +468,17 @@ async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) ->
             let message_id = MessageId::from_str(&message_id)
                 .map_err(|err| CoreError::Agent(format!("bad message id {message_id:?}: {err}")))?;
             state.session.steer(message_id, &prompt.into()).await?;
-            Ok((WireReply::Unit, None, Some(session)))
+            Ok((WireReply::Unit, None, Some(state)))
         }
         Op::Interrupt { session } => {
-            shared.session(&session)?.session.interrupt().await?;
-            Ok((WireReply::Unit, None, Some(session)))
+            let state = shared.session(&session)?;
+            state.session.interrupt().await?;
+            Ok((WireReply::Unit, None, Some(state)))
         }
         Op::Suspend { session } => {
-            shared.session(&session)?.session.suspend().await?;
-            Ok((WireReply::Unit, None, Some(session)))
+            let state = shared.session(&session)?;
+            state.session.suspend().await?;
+            Ok((WireReply::Unit, None, Some(state)))
         }
         Op::Fork {
             session,
@@ -463,36 +492,38 @@ async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) ->
             let (spec, events) = make_spec(shared, &handle, *spec);
             let forked: Arc<dyn DriverSession> =
                 Arc::from(state.session.fork(at_turn.as_deref(), spec).await?);
-            let info = finish_open(shared, handle.clone(), forked, events);
-            Ok((WireReply::Session { session: info }, None, Some(handle)))
+            let (info, forked_state) = finish_open(shared, handle, forked, events);
+            Ok((
+                WireReply::Session { session: info },
+                None,
+                Some(forked_state),
+            ))
         }
         Op::Rollback {
             session,
             before_turn,
             revert_files,
         } => {
-            shared
-                .session(&session)?
-                .session
-                .rollback(&before_turn, revert_files)
-                .await?;
-            Ok((WireReply::Unit, None, Some(session)))
+            let state = shared.session(&session)?;
+            state.session.rollback(&before_turn, revert_files).await?;
+            Ok((WireReply::Unit, None, Some(state)))
         }
         Op::SetModel {
             session,
             model,
             effort,
         } => {
-            shared
-                .session(&session)?
+            let state = shared.session(&session)?;
+            state
                 .session
                 .set_model(model.as_deref(), effort.as_deref())
                 .await?;
-            Ok((WireReply::Unit, None, Some(session)))
+            Ok((WireReply::Unit, None, Some(state)))
         }
         Op::Compact { session } => {
-            shared.session(&session)?.session.compact().await?;
-            Ok((WireReply::Unit, None, Some(session)))
+            let state = shared.session(&session)?;
+            state.session.compact().await?;
+            Ok((WireReply::Unit, None, Some(state)))
         }
         Op::Shutdown { session } => {
             let state = shared.session(&session)?;
@@ -502,7 +533,7 @@ async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) ->
                 .lock()
                 .expect("sessions lock poisoned")
                 .remove(&session);
-            Ok((WireReply::Unit, None, Some(session)))
+            Ok((WireReply::Unit, None, Some(state)))
         }
         Op::ProbeCli { plugin, driver } => {
             source.driver(&plugin, driver.as_deref())?.probe_cli().await;
@@ -547,7 +578,7 @@ fn finish_open(
     handle: String,
     session: Arc<dyn DriverSession>,
     events: mpsc::UnboundedReceiver<SessionEvent>,
-) -> SessionInfo {
+) -> (SessionInfo, Arc<SessionState>) {
     let info = SessionInfo {
         handle: handle.clone(),
         session_id: session.session_id().to_owned(),
@@ -555,38 +586,95 @@ fn finish_open(
         outlives_hub: session.outlives_hub(),
         commands: session.commands(),
     };
+    let (ordered, returns) = mpsc::unbounded_channel();
     let state = Arc::new(SessionState {
+        handle: handle.clone(),
         session,
         commands: Mutex::new(info.commands.clone()),
+        ordered,
     });
     shared
         .sessions
         .lock()
         .expect("sessions lock poisoned")
-        .insert(handle.clone(), state.clone());
-    tokio::spawn(pump(shared.out.clone(), handle, state, events));
-    info
+        .insert(handle, state.clone());
+    tokio::spawn(pump(shared.out.clone(), state.clone(), events, returns));
+    (info, state)
 }
 
+/// The one place a session's frames are ordered: its events, then any `Return` a call sent
+/// after them. Splitting the two across tasks let a `prompt` answer arrive before the events
+/// the driver had already emitted, which a direct driver never does.
 async fn pump(
     out: mpsc::UnboundedSender<Outgoing>,
-    handle: String,
     state: Arc<SessionState>,
     mut events: mpsc::UnboundedReceiver<SessionEvent>,
+    mut returns: mpsc::UnboundedReceiver<PendingReturn>,
 ) {
-    while let Some(event) = events.recv().await {
-        let commands = state.changed_commands();
-        if out
-            .send(Outgoing::Event {
-                session: handle.clone(),
-                event,
-                commands,
-            })
-            .is_err()
-        {
-            break;
+    let mut events_open = true;
+    loop {
+        tokio::select! {
+            // Events first, so a `Return` queued after them cannot overtake them.
+            biased;
+            event = events.recv(), if events_open => match event {
+                Some(event) => {
+                    let commands = state.changed_commands();
+                    let sent = out.send(Outgoing::Event {
+                        session: state.handle.clone(),
+                        event,
+                        commands,
+                    });
+                    if sent.is_err() {
+                        return;
+                    }
+                }
+                None => events_open = false,
+            },
+            pending = returns.recv() => match pending {
+                Some(pending) => {
+                    let sent = out.send(Outgoing::Return {
+                        session: Some(state.handle.clone()),
+                        id: pending.id,
+                        result: pending.result,
+                        commands: pending.commands,
+                    });
+                    if sent.is_err() {
+                        return;
+                    }
+                }
+                None => return,
+            },
+            else => return,
         }
     }
+}
+
+/// A call's `Return` goes out behind the session's events. A call that names no session, or
+/// one whose pump has gone, sends it straight out.
+fn deliver_return(
+    shared: &Arc<Shared>,
+    session: Option<Arc<SessionState>>,
+    id: String,
+    result: WireResult,
+    commands: Option<Vec<AgentCommand>>,
+) {
+    if let Some(state) = &session {
+        let pending = PendingReturn {
+            id: id.clone(),
+            result: result.clone(),
+            commands: commands.clone(),
+        };
+        if state.ordered.send(pending).is_ok() {
+            return;
+        }
+    }
+    let handle = session.map(|state| state.handle.clone());
+    let _ = shared.out.send(Outgoing::Return {
+        session: handle,
+        id,
+        result,
+        commands,
+    });
 }
 
 /// Answers a driver's permission request with an `Ask` frame, waiting for the hub's

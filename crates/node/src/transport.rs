@@ -79,6 +79,9 @@ struct MemoryNetwork {
     pending: mpsc::UnboundedSender<Arc<dyn Transport>>,
     /// Closes the current connection on request (see [`MemoryHub::disconnect`]).
     close: Mutex<Option<watch::Sender<bool>>>,
+    /// How many connections have been made, so a test can tell one shared connection from
+    /// several drivers each holding their own.
+    connections: std::sync::atomic::AtomicU64,
 }
 
 /// The hub's end of an in-memory link. Cloneable; one link per node.
@@ -101,6 +104,7 @@ pub fn memory_pair() -> (MemoryHub, MemoryNode) {
         online: AtomicBool::new(true),
         pending,
         close: Mutex::new(None),
+        connections: std::sync::atomic::AtomicU64::new(0),
     });
     (
         MemoryHub { net: net.clone() },
@@ -118,6 +122,9 @@ impl MemoryHub {
         if !self.net.online.load(Ordering::SeqCst) {
             return Err(TransportError("the memory link is offline".into()));
         }
+        self.net
+            .connections
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (hub_tx, node_rx) = mpsc::unbounded_channel();
         let (node_tx, hub_rx) = mpsc::unbounded_channel();
         let (close_tx, close_rx) = watch::channel(false);
@@ -150,6 +157,11 @@ impl MemoryHub {
 
     pub fn set_online(&self, online: bool) {
         self.net.online.store(online, Ordering::SeqCst);
+    }
+
+    /// How many connections have been made over this link so far.
+    pub fn connections(&self) -> u64 {
+        self.net.connections.load(Ordering::SeqCst)
     }
 }
 

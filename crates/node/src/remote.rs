@@ -1,11 +1,14 @@
 //! The hub's side: a [`Driver`] that runs on a node (docs/tasks/B1-NODE.md §3.1).
 //!
-//! [`RemoteDriver`] and [`RemoteSession`] have the same shape as a local driver; each call
-//! becomes an [`Op`] on the link and each `SessionEvent` comes back as a frame. Everything
-//! that is not a session call — name, kind, capabilities, models, whether the CLI is
-//! installed — comes from a [`DriverInfo`]: the local driver's answer for the built-in node
-//! (B1.2), the `Register` snapshot for a remote one (B1.3). This step implements the local
-//! form and leaves the interface for the other.
+//! A node keeps up one control stream to the hub, so the hub holds one [`RemoteNode`] per
+//! node and takes a [`RemoteDriver`] from it for each `(plugin, driver)` on that node: the
+//! connection, the frames not yet acked and the replay bookkeeping are shared, and a driver
+//! adds only the calls. [`RemoteDriver`] and [`RemoteSession`] have the same shape as a local
+//! driver; each call becomes an [`Op`] on the link and each `SessionEvent` comes back as a
+//! frame. Everything that is not a session call — name, kind, capabilities, models, whether
+//! the CLI is installed — comes from a [`DriverInfo`]: the local driver's answer for the
+//! built-in node (B1.2), the `Register` snapshot for a remote one (B1.3). This step
+//! implements the local form and leaves the interface for the other.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -350,12 +353,23 @@ async fn write_loop(
 fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
     match frame {
         ToHub::Register {
+            epoch,
             node_version,
             os,
             hostname,
             plugins,
         } => {
-            *shared.register.lock().expect("register lock poisoned") = Some(RegisterInfo {
+            let mut register = shared.register.lock().expect("register lock poisoned");
+            // A restarted node numbers its frames from 1 again; without this the hub would
+            // take every one of them for a replay and drop it.
+            let restarted = register
+                .as_ref()
+                .is_some_and(|previous| previous.epoch != epoch);
+            if restarted {
+                shared.last_seq.store(0, Ordering::SeqCst);
+            }
+            *register = Some(RegisterInfo {
+                epoch,
                 node_version,
                 os,
                 hostname,
@@ -431,22 +445,17 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
     }
 }
 
-/// The hub's [`Driver`] for one node and one plugin driver.
-pub struct RemoteDriver {
-    plugin: String,
-    driver: Option<String>,
-    info: Arc<dyn DriverInfo>,
+/// The hub's end of one node: the single control stream, what the node has not been acked
+/// for, and the calls waiting for a `Return`. A node accepts one connection
+/// (docs/tasks/B1-NODE.md §3), so every [`RemoteDriver`] on it shares one of these — with a
+/// connection each they would evict one another and ack for each other's `seq`s.
+pub struct RemoteNode {
     shared: Arc<HubShared>,
     actor: tokio::task::JoinHandle<()>,
 }
 
-impl RemoteDriver {
-    pub fn new(
-        plugin: impl Into<String>,
-        driver: Option<DriverKind>,
-        info: Arc<dyn DriverInfo>,
-        link: Arc<dyn HubLink>,
-    ) -> Self {
+impl RemoteNode {
+    pub fn new(link: Arc<dyn HubLink>) -> Self {
         let shared = Arc::new(HubShared {
             link,
             writer: Mutex::new(None),
@@ -459,12 +468,21 @@ impl RemoteDriver {
             register: Mutex::new(None),
         });
         let actor = tokio::spawn(run(shared.clone()));
-        Self {
+        Self { shared, actor }
+    }
+
+    /// A driver for one of this node's `(plugin, driver)` pairs.
+    pub fn driver(
+        self: &Arc<Self>,
+        plugin: impl Into<String>,
+        driver: Option<DriverKind>,
+        info: Arc<dyn DriverInfo>,
+    ) -> RemoteDriver {
+        RemoteDriver {
             plugin: plugin.into(),
             driver: driver.map(|kind| kind.as_str().to_owned()),
             info,
-            shared,
-            actor,
+            node: self.clone(),
         }
     }
 
@@ -476,9 +494,52 @@ impl RemoteDriver {
             .expect("register lock poisoned")
             .clone()
     }
+}
+
+impl Drop for RemoteNode {
+    fn drop(&mut self) {
+        // Let the connection's writer task end instead of waiting for another frame.
+        *self.shared.writer.lock().expect("writer lock poisoned") = None;
+        self.actor.abort();
+    }
+}
+
+/// The hub's [`Driver`] for one node and one plugin driver.
+pub struct RemoteDriver {
+    plugin: String,
+    driver: Option<String>,
+    info: Arc<dyn DriverInfo>,
+    node: Arc<RemoteNode>,
+}
+
+impl RemoteDriver {
+    /// A driver on a node the caller already holds. Build the [`RemoteNode`] once per node
+    /// and take every driver from it.
+    pub fn new(
+        node: Arc<RemoteNode>,
+        plugin: impl Into<String>,
+        driver: Option<DriverKind>,
+        info: Arc<dyn DriverInfo>,
+    ) -> Self {
+        Self {
+            plugin: plugin.into(),
+            driver: driver.map(|kind| kind.as_str().to_owned()),
+            info,
+            node,
+        }
+    }
+
+    /// What the node last said in `Register`, when it has said anything.
+    pub fn register(&self) -> Option<RegisterInfo> {
+        self.node.register()
+    }
+
+    fn shared(&self) -> &Arc<HubShared> {
+        &self.node.shared
+    }
 
     async fn call(&self, op: Op, session: Option<String>) -> Result<WireReply, CoreError> {
-        self.shared.call(op, session).await
+        self.shared().call(op, session).await
     }
 
     fn attach(
@@ -487,7 +548,7 @@ impl RemoteDriver {
         events: mpsc::UnboundedSender<SessionEvent>,
         permissions: Option<Arc<dyn PermissionHandler>>,
     ) -> RemoteSession {
-        attach_session(&self.shared, info, events, permissions)
+        attach_session(&self.node, info, events, permissions)
     }
 
     fn session_info(reply: WireReply) -> Result<SessionInfo, CoreError> {
@@ -512,14 +573,6 @@ impl RemoteDriver {
     }
 }
 
-impl Drop for RemoteDriver {
-    fn drop(&mut self) {
-        // Let the connection's writer task end instead of waiting for another frame.
-        *self.shared.writer.lock().expect("writer lock poisoned") = None;
-        self.actor.abort();
-    }
-}
-
 fn unexpected(want: &str, reply: &WireReply) -> CoreError {
     CoreError::Agent(format!("node answered {reply:?} where {want} was expected"))
 }
@@ -527,20 +580,22 @@ fn unexpected(want: &str, reply: &WireReply) -> CoreError {
 /// Make a session from the node's `Return`: its events go to the caller's channel, and the
 /// commands the node reported sit in a cell the driver and the frames both update.
 fn attach_session(
-    shared: &Arc<HubShared>,
+    node: &Arc<RemoteNode>,
     info: SessionInfo,
     events: mpsc::UnboundedSender<SessionEvent>,
     permissions: Option<Arc<dyn PermissionHandler>>,
 ) -> RemoteSession {
     let commands = Arc::new(Mutex::new(info.commands.clone()));
-    shared.register(&info.handle, events, permissions, commands.clone());
+    node.shared
+        .register(&info.handle, events, permissions, commands.clone());
     RemoteSession {
-        shared: shared.clone(),
+        node: node.clone(),
         handle: info.handle,
         session_id: info.session_id,
         attachment_support: info.attachment_support,
         outlives_hub: info.outlives_hub,
         commands,
+        closed: AtomicBool::new(false),
     }
 }
 
@@ -587,7 +642,7 @@ impl Driver for RemoteDriver {
     }
 
     fn refresh_cli(&self) {
-        self.shared.send_detached(Op::RefreshCli {
+        self.shared().send_detached(Op::RefreshCli {
             plugin: self.plugin.clone(),
             driver: self.driver.clone(),
         });
@@ -661,17 +716,19 @@ impl Driver for RemoteDriver {
 
 /// The hub's [`DriverSession`]: every call names the node's handle for it.
 pub struct RemoteSession {
-    shared: Arc<HubShared>,
+    node: Arc<RemoteNode>,
     handle: String,
     session_id: String,
     attachment_support: Option<AttachmentSupport>,
     outlives_hub: bool,
     commands: Arc<Mutex<Option<Vec<AgentCommand>>>>,
+    /// `shutdown` already told the node; `Drop` must not send it again.
+    closed: AtomicBool,
 }
 
 impl RemoteSession {
     async fn call(&self, op: Op) -> Result<WireReply, CoreError> {
-        self.shared.call(op, Some(self.handle.clone())).await
+        self.node.shared.call(op, Some(self.handle.clone())).await
     }
 
     fn session(&self) -> String {
@@ -681,11 +738,20 @@ impl RemoteSession {
 
 impl Drop for RemoteSession {
     fn drop(&mut self) {
-        self.shared
+        self.node
+            .shared
             .sessions
             .lock()
             .expect("sessions lock poisoned")
             .remove(&self.handle);
+        // A local driver ends the agent process with the session, so a dropped session has
+        // to end on the node too — otherwise the process runs on with nobody to talk to.
+        // A session that is meant to outlive the hub stays.
+        if !self.closed.load(Ordering::SeqCst) && !self.outlives_hub {
+            self.node.shared.send_detached(Op::Shutdown {
+                session: self.handle.clone(),
+            });
+        }
     }
 }
 
@@ -770,7 +836,7 @@ impl DriverSession for RemoteSession {
             .await?;
         match reply {
             WireReply::Session { session } => Ok(Box::new(attach_session(
-                &self.shared,
+                &self.node,
                 session,
                 spec.events.clone(),
                 spec.permissions.clone(),
@@ -808,11 +874,15 @@ impl DriverSession for RemoteSession {
     }
 
     async fn shutdown(&self) {
-        let _ = self
+        if self
             .call(Op::Shutdown {
                 session: self.session(),
             })
-            .await;
+            .await
+            .is_ok()
+        {
+            self.closed.store(true, Ordering::SeqCst);
+        }
     }
 
     fn outlives_hub(&self) -> bool {

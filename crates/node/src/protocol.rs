@@ -40,6 +40,9 @@ pub enum ToNode {
 pub enum ToHub {
     /// First frame of every connection, before anything is replayed.
     Register {
+        /// Which run of the node this is; a new one means `seq` starts over.
+        #[serde(default)]
+        epoch: String,
         node_version: String,
         os: String,
         hostname: String,
@@ -195,6 +198,31 @@ pub enum Op {
     },
 }
 
+impl Op {
+    /// The session the call names, when it names one. Its `Return` goes out behind that
+    /// session's events, so a failed call cannot overtake what the driver already reported.
+    pub fn session(&self) -> Option<&str> {
+        match self {
+            Self::AdoptedTurn { session }
+            | Self::Prompt { session, .. }
+            | Self::Steer { session, .. }
+            | Self::Interrupt { session }
+            | Self::Suspend { session }
+            | Self::Fork { session, .. }
+            | Self::Rollback { session, .. }
+            | Self::SetModel { session, .. }
+            | Self::Compact { session }
+            | Self::Shutdown { session } => Some(session),
+            Self::Open { .. }
+            | Self::Resume { .. }
+            | Self::Adopt { .. }
+            | Self::ProbeCli { .. }
+            | Self::RefreshCli { .. }
+            | Self::CliStatus { .. } => None,
+        }
+    }
+}
+
 /// `SessionSpec` as it crosses the wire: everything but the event sender and the handler,
 /// which the node builds itself (`permissions` becomes a boolean).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -324,36 +352,55 @@ pub enum WireError {
     OutcomeUnknown { message: String },
 }
 
-/// The `NotFound` kinds this workspace uses; a `&'static str` cannot be deserialized, so the
-/// wire carries the word and this table gives the literal back.
-const NOT_FOUND_KINDS: [&str; 20] = [
+/// The `NotFound` kinds the workspace's drivers and services use (`grep 'kind: "'`); a
+/// `&'static str` cannot be deserialized, so the wire carries the word and this table gives
+/// the literal back. Every literal a driver hands out has to be here, or the hub's message
+/// says "record" instead of what was missing.
+const NOT_FOUND_KINDS: [&str; 34] = [
+    "account",
+    "add",
     "agent",
+    "attachment",
     "avatar",
+    "browser request",
+    "codebuddy session",
+    "commit",
+    "device",
+    "example",
+    "expertise candidate",
+    "expertise entry",
+    "extension",
+    "git repository",
+    "human",
+    "issue",
+    "lesson",
+    "login file",
+    "message",
+    "note",
+    "plugin",
+    "project",
+    "question",
+    "reminder",
+    "run",
     "session",
     "task",
+    "terminal",
+    "thinking",
+    "tool",
+    "turn",
+    "update",
+    "watch",
     "work",
-    "run",
-    "project",
-    "lesson",
-    "note",
-    "device",
-    "account",
-    "plugin",
-    "handoff",
-    "human",
-    "message",
-    "expertise",
-    "usage",
-    "node",
-    "record",
-    "claim",
 ];
+
+/// The word a kind this build does not know becomes; it reads as "the thing asked for".
+const UNKNOWN_KIND: &str = "record";
 
 fn not_found_kind(kind: &str) -> &'static str {
     NOT_FOUND_KINDS
         .into_iter()
         .find(|known| *known == kind)
-        .unwrap_or("record")
+        .unwrap_or(UNKNOWN_KIND)
 }
 
 fn status_name(status: TaskStatus) -> String {
@@ -506,6 +553,8 @@ impl From<WireCliStatus> for CliStatus {
 /// Who the node is, as [`ToHub::Register`] says it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterInfo {
+    /// This run of the node. A restart makes a new one, so the hub knows `seq` starts over.
+    pub epoch: String,
     pub node_version: String,
     pub os: String,
     pub hostname: String,
@@ -513,9 +562,10 @@ pub struct RegisterInfo {
 }
 
 impl RegisterInfo {
-    /// This process's answer: the crate version and the machine's host name.
+    /// This process's answer: this run's epoch, the crate version and the machine's name.
     pub fn local() -> Self {
         Self {
+            epoch: new_epoch(),
             node_version: env!("CARGO_PKG_VERSION").to_owned(),
             os: std::env::consts::OS.to_owned(),
             hostname: std::env::var("COMPUTERNAME")
@@ -524,6 +574,18 @@ impl RegisterInfo {
             plugins: Vec::new(),
         }
     }
+}
+
+/// A name for this run of the node: the process, the time it was built up, and a counter, so
+/// two nodes started in the same nanosecond still differ.
+fn new_epoch() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let nth = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!("{}-{nanos}-{nth}", std::process::id())
 }
 
 /// One frame as a line, newline included.
@@ -673,6 +735,49 @@ mod tests {
         }
         .into();
         assert!(matches!(back, CoreError::NotFound { kind: "record", .. }));
+    }
+
+    #[test]
+    fn not_found_kinds_keep_the_words_drivers_use() {
+        // These are what drivers actually return (`grep 'kind: "'`); a missing entry
+        // would turn the hub's message into "record".
+        for kind in [
+            "turn",
+            "codebuddy session",
+            "attachment",
+            "tool",
+            "login file",
+            "git repository",
+            "thinking",
+            "terminal",
+        ] {
+            let wire = WireError::from(&CoreError::NotFound {
+                kind,
+                id: "x".into(),
+            });
+            let back: CoreError = decode::<WireError>(&encode(&wire)).unwrap().into();
+            match back {
+                CoreError::NotFound { kind: back, .. } => assert_eq!(back, kind),
+                other => panic!("{kind} came back as {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn register_carries_the_epoch() {
+        let frame = ToHub::Register {
+            epoch: "run-1".into(),
+            node_version: "0.2.20".into(),
+            os: "linux".into(),
+            hostname: "box".into(),
+            plugins: vec![PluginSnapshot {
+                name: "mock".into(),
+                installed: true,
+                version: Some("1.0.0".into()),
+            }],
+        };
+        let line = encode(&frame);
+        assert_eq!(decode::<ToHub>(&line).unwrap(), frame);
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub use protocol::{
     Op, PluginSnapshot, RegisterInfo, SessionInfo, ToHub, ToNode, WireCliStatus, WireError,
     WireLocated, WirePrompt, WireReply, WireResult, WireSpec,
 };
-pub use remote::{DriverInfo, HubLink, LocalDriverInfo, RemoteDriver, RemoteSession};
+pub use remote::{DriverInfo, HubLink, LocalDriverInfo, RemoteDriver, RemoteNode, RemoteSession};
 pub use service::{ANSWER_TIMEOUT, DriverSource, NodeService, SingleDriverSource, UNACKED_LIMIT};
 pub use transport::{
     MemoryHub, MemoryNode, Transport, TransportError, TransportServer, memory_pair,
