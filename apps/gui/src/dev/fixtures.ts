@@ -120,6 +120,7 @@ export function agent(init: AgentInit): Agent & AgentRelations {
     plugin: init.plugin,
     driver: null,
     model: init.model ?? null,
+    node: null,
     role: init.role,
     home: init.home ?? (init.cwd && !init.cwd.includes("/worktrees/") ? init.cwd : REPO),
     cwd: init.cwd ?? REPO,

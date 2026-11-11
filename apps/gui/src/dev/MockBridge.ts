@@ -1134,6 +1134,7 @@ export class MockBridge implements CrossAgentsBridge {
           home: cwd,
           cwd,
           status: "stopped", // as the hub makes them: started by their first message
+          node: null,
           created_at: new Date().toISOString(),
         };
         s.agents.push(agent);
