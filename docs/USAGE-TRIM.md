@@ -1,6 +1,6 @@
 # CrossAgents：减少额度消耗（第二轮）
 
-> 日期：2026-10-31 · 基线：0.1.20 · 状态：阶段 1、2 已实现，阶段 3 暂缓。  
+> 日期：2026-10-31 · 基线：0.1.20 · 状态：阶段 1、2 已实现，阶段 3 暂缓；2026-11-11 修正 CodeBuddy 用量记账（§7）。  
 > 前一轮见 [SESSION-FIRST.md](SESSION-FIRST.md)（独立 lead、普通聊天精简）。
 
 ## 1. 原则
@@ -141,3 +141,52 @@ lesson 机制保留。常驻部分只有一行提示（[lessons.rs:101](../crate
 - **`agent_list` 筛选分页。** 只在调用时付费，等实际变长再说。
 - **另造通知合并。** digest 已合并模型忙碌期间的同主题通知；提醒和 watch 需要唤醒，不并入静默通道。
 - **删掉普通聊天的 lesson 整理工具、自动摘要历史、强制换模型或减少协作。** 都会改变现有能力。
+
+## 7. CodeBuddy 用量记账修正（2026-11-11）
+
+CodeBuddy 与 Claude Code 共用 `claude_native` 驱动（[wire.rs](../crates/drivers/src/claude_native/wire.rs) 的 `Translator`），帧的字段名相同，口径不同。这一节是 §8（返工换会话）的前提：上下文读数不对，阈值就没法用。
+
+### 7.1 实测口径
+
+codebuddy 2.173.0、`deepseek-v4.1-flash`，在临时目录跑两回合（每回合一次 Read 加回答，共 4 次模型请求），再 `--resume` 跑一回合，把 stream-json 原始帧和 `~/.codebuddy/projects/<目录>/<会话>.jsonl` 里逐请求的 `providerData.rawUsage` 对账：
+
+| 请求 | 会话文件 `prompt_tokens` / `cached_tokens` / `completion_tokens` | `message_delta.usage` 的 `input_tokens` / `cache_read` / `cache_creation` / `output` |
+|---|---|---|
+| 1 | 25230 / 2944 / 73 | 25230 / 2944 / 22286（同一消息的第二个 delta 为 0）/ 73 |
+| 2 | 25333 / 25088 / 26 | 25333 / 25088 / 0 / 26 |
+| 3 | 25387 / 25216 / 65 | 25387 / 25216 / 171 / 65 |
+| 4 | 25482 / 25344 / 11 | 25482 / 25344 / 0 / 11 |
+| resume | 25527 / 25344 / 3 | 25527 / 25344 / 0 / 3 |
+
+| `result.usage` | `input_tokens` | `cache_read` | `cache_creation` | `output` | `_meta.contextUsed` |
+|---|---|---|---|---|---|
+| 第 1 回合 | 50563（= 请求 1+2） | 28032 | 22531（= 两次的 miss） | 99 | 25333 |
+| 第 2 回合 | 101432（= 请求 1~4） | 78592 | 22840 | 175 | 25482 |
+| resume 后第 1 回合（新进程） | 152467（= 会话全部 6 次请求） | 129280 | 23187 | 181 | 25527 |
+
+结论：
+
+- `input_tokens` 是整段 prompt，**已经包含**缓存读；`cache_creation_input_tokens` 是 miss（`prompt − cached`），也在 `input_tokens` 里，不是写缓存（会话文件同一请求 `prompt_cache_write_tokens: 0`）。Claude Code 的 `input_tokens` 不含两者。
+- `result.usage` 是**会话累计**，跨回合，也跨 `--resume` 的进程重启（从会话文件读回来）。Claude Code 的是本回合的量。
+- `_meta.codebuddy.ai/contextUsed` 是最后一次请求的 prompt，本来就对。
+
+### 7.2 改法
+
+`Translator` 按 `Flavor` 分支，Claude 分支一行没动：
+
+- `message_delta`：CodeBuddy 的输入只取 `input_tokens`，不再加两个缓存字段。原来回合中途的 `used` 是 prompt 的约两倍，回合结束又被 `_meta` 拉回一倍，这就是读数在两个值之间跳、比值约 2 的原因。
+- 回合结束：本回合用量 = 本次累计 − 上次累计。进程里第一个回合（它的累计含 resume 之前的所有回合）和没有累计的回合（被打断）改用本回合流式请求之和，打断回合的请求同时记进基线，下一次累计里不会再算一遍。`cache_creation` 不记作 `cache_write_input`（记 0）。
+- 测试 `codebuddy_usage_matches_its_transcript` 用上面的真实帧（只留用量字段）断言两回合合计 101432 / 78592 / 175，resume 回合 25527 / 25344 / 3，以及打断回合不重复计。
+- 端到端：用修正后的 debug 构建另起一个 hub（独立 `CROSSAGENTS_HOME`、端口 7491），`crossagents send -w` 给 CodeBuddy agent 发两回合，`agent stop` 后再发一回合（resume）。`agent.usage` 两段进程合计 input 107194 + 26941 = 134135、cached 82944 + 26752 = 109696、output 155 + 3 = 158，与会话文件 5 次请求的合计完全一致；`used` 在 26743~26944 之间，没有两倍跳变。
+
+### 7.3 历史数据偏大的方式
+
+本修正提交之前的版本（0.2.19 及以前，含 0.2.19 之后、本提交之前的 main 构建）记的 CodeBuddy `agent.usage` 偏大，事件日志不改写，任务账本（`task_cost.rs`）、`usage` 统计都由事件重放，历史数字照旧偏大：
+
+- **input 约两倍、再按累计重复加**：每回合加的是「会话累计 prompt × 约 2」，n 个回合后 `tokens.input ≈ 2 × Σ(第 k 回合时的会话累计)`，回合越多偏得越多；所以命中率看起来略低于一半（49.5%、40.2%、48.4%），同模型走 With 是 95.6%。
+- **cached_input、output 按累计重复加**：没有两倍，但同样是「累计的累计」。
+- **cache_write_input** 记的是 miss 数，按写缓存价估算会偏贵。
+- **进程重启（resume）后第一个回合**把 resume 之前的整段会话累计又加了一次。
+- **`used` 回合中途约两倍**，`peak_context`（取最大值）因此偏大约一倍。
+
+重放时能不能便宜修正（**没做**）：同一会话进程内（以 `Starting` 为界）第 k 回合上报的增量 `Dₖ ≈ 2·Cₖ`（Cₖ 为 CLI 当时的会话累计），真实回合输入约为 `(Dₖ − Dₖ₋₁)/2`，cached 与 output 为相邻增量之差；但每个进程第一个回合的历史部分无法从事件里分出来，修出来仍不准。需要的话可在 `task_cost.rs` 按 agent 的 CLI 是 codebuddy、事件早于本提交来做。

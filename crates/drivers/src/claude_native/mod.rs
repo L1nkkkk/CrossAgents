@@ -348,7 +348,7 @@ impl Shared {
             writer_gate: Mutex::new(()),
             pending: Mutex::default(),
             turn: Mutex::default(),
-            translator: Mutex::default(),
+            translator: Mutex::new(Translator::new(flavor)),
             commands: Mutex::default(),
             turn_ends: Mutex::default(),
             events: spec.events.clone(),

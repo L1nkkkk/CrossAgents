@@ -613,9 +613,89 @@ pub struct Translator {
     /// A `/compact` turn is running: its summary is the session's own bookkeeping, not a
     /// reply, so its text and thinking are not shown.
     pub compacting: bool,
+    /// Which CLI prints the stream: CodeBuddy counts its usage differently (see
+    /// [`CodebuddyCounts`]).
+    flavor: Flavor,
+    /// CodeBuddy only: what the turn's finished requests and the request being streamed
+    /// reported, and the session total its last `result` gave.
+    turn_requests: CodebuddyCounts,
+    message_request: CodebuddyCounts,
+    session_reported: Option<CodebuddyCounts>,
+}
+
+/// CodeBuddy's usage, which is not Claude Code's although the frames look alike (verified
+/// against codebuddy 2.173.0 and its transcripts, docs/USAGE-TRIM.md §7):
+/// - `input_tokens` is the whole prompt; `cache_read_input_tokens` is the part served from
+///   the cache and `cache_creation_input_tokens` the rest (the cache misses), both already
+///   inside `input_tokens`. Claude Code's `input_tokens` leaves both out.
+/// - `result.usage` is the session's running total, across turns and across `--resume`
+///   (it is read back from the transcript), not the turn's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CodebuddyCounts {
+    input: u64,
+    cached: u64,
+    output: u64,
+}
+
+impl CodebuddyCounts {
+    fn of(usage: &Value) -> Self {
+        let num = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        Self {
+            input: num("input_tokens"),
+            cached: num("cache_read_input_tokens"),
+            output: num("output_tokens"),
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            input: self.input + other.input,
+            cached: self.cached + other.cached,
+            output: self.output + other.output,
+        }
+    }
+
+    /// `self - earlier`, if `self` did not go backwards.
+    fn since(self, earlier: Self) -> Option<Self> {
+        Some(Self {
+            input: self.input.checked_sub(earlier.input)?,
+            cached: self.cached.checked_sub(earlier.cached)?,
+            output: self.output.checked_sub(earlier.output)?,
+        })
+    }
 }
 
 impl Translator {
+    pub fn new(flavor: Flavor) -> Self {
+        Self {
+            flavor,
+            ..Self::default()
+        }
+    }
+
+    /// CodeBuddy: the turn's own usage. The difference of two session totals once one is
+    /// known; for the first turn of a process (whose total includes every turn before a
+    /// `--resume`) and a turn without a total, the sum of its streamed requests.
+    fn codebuddy_turn(&mut self, usage: &Value) -> CodebuddyCounts {
+        let streamed = std::mem::take(&mut self.turn_requests)
+            .add(std::mem::take(&mut self.message_request));
+        let total = CodebuddyCounts::of(usage);
+        if total.input == 0 {
+            // An interrupted turn: its requests will be in the next total, so they move the
+            // baseline too, or they would count twice.
+            if let Some(reported) = &mut self.session_reported {
+                *reported = reported.add(streamed);
+            }
+            return streamed;
+        }
+        let turn = self
+            .session_reported
+            .and_then(|reported| total.since(reported))
+            .unwrap_or(streamed);
+        self.session_reported = Some(total);
+        turn
+    }
+
     /// Events for one printed message. `result` messages go through [`Self::turn_end`].
     pub fn translate(&mut self, message: &Value) -> Vec<SessionEventKind> {
         // A subagent's own steps stay inside its tool call.
@@ -672,6 +752,9 @@ impl Translator {
                 // The message before this one is done: its output belongs to the turn now.
                 self.turn_output += self.message_output;
                 self.message_output = 0;
+                self.turn_requests = self
+                    .turn_requests
+                    .add(std::mem::take(&mut self.message_request));
                 self.streaming = event
                     .pointer("/message/id")
                     .and_then(Value::as_str)
@@ -683,15 +766,25 @@ impl Translator {
                     return Vec::new();
                 };
                 let num = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-                let input = num("input_tokens")
-                    + num("cache_read_input_tokens")
-                    + num("cache_creation_input_tokens");
+                let input = match self.flavor {
+                    Flavor::Claude => {
+                        num("input_tokens")
+                            + num("cache_read_input_tokens")
+                            + num("cache_creation_input_tokens")
+                    }
+                    // Already the whole prompt; adding the cache fields doubled it.
+                    Flavor::Codebuddy => num("input_tokens"),
+                };
                 let output = num("output_tokens");
                 // Only a delta that carries the request's input says how much context is in
                 // use; one with the output alone would show a handful of tokens.
                 if input > 0 {
                     self.last_request = Some(input + output);
                     self.context_used = input + output;
+                    if self.flavor == Flavor::Codebuddy {
+                        // A message's deltas repeat its input; the latest is the request's.
+                        self.message_request = CodebuddyCounts::of(usage);
+                    }
                 }
                 if output <= self.message_output {
                     return Vec::new();
@@ -841,17 +934,30 @@ impl Translator {
         let mut events = Vec::new();
         let usage = result.get("usage").unwrap_or(&Value::Null);
         let num = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).unwrap_or(0);
-        let input = num(usage, "input_tokens")
-            + num(usage, "cache_read_input_tokens")
-            + num(usage, "cache_creation_input_tokens");
         // What the messages reported during the turn is the floor: a result that sums them
         // (or omits them, interrupted) must not make the total go backwards.
         let streamed =
             std::mem::take(&mut self.turn_output) + std::mem::take(&mut self.message_output);
-        let output = num(usage, "output_tokens").max(streamed);
+        let (input, cached, cache_write, reported_output) = match self.flavor {
+            Flavor::Claude => (
+                num(usage, "input_tokens")
+                    + num(usage, "cache_read_input_tokens")
+                    + num(usage, "cache_creation_input_tokens"),
+                num(usage, "cache_read_input_tokens"),
+                num(usage, "cache_creation_input_tokens"),
+                num(usage, "output_tokens"),
+            ),
+            // `cache_creation_input_tokens` are the misses, not cache writes: the transcript
+            // says `prompt_cache_write_tokens: 0` for the same requests.
+            Flavor::Codebuddy => {
+                let turn = self.codebuddy_turn(usage);
+                (turn.input, turn.cached, 0, turn.output)
+            }
+        };
+        let output = reported_output.max(streamed);
         self.tokens.input += input;
-        self.tokens.cached_input += num(usage, "cache_read_input_tokens");
-        self.tokens.cache_write_input += num(usage, "cache_creation_input_tokens");
+        self.tokens.cached_input += cached;
+        self.tokens.cache_write_input += cache_write;
         self.tokens.requests = match (
             self.tokens.requests,
             usage.get("iterations").and_then(Value::as_array),
@@ -1735,6 +1841,84 @@ mod tests {
         assert_eq!(used(&mut t, summed.clone()), 400_120);
         // Taken once: a turn without deltas falls back to the result's own figure.
         assert_eq!(used(&mut t, summed), 1_200_300);
+    }
+
+    /// A real two-turn CodeBuddy session (codebuddy 2.173.0, deepseek-v4.1-flash, frames
+    /// trimmed to their usage) and a `--resume`d turn after it. Its transcript's requests
+    /// sum to 101 432 prompt / 78 592 cached / 175 completion tokens for the two turns, and
+    /// 25 527 / 25 344 / 3 for the resumed one; the hub must report the same.
+    #[test]
+    fn codebuddy_usage_matches_its_transcript() {
+        let start = |id: &str| json!({ "type": "stream_event", "event": { "type": "message_start", "message": { "id": id,
+            "usage": { "input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0 } } } });
+        let delta = |input: u64, creation: u64, read: u64, output: u64| {
+            json!({ "type": "stream_event", "event": { "type": "message_delta", "usage": {
+                "input_tokens": input, "cache_creation_input_tokens": creation,
+                "cache_read_input_tokens": read, "output_tokens": output } } })
+        };
+        let result = |input: u64, creation: u64, read: u64, output: u64, context: u64| {
+            json!({ "type": "result", "subtype": "success", "is_error": false, "total_cost_usd": 0,
+                "usage": { "input_tokens": input, "output_tokens": output,
+                    "cache_creation_input_tokens": creation, "cache_read_input_tokens": read },
+                "_meta": { "codebuddy.ai/contextUsed": context },
+                "modelUsage": { "deepseek-v4.1-flash": { "inputTokens": 0, "outputTokens": output,
+                    "cacheReadInputTokens": read, "cacheCreationInputTokens": creation, "contextWindow": 1000000 } } })
+        };
+        let usage = |events: &[SessionEventKind]| match &events[0] {
+            SessionEventKind::Usage { used, tokens, .. } => (*used, tokens.clone().unwrap()),
+            other => panic!("{other:?}"),
+        };
+
+        let mut t = Translator::new(Flavor::Codebuddy);
+        // Turn 1: a Read and the answer.
+        t.translate(&start("01a1c98a17a1"));
+        let (used, _) = usage(&t.translate(&delta(25_230, 22_286, 2_944, 73)));
+        assert_eq!(used, 25_303, "the prompt once, not prompt + cache fields");
+        t.translate(&delta(25_230, 0, 2_944, 73));
+        t.translate(&start("01a1c98a200b"));
+        t.translate(&delta(25_333, 0, 25_088, 26));
+        let (used, tokens) = usage(&t.turn_end(&result(50_563, 22_531, 28_032, 99, 25_333), false).1);
+        assert_eq!(used, 25_333);
+        assert_eq!(
+            (tokens.input, tokens.cached_input, tokens.cache_write_input, tokens.output),
+            (50_563, 28_032, 0, 99)
+        );
+
+        // Turn 2: the result is the session's total, not the turn's.
+        t.translate(&start("01a1c98a28db"));
+        let (used, _) = usage(&t.translate(&delta(25_387, 171, 25_216, 65)));
+        assert_eq!(used, 25_452);
+        t.translate(&delta(25_387, 0, 25_216, 65));
+        t.translate(&start("01a1c98a2e1b"));
+        t.translate(&delta(25_482, 0, 25_344, 11));
+        let (used, tokens) = usage(&t.turn_end(&result(101_432, 22_840, 78_592, 175, 25_482), false).1);
+        assert_eq!(used, 25_482);
+        assert_eq!(
+            (tokens.input, tokens.cached_input, tokens.output, tokens.total),
+            (101_432, 78_592, 175, 101_607)
+        );
+
+        // A new process on `--resume`: its first total carries every earlier turn (one more
+        // turn ran in between), so the turn is what its requests streamed.
+        let mut t = Translator::new(Flavor::Codebuddy);
+        t.translate(&start("01a1c98d24ff"));
+        t.translate(&delta(25_527, 0, 25_344, 3));
+        let (_, tokens) = usage(&t.turn_end(&result(152_467, 23_187, 129_280, 181, 25_527), false).1);
+        assert_eq!((tokens.input, tokens.cached_input, tokens.output), (25_527, 25_344, 3));
+
+        // An interrupted turn has no total; the next total includes it, counted once.
+        t.translate(&start("m-interrupted"));
+        t.translate(&delta(26_000, 0, 25_500, 7));
+        t.turn_end(&json!({ "type": "result", "subtype": "error_during_execution" }), true);
+        t.translate(&start("m-next"));
+        t.translate(&delta(26_100, 0, 26_000, 5));
+        let (_, tokens) = usage(
+            &t.turn_end(&result(152_467 + 26_000 + 26_100, 0, 129_280 + 25_500 + 26_000, 181 + 7 + 5, 26_100), false).1,
+        );
+        assert_eq!(
+            (tokens.input, tokens.cached_input, tokens.output),
+            (25_527 + 26_000 + 26_100, 25_344 + 25_500 + 26_000, 3 + 7 + 5)
+        );
     }
 
     #[test]
