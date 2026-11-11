@@ -347,6 +347,7 @@ impl Fixture {
 
 fn agent(name: &str, role: Role, home: &Path) -> Agent {
     Agent {
+        node: None,
         id: AgentId::new(),
         name: name.into(),
         name_source: Default::default(),

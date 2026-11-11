@@ -105,6 +105,7 @@ fn approve(registry: &Registry, name: &str) -> String {
 
 fn agent(name: &str) -> Agent {
     Agent {
+        node: None,
         id: AgentId::new(),
         name_source: NameSource::Chosen,
         topic: None,

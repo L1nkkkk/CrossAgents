@@ -264,6 +264,7 @@ mod tests {
     #[test]
     fn cursor_windows_permissions_follow_run_policy() {
         let mut agent = Agent {
+            node: None,
             id: crossagents_core::AgentId::new(),
             name: "Cursor".into(),
             name_source: Default::default(),

@@ -496,6 +496,8 @@ struct HubSection {
     notice_batch_quiet_secs: Option<u64>,
     /// Seconds after the earliest batched notice at which it wakes anyway (default 180).
     notice_batch_max_secs: Option<u64>,
+    /// Whether the hub runs its own built-in node (default on). Only read here for now.
+    builtin_node: Option<bool>,
 }
 
 /// Hub settings. `port = 0` binds a random free port.
@@ -533,6 +535,9 @@ pub struct HubConfig {
     pub notice_batch_quiet: std::time::Duration,
     /// Longest a batched notice waits after the earliest one in the batch.
     pub notice_batch_max: std::time::Duration,
+    /// `[hub] builtin_node`: whether the hub runs its own built-in node (default on; on in
+    /// [`HubConfig::new`]). Only the setting for now; nothing reads it yet.
+    pub builtin_node: bool,
 }
 
 impl HubConfig {
@@ -553,6 +558,7 @@ impl HubConfig {
             terminal_idle: crate::terminal::DEFAULT_IDLE,
             notice_batch_quiet: std::time::Duration::from_secs(60),
             notice_batch_max: std::time::Duration::from_secs(180),
+            builtin_node: true,
         }
     }
 }
@@ -623,6 +629,7 @@ impl HubConfig {
             notice_batch_max: std::time::Duration::from_secs(
                 config.hub.notice_batch_max_secs.unwrap_or(180),
             ),
+            builtin_node: config.hub.builtin_node.unwrap_or(true),
         })
     }
 }
@@ -640,10 +647,17 @@ mod tests {
         // One build directory per worktree, and a full test build of this workspace is about
         // 10 GB, so a run at the default parallelism holds ~40 GB (docs/TODO.md §九 ②).
         assert_eq!(defaults.build_cache_limit, 120 << 30);
-        std::fs::write(paths.config(), "[hub]\nport = 0\nbuild_cache_gb = 8\n").unwrap();
+        assert!(defaults.builtin_node);
+        assert!(HubConfig::new(paths.clone(), 0).builtin_node);
+        std::fs::write(
+            paths.config(),
+            "[hub]\nport = 0\nbuild_cache_gb = 8\nbuiltin_node = false\n",
+        )
+        .unwrap();
         let config = HubConfig::load(paths).unwrap();
         assert_eq!(config.port, 0);
         assert_eq!(config.build_cache_limit, 8 << 30);
+        assert!(!config.builtin_node);
     }
 
     #[test]

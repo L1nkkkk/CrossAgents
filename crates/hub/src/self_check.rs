@@ -85,6 +85,7 @@ async fn check(driver: Arc<dyn Driver>, model: Option<String>, mut witness: Witn
     let (events, mut rx) = mpsc::unbounded_channel();
     let spec = SessionSpec {
         agent: Agent {
+            node: None,
             id: AgentId::new(),
             name: "self-check".into(),
             name_source: NameSource::Chosen,

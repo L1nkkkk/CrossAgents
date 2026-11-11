@@ -4292,6 +4292,7 @@ mod tests {
 
     fn external(name: &str) -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name: name.into(),
             name_source: NameSource::Chosen,

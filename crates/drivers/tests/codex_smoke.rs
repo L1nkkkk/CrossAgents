@@ -52,6 +52,7 @@ fn spec(
     config["effort"] = "low".into();
     let spec = SessionSpec {
         agent: Agent {
+            node: None,
             id: AgentId::new(),
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,

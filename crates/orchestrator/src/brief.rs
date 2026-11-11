@@ -700,6 +700,7 @@ mod tests {
 
     fn agent(name: &str) -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,

@@ -917,6 +917,7 @@ async fn create_agent(
         .map(|t| t.trim().chars().take(120).collect::<String>())
         .filter(|t| !t.is_empty());
     let agent = Agent {
+        node: None,
         id,
         name_source,
         topic,
@@ -3777,6 +3778,7 @@ mod candidate_policy_tests {
             .unwrap();
         let now = Utc::now();
         let agent = Agent {
+            node: None,
             id: AgentId::new(),
             name: "Cursor".into(),
             name_source: Default::default(),

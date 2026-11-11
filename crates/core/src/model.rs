@@ -77,6 +77,10 @@ pub struct Agent {
     /// transcript kept; restoring clears it.
     #[serde(default)]
     pub archived_at: Option<DateTime<Utc>>,
+    /// The node (device id) the agent runs on; `None` (and an empty id) is the hub's own
+    /// built-in node. See docs/tasks/B1-NODE.md §5.
+    #[serde(default)]
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1284,6 +1288,7 @@ mod tests {
     #[test]
     fn identity_names_the_agent_and_its_model() {
         let agent = Agent {
+            node: None,
             id: AgentId::new(),
             name: "Luna".into(),
             name_source: NameSource::Generated,

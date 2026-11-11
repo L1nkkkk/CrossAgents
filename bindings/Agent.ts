@@ -61,4 +61,9 @@ topic: string | null,
  * Set while the conversation is archived: out of the lists and stopped, every
  * transcript kept; restoring clears it.
  */
-archived_at: string | null, };
+archived_at: string | null, 
+/**
+ * The node (device id) the agent runs on; `None` (and an empty id) is the hub's own
+ * built-in node. See docs/tasks/B1-NODE.md §5.
+ */
+node: string | null, };

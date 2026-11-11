@@ -609,6 +609,7 @@ mod tests {
         (
             SessionSpec {
                 agent: Agent {
+                    node: None,
                     id: AgentId::new(),
                     name: "Cursor".into(),
                     name_source: Default::default(),

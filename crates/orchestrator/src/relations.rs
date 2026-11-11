@@ -173,6 +173,7 @@ mod tests {
 
     fn agent(name: &str) -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name_source: Default::default(),
             topic: None,
