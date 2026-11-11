@@ -1,7 +1,7 @@
 # B1 任务书：节点（每台机器的 CLI 在本机跑，hub 汇总）
 
 > 依据：[MULTI-NODE.md](../MULTI-NODE.md) §0、§3、§7、§11、§12「B1」、§15 · 相关：[PROCESS-SUPERVISION.md](../PROCESS-SUPERVISION.md)、[MACOS.md](MACOS.md) §4 ·
-> 来源：2026-11-12 对话（人：「每个机器的 cli 跟着 gui 走，hub 来汇总」）· 状态：任务书草稿，待人审，未开工
+> 来源：2026-11-12 对话（人：「每个机器的 cli 跟着 gui 走，hub 来汇总」）· 状态：§3 与 §9 的选择人已确认（2026-11-12，按推荐），未开工
 
 ## 1. 要做成什么样
 
@@ -37,13 +37,13 @@ flowchart LR
 
 ## 3. 已定与建议定下的选择
 
-MULTI-NODE §11 有三条和 B1 直接相关，任务书建议这样定（人审时确认）：
+MULTI-NODE §11 有三条和 B1 直接相关，2026-11-12 人确认按下表定：
 
 | §11 | 建议 | 理由 |
 |---|---|---|
-| 第 10 条：节点怎么连中心 | **走打洞**（`crates/link`），node 用 `kind = node` 的设备 token | 已经在 Mac 上跑通；不开端口、不要证书；A1 已为 node 预留 kind（[access.rs](../../crates/hub/src/access.rs) 里 node token 到不了现有路由） |
-| 第 4 条：通道格式 | **一条 QUIC 流上的 JSON 行**，消息体直接用 `core` 里已经 `Serialize` 的类型（`SessionEvent`、`Agent`、`PermissionRequest` 等） | 和 runtime host 的 [wire.rs](../../crates/drivers/src/host/wire.rs) 同一种做法（带 `seq` 和 `ack`，重连补发），已经被进程监督验证过；不引入 gRPC |
-| 第 5 条：MCP | **节点转发**：节点把中心 hub 的 API 端口经打洞转到自己的 `127.0.0.1`，agent 的 `crossagents mcp` 连这个端口 | agent 侧配置不变（MCP 仍是本机 stdio 进程）；会话 token 照旧由 hub 发、hub 验 |
+| 第 10 条：节点怎么连中心 | **已定：走打洞**（`crates/link`），node 用 `kind = node` 的设备 token | 已经在 Mac 上跑通；不开端口、不要证书；A1 已为 node 预留 kind（[access.rs](../../crates/hub/src/access.rs) 里 node token 到不了现有路由） |
+| 第 4 条：通道格式 | **已定：一条 QUIC 流上的 JSON 行**，消息体直接用 `core` 里已经 `Serialize` 的类型（`SessionEvent`、`Agent`、`PermissionRequest` 等） | 和 runtime host 的 [wire.rs](../../crates/drivers/src/host/wire.rs) 同一种做法（带 `seq` 和 `ack`，重连补发），已经被进程监督验证过；不引入 gRPC |
+| 第 5 条：MCP | **已定：节点转发**：节点把中心 hub 的 API 端口经打洞转到自己的 `127.0.0.1`，agent 的 `crossagents mcp` 连这个端口 | agent 侧配置不变（MCP 仍是本机 stdio 进程）；会话 token 照旧由 hub 发、hub 验 |
 
 ### 3.1 切在哪里：`Driver` trait
 
@@ -124,4 +124,4 @@ hub 现在通过 [`Driver` / `DriverSession`](../../crates/core/src/driver.rs) �
 - **权限回调变成跨机器往返。** `Ask` 慢了会拖住 agent；超时（60 秒）按 `PermissionPolicy` 的默认处理，并发一条 `Warning`。
 - **同一个 CLI 账号多机同时登录**（§11 第 8 条）：B1 不处理，各机器各自登录，界面只标出来。
 - **离线缓存上限**（§4）的数字，人可改。
-- **要人确认**：§3 的三个选择；B1 范围里不含远程 Work run；B1.7 终端是否放进 B1 还是挪到 B3。
+- **已确认（2026-11-12）**：§3 的三个选择；B1 不含远程 Work run；B1.7 节点上的终端留在 B1，排最后一步。

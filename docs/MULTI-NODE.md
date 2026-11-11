@@ -339,13 +339,13 @@ agents ||--o{ events
 1. 中心放哪台机器：这台 Windows 常开，还是另一台 Linux。**保留待定**；[TODO.md](TODO.md) §八 现有的提议是「先用这台 Windows」（A 阶段），B1 之后再考虑迁到云服务器当纯中心。
 2. 连通方式：**已定**——局域网和公网都要，默认打洞（组网工具）；A 阶段远程 GUI 走 SSH 隧道（§14「SSH 隧道」），hub 不开放 listen。非回环一律 TLS 与证书指纹留到 A3，开放 listen 时才做（§10）。
 3. Mac 的角色：**已定**——Mac 是 GUI + 节点（§3），并且连不上中心时还要能单干（§15）；所以阶段 B 要做，和 A 的先后由人定（§12）。
-4. hub ↔ node 的通道用 WSS 还是 gRPC 流，消息格式是否直接复用 `api-types`。
-5. 协作工具 MCP 走 node 转发还是直连中心（§7.2）。
+4. hub ↔ node 的通道：**已定**（2026-11-12）——打洞连接上一条 QUIC 流的 JSON 行，消息体复用 `core` 的类型，带 seq / ack 补发（[tasks/B1-NODE.md](tasks/B1-NODE.md) §4）。
+5. 协作工具 MCP：**已定**（2026-11-12）——走 node 转发：节点把中心 API 端口经打洞转到本机，agent 侧配置不变（§7.2，[tasks/B1-NODE.md](tasks/B1-NODE.md) §3）。
 6. 节点离线缓存的上限与过期策略。
 7. 外部服务器部署时对话是否只存摘要。
 8. 同一 CLI 账号多机同时登录的厂商限制。
 9. 远程节点、中心 hub 的独立下载包放哪、怎么校验；安装包与 exe 的代码签名（§13.5）。
-10. B1 的节点怎么连中心：经 SSH 隧道（Mac 可复用 GUI 那条，§4.3），还是等 A3 开端口。**待定**。
+10. B1 的节点怎么连中心：**已定**（2026-11-12）——走内置打洞，`kind = node` 的设备 token（[tasks/B1-NODE.md](tasks/B1-NODE.md) §3）。
 
 ## 12. 分阶段
 
@@ -354,7 +354,7 @@ agents ||--o{ events
 | A1 设备与 token（已完成，2026-11-08，`9f8a07d`、`eeac7b7`） | `devices` 表：kind 为 client 或 node，level 为 read / write / admin（默认 client / write），token 形如 `cad_` 加 64 位 hex，库里只存 SHA-256。`GET /v1/devices`（read，不含 token 和哈希）、`POST /v1/devices`（admin，body `{ name, kind?, level? }`，返回 `{ device, token }`，token 只显示一次）、`DELETE /v1/devices/{id}`（admin，幂等）。CLI：`crossagents device add`（`--level` 默认 write、`--kind` 默认 client）、`device list`、`device revoke`（id 或名字）；`--json` 是全局参数（[device.rs](../crates/cli/src/cmd/device.rs) `DeviceCommand`、[main.rs](../crates/cli/src/main.rs) `Cli`）。client 按级别走现有路由表；node 的 token 到不了现有路由。不含 `users`、密码登录、可信设备确认、登录限速（那些在 A3）。级别见 [API-AUTH.md](API-AUTH.md) §3 | 已完成：能签发、列出、吊销设备 token；设置里能看到设备并吊销。验收与仓库里的测试一致：`cargo test -p crossagents-hub --lib access`、`cargo test -p crossagents-hub --test devices`、`cargo test -p crossagents-api-types`、`cargo test -p crossagents-cli device`、`npm --prefix apps/gui run typecheck`、`npm --prefix apps/gui test` |
 | A2 SSH 隧道（代码已完成，2026-11-08，`2005166`、`f6a956a`、`fec959c`、`718e7d4`、`aeb3e8d`；验收要实测） | 设置「连接」页配对（§4.3）；`ssh -N -L`，本机端口沿用，断线按 1/2/5/10/30 秒重连，401 停止；远程模式不管理任何 hub（§13.3）；扩展资源与工作区原始字节经 hub，远程用默认程序打开的是副本（§16）。settings 与 repos/init 已升 admin | 要实测：Mac GUI 经 SSH 隧道连上 Windows hub，两端对话一致；隧道断开后重连，按 `Last-Event-ID` 续传（§14「怎么实测」） |
 | A3 开端口直连 | `[hub] listen`（默认仍 `127.0.0.1`）；非回环 TLS、自签证书短码比对后固定指纹、一个 hub 记多个地址；`users` 表与密码登录（`/v1/auth/login`、`crossagents user add`、登录页）；可信设备确认（新设备要在已有设备上确认，开终端、批准扩展、登录 CLI 账号、配对节点再验证一次密码）；`/v1/auth/login` 限速；无效 `cad_` token 的查库限速（§10，[TODO.md](TODO.md) §八 A3） | 不能 SSH 的客户端用账号密码连上已开放 listen 的 hub；指纹固定后换地址仍认同一台 |
-| B1 node 代理（任务书 [tasks/B1-NODE.md](tasks/B1-NODE.md)，待审） | 节点怎么连中心待定（§11 第 10 条）；走 A3 开端口时才用 `crossagents node join` 与配对码。hub ↔ node 通道，驱动执行半边挪到 node，本机 hub 也通过内置 node 执行；内置终端在节点上开、节点启动用登录 shell 取环境、`runs_on` / 快照下发 / 创造模式上传（§7.1、§16） | Windows hub 在 Mac 节点上拉起 Codex 并回传事件 |
+| B1 node 代理（任务书 [tasks/B1-NODE.md](tasks/B1-NODE.md)） | 节点怎么连中心待定（§11 第 10 条）；走 A3 开端口时才用 `crossagents node join` 与配对码。hub ↔ node 通道，驱动执行半边挪到 node，本机 hub 也通过内置 node 执行；内置终端在节点上开、节点启动用登录 shell 取环境、`runs_on` / 快照下发 / 创造模式上传（§7.1、§16） | Windows hub 在 Mac 节点上拉起 Codex 并回传事件 |
 | B2 跨节点 Chat | 带节点名的模型、`@` 分组、跨节点招人、节点离线状态 | Mac 上的 Chat 招 `hy4@win` 并收到结果 |
 | B3 远程开发 | 远程选目录、GUI 看 diff 和文件、截图与产物回传 | 在 Mac 上完成一次 Windows 项目的改、编、测 |
 | C 单干模式 | GUI 记中心与本机两个 hub、连不上中心切到本机并标明当前连接、单干期间对话分开放；hub 在 macOS 上跑（§15） | 断网时 Mac 用本机 hub + 内置节点继续开 Chat，GUI 标明「本机」；中心恢复后中心建的 agent 补发事件 |
