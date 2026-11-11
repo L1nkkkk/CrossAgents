@@ -2207,6 +2207,7 @@ mod launch_tests {
         let (events, _rx) = mpsc::unbounded_channel();
         SessionSpec {
             agent: Agent {
+                node: None,
                 id: AgentId::new(),
                 name_source: NameSource::Chosen,
                 topic: None,

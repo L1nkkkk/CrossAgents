@@ -3274,6 +3274,7 @@ mod tests {
     #[test]
     fn agent_roster_preserves_optional_unusable_reason() {
         let agent = Agent {
+            node: None,
             id: crossagents_core::AgentId::new(),
             name: "Cursor".into(),
             name_source: Default::default(),

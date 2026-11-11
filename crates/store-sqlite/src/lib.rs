@@ -255,6 +255,8 @@ fn agent_from_row(row: &SqliteRow) -> Result<Agent, CoreError> {
             .as_deref()
             .map(time_from)
             .transpose()?,
+        // NULL: the hub's built-in node (rows from before nodes are not migrated).
+        node: get_opt("node")?,
     })
 }
 
@@ -437,8 +439,8 @@ impl Store for SqliteStore {
 
     async fn insert_agent(&self, agent: &Agent) -> Result<(), CoreError> {
         let result = sqlx::query(
-            "INSERT INTO agents (id, name, plugin, driver, model, role, cwd, config, status, created_at, profile, name_source, topic, archived_at, home)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO agents (id, name, plugin, driver, model, role, cwd, config, status, created_at, profile, name_source, topic, archived_at, home, node)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(agent.id.to_string())
         .bind(&agent.name)
@@ -455,6 +457,7 @@ impl Store for SqliteStore {
         .bind(&agent.topic)
         .bind(agent.archived_at.map(|t| t.to_rfc3339()))
         .bind(agent.home().to_string_lossy().into_owned())
+        .bind(&agent.node)
         .execute(&self.pool)
         .await;
         match result {
@@ -2669,6 +2672,7 @@ mod tests {
 
     fn agent(name: &str) -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,
@@ -2689,6 +2693,27 @@ mod tests {
                 ..AgentProfile::default()
             },
         }
+    }
+
+    #[tokio::test]
+    async fn agent_node_round_trips() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let mut remote = agent("remote");
+        remote.node = Some("device-7".into());
+        store.insert_agent(&remote).await.unwrap();
+        store.insert_agent(&agent("local")).await.unwrap();
+
+        let back = store
+            .get_agent(&AgentKey::Name("remote".into()))
+            .await
+            .unwrap();
+        assert_eq!(back.node.as_deref(), Some("device-7"));
+        assert_eq!(back, remote);
+        let local = store
+            .get_agent(&AgentKey::Name("local".into()))
+            .await
+            .unwrap();
+        assert_eq!(local.node, None);
     }
 
     #[tokio::test]

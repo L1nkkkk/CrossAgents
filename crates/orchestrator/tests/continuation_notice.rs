@@ -173,6 +173,7 @@ async fn continuation_delivery_failure_notice_rearms_after_success() {
         },
     );
     let lead = Agent {
+        node: None,
         id: AgentId::new(),
         name: "lead".into(),
         name_source: Default::default(),

@@ -232,6 +232,7 @@ mod tests {
 
     fn worker(plugin: &str) -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name_source: NameSource::Chosen,
             topic: None,

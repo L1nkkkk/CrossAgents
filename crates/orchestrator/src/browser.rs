@@ -337,6 +337,7 @@ mod tests {
 
     fn caller() -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name: "Ada".into(),
             name_source: Default::default(),

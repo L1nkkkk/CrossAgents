@@ -225,6 +225,7 @@ mod tests {
 
     fn agent(name: &str, display: Option<&str>) -> Agent {
         Agent {
+            node: None,
             id: AgentId::new(),
             name: name.into(),
             name_source: Default::default(),

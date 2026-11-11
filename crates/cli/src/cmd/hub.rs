@@ -739,6 +739,7 @@ mod tests {
 
     fn agent(name: &str, status: AgentStatus, archived: bool) -> Agent {
         Agent {
+            node: None,
             id: crossagents_api_types::AgentId::new(),
             name: name.to_owned(),
             name_source: Default::default(),
