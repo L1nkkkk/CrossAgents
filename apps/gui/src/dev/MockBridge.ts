@@ -1372,6 +1372,7 @@ export class MockBridge implements CrossAgentsBridge {
       }
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/(install|upgrade)$/)))
         return this.installCli(decodeURIComponent(m[1]), m[2] as "install" | "upgrade");
+      if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/self-check$/))) return this.selfCheck(decodeURIComponent(m[1]));
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/models$/))) {
         const plugin = s.plugins.find((x) => x.name === decodeURIComponent(m![1]));
         if (!plugin) return json(404, { error: { code: "not_found", message: "no such plugin" } });
@@ -1592,6 +1593,29 @@ export class MockBridge implements CrossAgentsBridge {
         }, 700),
       );
     }
+    return json(202);
+  }
+
+  /** Like the hub's `self_check_plugin`: 202 at once, `plugin.changed` when it starts and ends. */
+  private selfCheck(name: string): HubResponse {
+    const plugin = this.state.plugins.find((p) => p.name === name);
+    const cli = plugin?.cli;
+    if (!plugin || !cli) return notFound("plugin");
+    if (cli.self_checking || !cli.version) {
+      return json(409, {
+        error: { code: "conflict", message: `${name} cannot be checked now: a check is running, or its CLI reports no version` },
+      });
+    }
+    cli.self_checking = true;
+    this.emit({ type: "plugin.changed", data: { name } });
+    this.timers.push(
+      setTimeout(() => {
+        cli.self_checking = false;
+        cli.version_status = "known_good";
+        cli.last_ok_at = new Date().toISOString();
+        this.emit({ type: "plugin.changed", data: { name } });
+      }, 1500),
+    );
     return json(202);
   }
 

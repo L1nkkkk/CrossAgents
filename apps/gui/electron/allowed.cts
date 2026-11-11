@@ -55,7 +55,7 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "DELETE", path: /^\/v1\/background\/reminders\/[^/]+$/, level: "write" },
   { method: "GET", path: /^\/v1\/plugins$/, level: "read" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/models$/, level: "write" },
-  { method: "POST", path: /^\/v1\/plugins\/[^/]+\/(install|upgrade)$/, level: "admin" },
+  { method: "POST", path: /^\/v1\/plugins\/[^/]+\/(install|upgrade|self-check)$/, level: "admin" },
   // Extensions (docs/EXTENSIONS.md §3, §5). Enabling one and switching auto-trust are the
   // person's: the hub's admin level is the real check. A GUI-side call's tool name is bare.
   { method: "GET", path: /^\/v1\/extensions$/, level: "read" },
