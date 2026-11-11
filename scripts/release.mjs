@@ -97,6 +97,15 @@ if (!token && !skipPublish) {
 console.log(`  ${current} → \x1b[1m${version}\x1b[0m（tag ${tag}，发到 ${RELEASES_REPO}）`);
 console.log(`  HEAD ${run("git rev-parse --short HEAD")} ${run("git log -1 --format=%s")}`);
 
+// 0.2.18 带着一个 GUI 调不通的路由出去了：electron/allowed.cts 漏了它，allowed.test 能抓到，
+// 但那个测试只在 npm test 里跑，提交前的校验不跑它。所以发版前跑一遍全量 GUI 测试。
+step("apps/gui 下 npm test（含 electron 白名单测试）");
+try {
+  runLoud("npm test", { cwd: new URL("../apps/gui", import.meta.url), env: buildEnv });
+} catch {
+  die("npm test 没过；修好再发");
+}
+
 if (dryRun) {
   console.log("\n--dry-run：检查都过了，没有改动任何东西。");
   process.exit(0);
