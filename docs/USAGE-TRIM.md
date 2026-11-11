@@ -1,6 +1,6 @@
 # CrossAgents：减少额度消耗（第二轮）
 
-> 日期：2026-10-31 · 基线：0.1.20 · 状态：阶段 1、2 已实现，阶段 3 暂缓；2026-11-11 修正 CodeBuddy 用量记账（§7）。  
+> 日期：2026-10-31 · 基线：0.1.20 · 状态：阶段 1、2 已实现，阶段 3 暂缓；2026-11-11 修正 CodeBuddy 用量记账（§7）、返工时上下文过大换新会话（§8）。  
 > 前一轮见 [SESSION-FIRST.md](SESSION-FIRST.md)（独立 lead、普通聊天精简）。
 
 ## 1. 原则
@@ -181,7 +181,7 @@ codebuddy 2.173.0、`deepseek-v4.1-flash`，在临时目录跑两回合（每回
 
 ### 7.3 历史数据偏大的方式
 
-本修正提交之前的版本（0.2.19 及以前，含 0.2.19 之后、本提交之前的 main 构建）记的 CodeBuddy `agent.usage` 偏大，事件日志不改写，任务账本（`task_cost.rs`）、`usage` 统计都由事件重放，历史数字照旧偏大：
+本修正提交（`eeb7b09`）之前的版本（0.2.19 及以前，含 0.2.19 之后、该提交之前的 main 构建）记的 CodeBuddy `agent.usage` 偏大，事件日志不改写，任务账本（`task_cost.rs`）、`usage` 统计都由事件重放，历史数字照旧偏大：
 
 - **input 约两倍、再按累计重复加**：每回合加的是「会话累计 prompt × 约 2」，n 个回合后 `tokens.input ≈ 2 × Σ(第 k 回合时的会话累计)`，回合越多偏得越多；所以命中率看起来略低于一半（49.5%、40.2%、48.4%），同模型走 With 是 95.6%。
 - **cached_input、output 按累计重复加**：没有两倍，但同样是「累计的累计」。
@@ -190,3 +190,65 @@ codebuddy 2.173.0、`deepseek-v4.1-flash`，在临时目录跑两回合（每回
 - **`used` 回合中途约两倍**，`peak_context`（取最大值）因此偏大约一倍。
 
 重放时能不能便宜修正（**没做**）：同一会话进程内（以 `Starting` 为界）第 k 回合上报的增量 `Dₖ ≈ 2·Cₖ`（Cₖ 为 CLI 当时的会话累计），真实回合输入约为 `(Dₖ − Dₖ₋₁)/2`，cached 与 output 为相邻增量之差；但每个进程第一个回合的历史部分无法从事件里分出来，修出来仍不准。需要的话可在 `task_cost.rs` 按 agent 的 CLI 是 codebuddy、事件早于本提交来做。
+
+## 8. 返工时上下文过大就换新会话（2026-11-11）
+
+### 8.1 为什么
+
+检查或评审不过时，任务退回原 worker 的原会话。这时它的上下文常有 20~30 万 token，返工阶段每次模型请求都把这段上下文重发一遍。下面四个任务（按 §7 的口径修正后，单位百万 token）交付之后花掉的量与首次交付前同一量级：
+
+| 任务 | 总量 | 首次交付前 | 交付之后 | 首次交付时上下文 |
+|---|---|---|---|---|
+| wake-guard | 63.9 | 38.7 | 25.2 | 约 28 万 |
+| workflow-handoff | 47.8 | 24.1 | 23.7 | 约 22 万 |
+| exp-api | 20.2 | 7.6 | 12.6 | 13 万 |
+| cursor-account | 34.9 | 30.6 | 4.2 | 24 万 |
+
+反面情况：p1-g1-2 换人接手后新 worker 又花了约 28M，上下文重新长到 24 万。剩余工作量大时新会话也会长回去，省多少只能实测，不预设比例。
+
+### 8.2 行为
+
+「任务交付后又退回同一个 worker」的路径有三条，都改了：
+
+| 路径 | 位置 |
+|---|---|
+| 检查不过、评审要求修改（`return_work` → `ReviewReturn::Own`） | [review.rs](../crates/orchestrator/src/review.rs) `send_back_to_worker` |
+| lead 的 `task_rework`（`spec.on_reject` 没指向别人时） | [tasks.rs](../crates/orchestrator/src/tasks.rs) `task_rework` |
+| 人在评审页退回（`review_task` 带 `rework`） | [review.rs](../crates/orchestrator/src/review.rs) `review_task` |
+
+`spec.on_reject` 指向别人、原 worker 会话已不在（本来就开新执行会话）这两条路径本来就是新会话，不变。
+
+退回时读这个 worker 最近一次上报的上下文（`agent.usage` 的 `used`，编排器内存里的 `contexts`，与交接卡片的 `context_tokens` 同一来源）：
+
+- 超过阈值：同一个 agent 换新的模型会话，走 `run_next` 给 lead 换会话的同一条路（`AgentHost::renew_session`，忙时等它的回合结束，最多 `round_wait_limit`）。assignee、名字、任务账本都不变，账本遇到新会话的 `Starting` 从零计。开场消息见 §8.3。
+- 不超过、阈值关掉、读不到（hub 重启后这个 worker 还没报过用量）：和以前一样发回原会话，消息逐字不变。
+- 等不到回合结束或宿主不支持换会话：退回原会话，发原来的消息（日志有警告）。
+
+阈值：`RunPolicy.rework_new_session_tokens`（run 的 `policy`，可选），缺省 150000（`DEFAULT_REWORK_NEW_SESSION_TOKENS`），`0` 关掉。150000 取自 §8.1 四个任务，没有调过，只是起点。目前只能经 API 的 `policy` 设置，CLI 和 GUI 没有入口。
+
+不叫醒 lead：lead 收到的仍只是原来那条 `Silent`，换会话本身只记一条事件。不自动摘要历史、不换模型、不改协作流程。
+
+### 8.3 开场消息
+
+由 hub 状态生成（[brief.rs](../crates/orchestrator/src/brief.rs) `rework_opening`），和换人交接卡片（`handover`）共用同一段「已做的工作」写法：
+
+1. 任务说明：与派工时相同的 `assignment`（目标、范围、接口、验收命令、怎么交付）。
+2. 一行说明：之前在另一个会话里做过、上下文到了多少、改动都还在工作目录里。
+3. 已改动的文件：工作目录相对基线的改动（已提交和未提交），同 `left_by_worker`。
+4. 上次交付时的说明：`task.report.summary`（没有就用最后一条进展）。
+5. 已定下的决定：spec 的 interfaces 和**之前几次**退回的意见（这次的意见放在第 6 项，不重复）；还有没答复的提问。
+6. 这次为什么退回：原会话会收到的那段原文——检查输出或评审意见（含 F 编号）及 `rework of task` 尾注。
+
+### 8.4 记录与之后怎么量
+
+事件 `task.rework_session { run_id, id, key, agent, context_tokens, threshold }`，`crossagents events --log <日期>` 里显示为 `#key rework in a new session of <agent> (context N > T)`。
+
+量的办法（现在量不出来，等有了实际的换会话再看）：
+
+- 发生次数：`events-<日期>.jsonl` 里 `type` 为 `task.rework_session` 的条数；或 `crossagents events --log <日期> --json` 按 `type` 过滤。查 hub 的 `/v1/events` 要带 `follow=false` 和超时。
+- 前后各花多少：同一任务的 `crossagents usage --by task`（账本按任务累计，含换会话前后）；要分开看，以该任务的 `task.rework_session` 事件为界，把这个 agent 前后的 `agent.usage`（同一会话内是累计值，新会话从 `Starting` 起从零计）各自求增量，再与 §8.1 里交付之后的量对比。
+- 换了会话之后上下文有没有又长回去：该 agent 之后 `agent.usage` 的 `used`。
+
+### 8.5 验证
+
+只有单元测试（[tests_verification.rs](../crates/orchestrator/src/tests_verification.rs) 第 11 组，假宿主、假工作区）：超过阈值换会话且开场消息含 §8.3 各项、事件带上下文与阈值、lead 没有新通知；低于阈值沿用原会话且消息不变；读不到上下文沿用原会话；阈值 0 不换；检查不过的路径；lead 的 `task_rework` 和人的退回两条路径。`handover` 原有测试不变且通过。没有在真实 worker 上跑过换会话。

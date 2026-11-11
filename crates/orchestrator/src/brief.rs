@@ -489,29 +489,112 @@ pub fn handover_with(task: &Task, card: &Handoff, machine: &crate::machine::Mach
     }
     if card.kind != HandoffKind::Assign {
         out.push_str("Someone already worked on this; their work is in your working directory.\n");
-        if card.files.is_empty() {
-            out.push_str("Files they changed: none that the hub could see\n");
+    }
+    work_so_far(
+        &mut out,
+        task,
+        WorkSoFar {
+            files: (card.kind != HandoffKind::Assign).then_some(card.files.as_slice()),
+            files_title: "Files they changed",
+            summary: card.summary.as_deref(),
+            summary_title: "Their last word",
+            decisions: &card.decisions,
+            open_questions: &card.open_questions,
+        },
+    );
+    out.trim_end().to_owned()
+}
+
+/// The facts a handoff card carries about the work so far, as [`work_so_far`] writes them.
+struct WorkSoFar<'a> {
+    /// `None`: not said (a first assignment, whose files are the spec's).
+    files: Option<&'a [String]>,
+    files_title: &'a str,
+    summary: Option<&'a str>,
+    summary_title: &'a str,
+    decisions: &'a [String],
+    open_questions: &'a [String],
+}
+
+fn work_so_far(out: &mut String, task: &Task, facts: WorkSoFar<'_>) {
+    if let Some(files) = facts.files {
+        if files.is_empty() {
+            let _ = writeln!(out, "{}: none that the hub could see", facts.files_title);
         } else {
-            list(&mut out, "Files they changed", &card.files);
+            list(out, facts.files_title, files);
         }
     }
-    if let Some(summary) = &card.summary {
-        let _ = writeln!(out, "Their last word: {}", summary.trim());
+    if let Some(summary) = facts.summary {
+        let _ = writeln!(out, "{}: {}", facts.summary_title, summary.trim());
     }
     // The spec's interfaces are in the assignment already.
-    let decisions: Vec<String> = card
+    let decisions: Vec<String> = facts
         .decisions
         .iter()
         .filter(|d| !task.spec.interfaces.contains(d))
         .cloned()
         .collect();
-    list(&mut out, "Decided since (keep to it)", &decisions);
+    list(out, "Decided since (keep to it)", &decisions);
     list(
-        &mut out,
+        out,
         "Open questions (asked, not answered; task_ask again if you need them)",
-        &card.open_questions,
+        facts.open_questions,
     );
-    out.trim_end().to_owned()
+}
+
+/// What the hub knows about a worker's work so far, for a new session of that same worker
+/// ([`rework_opening`]): the same facts a handoff card carries.
+#[derive(Debug, Clone, Default)]
+pub struct ReworkFacts {
+    /// The files changed in the working directory, committed or not.
+    pub files: Vec<String>,
+    /// What the worker said when it last reported the task done.
+    pub summary: Option<String>,
+    /// The spec's interfaces, then the issuer's earlier rework notes.
+    pub decisions: Vec<String>,
+    pub open_questions: Vec<String>,
+}
+
+/// The first message of a new model session of the same worker, when its work came back and
+/// the session it had was over the context threshold (docs/USAGE-TRIM.md §8): the
+/// assignment, the work so far as the hub's records have it (not a summary a model wrote),
+/// then `returned` — what the worker would have been sent in its old session: the failed
+/// checks or the review's findings, and the rework footer.
+pub fn rework_opening(task: &Task, facts: &ReworkFacts, context: u64, returned: &str) -> String {
+    rework_opening_with(task, facts, context, returned, &crate::machine::current())
+}
+
+/// [`rework_opening`] with the machine its toolchain line describes.
+pub fn rework_opening_with(
+    task: &Task,
+    facts: &ReworkFacts,
+    context: u64,
+    returned: &str,
+    machine: &crate::machine::Machine,
+) -> String {
+    let mut out = assignment_with(task, machine);
+    let _ = write!(
+        out,
+        "\n\n---\nnew session: you already worked on this task, in an earlier session whose \
+         context had reached {context} tokens, so the hub started this one for the rework. \
+         Your work is still in your working directory, unchanged; what follows is the hub's \
+         record of it. Read the files you need rather than starting over.\n"
+    );
+    work_so_far(
+        &mut out,
+        task,
+        WorkSoFar {
+            files: Some(&facts.files),
+            files_title: "Files you changed so far",
+            summary: facts.summary.as_deref(),
+            summary_title: "What you reported when you delivered it",
+            decisions: &facts.decisions,
+            open_questions: &facts.open_questions,
+        },
+    );
+    out.push_str("\n---\nWhy it came back:\n\n");
+    out.push_str(returned.trim());
+    out
 }
 
 /// `#key (task id …)`, how task messages to an issuer name the task.

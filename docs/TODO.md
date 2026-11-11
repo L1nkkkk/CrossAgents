@@ -422,3 +422,15 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 - [~] 【已知】任务的 mock-agent 测试不在验收里时（如 #rounds），改了共用类型的编译问题要等下一个跑 mock 的任务才暴露；主导靠人工查构造处兜底
 - [~] 【已知】两个任务各自在分支上验收、先后合并后的组合没有人自动验证：#review-loop 与 #lead-session 合并后，主导在 run 分支 `5b1a6d1` 上手动跑了 `crossagents-orchestrator` 和两边相关的 8 个 mock 测试文件，全过
 - [ ] 【下一轮】end_turn 没交结果的剩余部分（主体已由 run a916057f 的 #turn-end `c7875f7` 做完，见 [DONE.md](DONE.md) §二十八）：评审空手结束时，通知 lead 的那条还没附上评审的回复文字（#replay 那次意见写在回复里，lead 仍要自己去翻）；评审「已提醒过」记在内存（`Orchestrator.review_reminders`），hub 重启后同一轮评审会再提醒一次。经验库 `dc8dc64a`
+
+## 二十九、CodeBuddy 记账与返工换会话（2026-11-11）
+
+> 设计与实测见 [USAGE-TRIM.md](USAGE-TRIM.md) §7、§8。CodeBuddy 记账修正 `eeb7b09`；返工换会话随后一次提交。
+
+- [ ] 【实测】返工换会话没在真实 worker 上跑过，只有单元测试；等有 `task.rework_session` 事件后，按 USAGE-TRIM §8.4 量次数和前后用量，再决定 150000 要不要调
+- [ ] 【待评估】阈值只能经 API 的 run `policy.rework_new_session_tokens` 设，CLI / GUI 没有入口
+- [~] 【已知】上下文读数在编排器内存里：hub 重启后、worker 再报用量之前退回，读不到，沿用原会话
+- [~] 【已知】worker 回合一直不结束时，换会话等到 `round_wait_limit`（默认 120 秒）后放弃，退回原会话
+- [ ] 【待评估】0.2.19 及以前 CodeBuddy 的历史用量偏大（USAGE-TRIM §7.3）；重放时按 `(Dₖ − Dₖ₋₁)/2` 修正能修掉大部分，但每个进程第一个回合修不准，没做
+- [ ] 【待评估】CodeBuddy 上跑 Claude 模型时 `cache_creation_input_tokens` 是不是也只是 miss 没验证；现在一律不记写缓存
+- [ ] 【待评估】CodeBuddy 子代理（Agent 工具）的请求：流式帧里被过滤，回合用量取 `result.usage` 的差分时会算进来，但进程第一个回合用流式请求之和，这一回合的子代理用量会漏；没实测

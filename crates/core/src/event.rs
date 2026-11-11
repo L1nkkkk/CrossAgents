@@ -439,6 +439,20 @@ pub enum EventKind {
         #[cfg_attr(feature = "ts", ts(type = "number"))]
         duration_ms: u64,
     },
+    /// Work sent back to its own worker went to a new model session of that same agent,
+    /// because the context its session had in use (`context_tokens`, as last reported) was
+    /// over `threshold` (docs/USAGE-TRIM.md §8). A record only: nobody is woken for it.
+    #[serde(rename = "task.rework_session")]
+    TaskReworkSession {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        agent: AgentId,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        context_tokens: u64,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        threshold: u64,
+    },
     /// The worktrees' build output is over its soft budget after reclaiming what nothing uses
     /// (docs/TODO.md §九 ②). A warning, not an action: what is in use is never deleted for it.
     #[serde(rename = "hub.build_cache")]
@@ -849,6 +863,7 @@ impl EventKind {
             Self::TaskBudget { .. } => "task.budget",
             Self::TaskReviewer { .. } => "task.reviewer",
             Self::TaskCheckTimed { .. } => "task.check_timed",
+            Self::TaskReworkSession { .. } => "task.rework_session",
             Self::BuildCache { .. } => "hub.build_cache",
             Self::RunLanded { .. } => "run.landed",
             Self::RunDeleted { .. } => "run.deleted",
@@ -923,6 +938,7 @@ impl EventKind {
             | Self::TaskRerouted { run_id, .. }
             | Self::TaskRouted { run_id, .. }
             | Self::TaskHandedOff { run_id, .. }
+            | Self::TaskReworkSession { run_id, .. }
             | Self::TaskCommand { run_id, .. } => Some(*run_id),
             _ => None,
         }
@@ -972,6 +988,7 @@ impl EventKind {
             | Self::BrowserRequestDone { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::TaskReviewer { reviewer, .. } => Some(*reviewer),
+            Self::TaskReworkSession { agent, .. } => Some(*agent),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
             Self::NoticeRecorded { id, .. } => Some(*id),
             Self::NoteWritten { author, .. } => Some(*author),
@@ -1070,6 +1087,14 @@ mod tests {
                 ok: true,
             },
             EventKind::AgentPromptViaFile { id: AgentId::new() },
+            EventKind::TaskReworkSession {
+                run_id: RunId::new(),
+                id: TaskId::new(),
+                key: "a".into(),
+                agent: AgentId::new(),
+                context_tokens: 280_000,
+                threshold: 150_000,
+            },
             EventKind::AgentRound {
                 id: AgentId::new(),
                 message_ids: vec![],

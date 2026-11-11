@@ -72,8 +72,8 @@ pub use model::{
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{NoticeClass, PendingNotice, Reminder, Watch, WatchOn, WatchTarget};
 pub use policy::{
-    ApprovalPolicy, AskPolicy, Budget, ContinuationPolicy, LandPolicy, PlanApproval, RunPolicy,
-    TaskBudget,
+    ApprovalPolicy, AskPolicy, Budget, ContinuationPolicy, DEFAULT_REWORK_NEW_SESSION_TOKENS,
+    LandPolicy, PlanApproval, RunPolicy, TaskBudget,
 };
 pub use state::TaskStatus;
 pub use store::{AgentKey, Store};

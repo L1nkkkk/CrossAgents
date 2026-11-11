@@ -464,6 +464,7 @@ impl Orchestrator {
                 return Err(CoreError::Conflict(format!("#{} is {status:?}", task.key)));
             }
         }
+        let mut noted = false;
         if rework && reopen {
             if task.reviewer.take().is_some() {
                 self.let_go_task(run.id, task.id, Some(crossagents_core::ClaimRole::Reviewer))
@@ -485,6 +486,7 @@ impl Orchestrator {
                 .collect();
             if !said.is_empty() {
                 task.report.rework.push(said.join("\n"));
+                noted = true;
             }
             self.transition(&mut task, TaskStatus::Running).await?;
             // A task that waited to be accepted is back with its worker: the notice says so no more.
@@ -496,7 +498,12 @@ impl Orchestrator {
             .await;
         }
         let text = remarks_text(&task, &remarks, note.as_deref(), rework && reopen);
-        self.deliver(worker, MessageSource::Human, text);
+        if rework && reopen && self.rework_over(&run, worker).is_some() {
+            let envelope = crossagents_core::Envelope::new(MessageSource::Human, text);
+            self.send_rework(&run, &task, worker, envelope, noted).await;
+        } else {
+            self.deliver(worker, MessageSource::Human, text);
+        }
         let issuer = task.issuer_or(run.planner);
         let line = if rework && reopen {
             format!(
@@ -1160,7 +1167,12 @@ impl Orchestrator {
         let envelope = self.relay_envelope(from, text);
         crate::attempts::begin(task, Some(worker), Some(envelope.id));
         self.store_task(task).await?;
-        self.send_in_background(worker, envelope);
+        if fresh_note.is_some() {
+            // A new execution session already: it starts from the task's brief above.
+            self.send_in_background(worker, envelope);
+        } else {
+            self.send_rework(run, task, worker, envelope, true).await;
+        }
         let mut line = format!("{head}; it went back to {name}.");
         if let Some(note) = fresh_note {
             line.push(' ');

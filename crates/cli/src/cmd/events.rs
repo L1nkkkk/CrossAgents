@@ -209,6 +209,16 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::TaskCheckTimed { key, duration_ms, .. } => {
             format!("#{key} checks took {duration_ms} ms")
         }
+        EventKind::TaskReworkSession {
+            key,
+            agent,
+            context_tokens,
+            threshold,
+            ..
+        } => format!(
+            "#{key} rework in a new session of {} (context {context_tokens} > {threshold})",
+            short_tail(agent)
+        ),
         EventKind::BuildCache { used, limit } => format!(
             "build output {} GB of a {} GB soft budget",
             used >> 30,

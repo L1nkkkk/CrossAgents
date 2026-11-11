@@ -37,6 +37,7 @@ pub mod quota;
 pub mod relations;
 pub mod retro;
 pub mod review;
+mod rework;
 pub mod running;
 pub mod screenshot;
 mod sessions;

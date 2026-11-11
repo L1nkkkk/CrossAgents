@@ -1881,7 +1881,7 @@ impl Orchestrator {
         );
         crate::attempts::begin(&mut task, Some(worker), Some(envelope.id));
         self.store_task(&mut task).await?;
-        self.send_in_background(worker, envelope);
+        self.send_rework(&run, &task, worker, envelope, true).await;
         // What went wrong, in the issuer's words, becomes a draft for the person (EXPERTISE
         // §6.4). The task is already back with its worker: a profile that cannot hold the
         // candidate only warns.

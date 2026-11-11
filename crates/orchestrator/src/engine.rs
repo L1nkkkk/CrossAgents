@@ -508,6 +508,14 @@ impl Orchestrator {
         }
     }
 
+    /// Keeps a background send started elsewhere for [`Self::drain_relays`] (tests only).
+    pub(crate) fn track_relay(&self, handle: tokio::task::JoinHandle<()>) {
+        #[cfg(test)]
+        self.relay_tasks.lock().unwrap().push(handle);
+        #[cfg(not(test))]
+        drop(handle);
+    }
+
     /// Sends in the background: starting an agent can take minutes.
     pub(crate) fn deliver(&self, agent: AgentId, from: MessageSource, text: String) {
         let host = self.host.clone();
@@ -962,7 +970,7 @@ impl Orchestrator {
         let renewal = source.is_some().then(|| (self.bus.subscribe(), self.round_wait_limit()));
         tokio::spawn(async move {
             if let Some((events, limit)) = renewal {
-                renew_for_round(host.as_ref(), events, lead, limit).await;
+                let _ = renew_for_round(host.as_ref(), events, lead, limit).await;
             }
             if let Err(err) = host.send_envelope(lead, kickoff, false).await {
                 tracing::warn!(agent = %lead, error = %err, "cannot deliver the kickoff");
@@ -2762,24 +2770,26 @@ fn policy_changes(old: &RunPolicy, new: &RunPolicy) -> Vec<String> {
     out
 }
 
-/// Ends the lead's session for a round it asked for, so that the round's kickoff opens a new
-/// one. While a turn of the lead runs, this waits for the turn's end on the bus (no polling),
-/// for at most `limit`: a turn that asked for the round is one such turn. Past the limit the
-/// round starts in the session the lead has, and the hub says so in its log.
-async fn renew_for_round(
+/// Ends an agent's session so that the next message opens a new one: the lead's for a round
+/// it asked for, a worker's for rework over the context threshold (`crate::rework`). While a
+/// turn of the agent runs, this waits for the turn's end on the bus (no polling), for at most
+/// `limit`: a turn that asked for the round is one such turn. `false` when the session stays
+/// (past the limit, or the host keeps it): the message goes to the session the agent has, and
+/// the hub says so in its log.
+pub(crate) async fn renew_for_round(
     host: &dyn AgentHost,
     mut events: tokio::sync::broadcast::Receiver<crossagents_core::Event>,
     lead: AgentId,
     limit: std::time::Duration,
-) {
+) -> bool {
     let deadline = tokio::time::Instant::now() + limit;
     loop {
         match host.renew_session(lead).await {
-            Ok(_) => return,
+            Ok(renewed) => return renewed,
             Err(CoreError::Busy(_)) => {}
             Err(err) => {
-                tracing::warn!(agent = %lead, error = %err, "cannot end the lead's session for the new round");
-                return;
+                tracing::warn!(agent = %lead, error = %err, "cannot end the agent's session for a new one");
+                return false;
             }
         }
         let ended = tokio::time::timeout_at(deadline, async {
@@ -2799,8 +2809,8 @@ async fn renew_for_round(
         })
         .await;
         if ended != Ok(true) {
-            tracing::warn!(agent = %lead, "the lead stayed busy past the round's wait; the round starts in its current session");
-            return;
+            tracing::warn!(agent = %lead, "the agent stayed busy past the wait; the message goes to its current session");
+            return false;
         }
     }
 }

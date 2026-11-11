@@ -70,7 +70,7 @@ lead（强模型，不换）的 token 大多花在被叫醒、看汇报、来回
 流程：**交付 → 自动检查 → agent 评审 → 等接受 → 合并**。检查或评审不过就回原 worker；超过返工上限、预算上限或需求有争议，才交给 lead。这一轮接受仍由 lead 点。
 
 - **自动开评审**：检查通过后，任务配了评审人（`spec.reviewer` 或 run 的 `reviewer`）就由 hub 自己开评审，lead 只收到一条 `Silent`；没配评审人就直接发「等接受」通知，不再转整份汇报，lead 要细节用 `task_get`。
-- **自动退回**：评审要求修改时退回原 worker（同一执行会话、`attempts` 加一、清掉旧检查结果），结构化意见作为它下一回合的消息，lead 只收到一条 `Silent`。退回次数到上限（默认 3，`spec` 可改）或 worker 对某条意见答复有争议，才交给 lead（`Decide`）。原 worker 会话已不在的，新开执行会话接手并在通知里写明。`on_reject` 指向别人的旧路径保留。
+- **自动退回**：评审要求修改时退回原 worker（同一执行会话、`attempts` 加一、清掉旧检查结果），结构化意见作为它下一回合的消息，lead 只收到一条 `Silent`。退回次数到上限（默认 3，`spec` 可改）或 worker 对某条意见答复有争议，才交给 lead（`Decide`）。原 worker 会话已不在的，新开执行会话接手并在通知里写明。`on_reject` 指向别人的旧路径保留。2026-11-11 起，退回时原会话上下文超过阈值（默认 150000）就换同一 agent 的新模型会话、开场带 hub 生成的交接，见 [USAGE-TRIM.md](../USAGE-TRIM.md) §8。
 - **结构化意见**：`ReviewFinding` 加 `id`（hub 按任务编 F1、F2…，跨轮次不变）、`blocking`（默认 P0/P1 为 true）、`basis`（依据）、`verify`（怎么验证修好了）；`task_complete` 加可选的 `answers: [{ id, status: fixed|not_fixed|disputed, note }]`，下一轮评审把答复给评审人看。
 - **版本绑定**：开评审记下 `verified_sha` 和轮次；`review_submit` 必须带 `reviewed_sha`（缺就拒绝），对不上是旧评审或重复提交就拒绝且**不改状态**。评审过的任务，普通 `task_accept` 要求 `verdict == Merge` 且 `reviewed_sha == verified_sha`（`force` 加理由仍可）。同提交判断去空白、不分大小写、至少 7 位前缀算同一个提交，两条拒绝信息都给完整提交号（#task-budget `2201c36` 顺手修的短提交号问题，见 §11.4）。**检查和评审只证明它们看过的那个提交：worker 改过以后旧结论作废，迟到或重复的评审不能推动状态**。
 - **等接受**：有下游依赖或 `next` 路由的任务发 `Unblock`，其余发 `Batch`；通知写成决策材料（哪些任务等接受、接受哪个会解锁什么、有哪些非阻塞意见已登记、要你决定什么）。下游还依赖别的未合并任务时，`Unblock` 文字写「#x 还在等 #y」，不谎称解锁。`task_accept` 支持 `tasks: [...]` 批量，逐个返回结果。

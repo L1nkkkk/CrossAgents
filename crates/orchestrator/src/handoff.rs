@@ -43,6 +43,19 @@ pub(crate) struct Left {
     context_tokens: Option<u64>,
 }
 
+impl Left {
+    /// The same facts, for a new session of the same worker rather than another teammate
+    /// (`crate::rework`).
+    pub(crate) fn into_rework_facts(self, decisions: Vec<String>) -> brief::ReworkFacts {
+        brief::ReworkFacts {
+            files: self.files,
+            summary: self.summary,
+            decisions,
+            open_questions: self.open_questions,
+        }
+    }
+}
+
 /// A place a handoff goes, as `spec.next` / `spec.on_reject` write it: a step of the run's
 /// plan (a task key) or a teammate (a name).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -954,7 +967,7 @@ impl Orchestrator {
     }
 
     /// Context tokens `agent` last reported in use (`agent.usage`), if it ever did.
-    fn context_of(&self, agent: AgentId) -> Option<u64> {
+    pub(crate) fn context_of(&self, agent: AgentId) -> Option<u64> {
         self.contexts.lock().unwrap().get(&agent).copied()
     }
 

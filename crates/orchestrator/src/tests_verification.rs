@@ -39,6 +39,8 @@ struct FakeHost {
     delivered: Mutex<Vec<(AgentId, String)>>,
     /// Kept for the agent's next message, by topic; a newer one on a topic replaces it.
     later: Mutex<std::collections::HashMap<(AgentId, String), String>>,
+    /// Agents whose session was ended so that their next message opens a new one.
+    renewed: Mutex<Vec<AgentId>>,
 }
 
 impl FakeHost {
@@ -157,6 +159,10 @@ impl AgentHost for FakeHost {
     async fn is_busy(&self, _: AgentId) -> bool {
         self.busy.load(Ordering::SeqCst)
     }
+    async fn renew_session(&self, agent: AgentId) -> Result<bool, CoreError> {
+        self.renewed.lock().await.push(agent);
+        Ok(true)
+    }
 }
 
 /// Records what it was asked to do; fails the commit when told to.
@@ -168,6 +174,8 @@ struct FakeWorkspaces {
     dirty: Mutex<Vec<String>>,
     merged: Mutex<Vec<String>>,
     removed: Mutex<Vec<PathBuf>>,
+    /// What `changed_files` reports: the files the task's checkout changed.
+    changed: Mutex<Vec<String>>,
 }
 
 impl FakeWorkspaces {
@@ -235,6 +243,9 @@ impl WorkspaceProvider for FakeWorkspaces {
     }
     async fn uncommitted(&self, _: &Path) -> Result<Vec<String>, CoreError> {
         Ok(self.dirty.lock().await.clone())
+    }
+    async fn changed_files(&self, _: &Path, _: &str) -> Result<Vec<String>, CoreError> {
+        Ok(self.changed.lock().await.clone())
     }
     async fn head(&self, _: &Path) -> Result<String, CoreError> {
         Ok(self.head.lock().await.clone().unwrap_or_default())
@@ -1695,4 +1706,235 @@ async fn a_tasks_own_budget_wins_over_the_runs_default() {
     let after = f.task().await;
     assert!(!after.report.rework.is_empty(), "{after:?}");
     assert!(!f.host.delivered_to(f.worker.id).await.is_empty());
+}
+
+// ---------------------------------------------------------------------------------------
+// 11. Rework over the context threshold opens a new session of the same worker
+//     (docs/USAGE-TRIM.md §8)
+
+/// A delivered task with the facts a new session must get: what the worker reported, the
+/// files it changed, an interface of the spec and a decision from an earlier rework.
+async fn delivered_with_history(f: &Fixture) {
+    *f.ws.changed.lock().await = vec!["src/a.rs".into(), "tests/a.rs".into()];
+    let mut task = f.task().await;
+    task.spec.interfaces = vec!["fn a() -> u8".into()];
+    task.report.summary = Some("wrote a, returns 3".into());
+    task.report.rework = vec!["keep the old name `a`".into()];
+    f.store.update_task(&task).await.unwrap();
+}
+
+/// What the bus carried of `task.rework_session`, as (context, threshold).
+fn rework_sessions(
+    events: &mut tokio::sync::broadcast::Receiver<crossagents_core::Event>,
+) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let crossagents_core::EventKind::TaskReworkSession {
+            context_tokens,
+            threshold,
+            ..
+        } = event.kind
+        {
+            out.push((context_tokens, threshold));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_change_request_over_the_threshold_opens_a_new_session_with_the_work_so_far() {
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    delivered_with_history(&f).await;
+    in_review(&f, &reviewer, 1, "c0ffee1").await;
+    f.orchestrator.record_context(f.worker.id, 280_000);
+    let mut events = f.orchestrator.bus.subscribe();
+
+    ask_for_a_change(&f, &reviewer, "c0ffee1").await.unwrap();
+    f.orchestrator.drain_relays().await;
+
+    // The same agent, a new model session.
+    assert_eq!(*f.host.renewed.lock().await, vec![f.worker.id]);
+    let after = f.task().await;
+    assert_eq!(after.assignee, Some(f.worker.id), "{after:?}");
+    assert_eq!(after.status, TaskStatus::Running, "{after:?}");
+    let sent = f.host.delivered_to(f.worker.id).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let opening = &sent[0];
+    for part in [
+        // The task.
+        "Task #a",
+        "do a",
+        "fn a() -> u8",
+        // The work so far, from the hub's records.
+        "new session:",
+        "280000 tokens",
+        "Files you changed so far",
+        "src/a.rs",
+        "tests/a.rs",
+        "What you reported when you delivered it: wrote a, returns 3",
+        "Decided since (keep to it)",
+        "keep the old name `a`",
+        // Why it came back: the review's notes and findings, and the rework footer.
+        "Why it came back:",
+        "changes please",
+        "fix it",
+        "rework of task #a",
+        "attempt: 2",
+    ] {
+        assert!(opening.contains(part), "{part:?} is missing from:\n{opening}");
+    }
+    // This round's notes are why it came back, not an earlier decision.
+    assert_eq!(opening.matches("changes please").count(), 1, "{opening}");
+    // Recorded with the context it had; the lead hears nothing more than before.
+    assert_eq!(rework_sessions(&mut events), vec![(280_000, 150_000)]);
+    let told = f.host.notices.lock().await.clone();
+    assert!(
+        !told.iter().any(|n| n.contains("session")),
+        "no notice for the new session: {told:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_change_request_under_the_threshold_stays_in_the_session() {
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    delivered_with_history(&f).await;
+    in_review(&f, &reviewer, 1, "c0ffee1").await;
+    f.orchestrator.record_context(f.worker.id, 120_000);
+    let mut events = f.orchestrator.bus.subscribe();
+
+    ask_for_a_change(&f, &reviewer, "c0ffee1").await.unwrap();
+    f.orchestrator.drain_relays().await;
+
+    assert!(f.host.renewed.lock().await.is_empty());
+    let sent = f.host.delivered_to(f.worker.id).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("changes please"), "{}", sent[0]);
+    assert!(!sent[0].contains("new session:"), "{}", sent[0]);
+    assert!(rework_sessions(&mut events).is_empty());
+}
+
+#[tokio::test]
+async fn a_change_request_without_a_known_context_stays_in_the_session() {
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    delivered_with_history(&f).await;
+    in_review(&f, &reviewer, 1, "c0ffee1").await;
+    // No usage reported for the worker since the hub started.
+    let mut events = f.orchestrator.bus.subscribe();
+
+    ask_for_a_change(&f, &reviewer, "c0ffee1").await.unwrap();
+    f.orchestrator.drain_relays().await;
+
+    assert!(f.host.renewed.lock().await.is_empty());
+    let sent = f.host.delivered_to(f.worker.id).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(!sent[0].contains("new session:"), "{}", sent[0]);
+    assert!(rework_sessions(&mut events).is_empty());
+}
+
+#[tokio::test]
+async fn a_threshold_of_zero_never_opens_a_new_session() {
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    let mut run = f.run().await;
+    run.config.policy.rework_new_session_tokens = Some(0);
+    f.store.update_run(&run).await.unwrap();
+    in_review(&f, &reviewer, 1, "c0ffee1").await;
+    f.orchestrator.record_context(f.worker.id, 900_000);
+
+    ask_for_a_change(&f, &reviewer, "c0ffee1").await.unwrap();
+    f.orchestrator.drain_relays().await;
+
+    assert!(f.host.renewed.lock().await.is_empty());
+    let sent = f.host.delivered_to(f.worker.id).await;
+    assert!(!sent[0].contains("new session:"), "{}", sent[0]);
+}
+
+#[tokio::test]
+async fn failed_checks_over_the_threshold_open_a_new_session_with_the_check() {
+    let f = Fixture::with_checks(&["cargo test -p a"], vec![false]).await;
+    delivered_with_history(&f).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.interrupted = true;
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator.record_context(f.worker.id, 310_000);
+    let mut events = f.orchestrator.bus.subscribe();
+
+    f.orchestrator
+        .task_verify(&f.lead, json!({ "task": "a" }))
+        .await
+        .unwrap();
+    let after = f.settled().await;
+    // The verification holds the run lock until it has queued all its relays.
+    drop(f.orchestrator.lock(f.run.id).await);
+    f.orchestrator.drain_relays().await;
+
+    assert_eq!(after.status, TaskStatus::Running, "{after:?}");
+    assert_eq!(*f.host.renewed.lock().await, vec![f.worker.id]);
+    let sent = f.host.delivered_to(f.worker.id).await;
+    let opening = sent.last().unwrap();
+    for part in [
+        "new session:",
+        "src/a.rs",
+        "What you reported when you delivered it: wrote a, returns 3",
+        "keep the old name `a`",
+        "The checks did not pass",
+        "$ cargo test -p a",
+    ] {
+        assert!(opening.contains(part), "{part:?} is missing from:\n{opening}");
+    }
+    assert_eq!(rework_sessions(&mut events), vec![(310_000, 150_000)]);
+}
+
+#[tokio::test]
+async fn the_leads_and_the_persons_send_backs_open_a_new_session_too() {
+    // The lead's task_rework.
+    let f = Fixture::new(&[]).await;
+    delivered_with_history(&f).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator.record_context(f.worker.id, 200_000);
+    f.orchestrator
+        .task_rework(&f.lead, json!({ "task": "a", "notes": "rename it to b" }))
+        .await
+        .unwrap();
+    f.orchestrator.drain_relays().await;
+    assert_eq!(*f.host.renewed.lock().await, vec![f.worker.id]);
+    let opening = f.host.delivered_to(f.worker.id).await.pop().unwrap();
+    assert!(opening.contains("new session:"), "{opening}");
+    assert!(opening.contains("keep the old name `a`"), "{opening}");
+    assert_eq!(opening.matches("rename it to b").count(), 1, "{opening}");
+
+    // The person's send-back from the review page.
+    let f = Fixture::new(&[]).await;
+    delivered_with_history(&f).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator.record_context(f.worker.id, 200_000);
+    f.orchestrator
+        .review_task(
+            f.run.id,
+            f.task.id,
+            vec![crate::review::Remark {
+                path: "src/a.rs".into(),
+                line: Some(3),
+                old_side: false,
+                text: "return 2".into(),
+            }],
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    f.orchestrator.drain_relays().await;
+    assert_eq!(*f.host.renewed.lock().await, vec![f.worker.id]);
+    let opening = f.host.delivered_to(f.worker.id).await.pop().unwrap();
+    assert!(opening.contains("new session:"), "{opening}");
+    assert!(opening.contains("src/a.rs:3 — return 2"), "{opening}");
+    assert_eq!(opening.matches("return 2").count(), 1, "{opening}");
 }

@@ -157,7 +157,18 @@ pub struct RunPolicy {
     /// Whether workers ask before dangerous actions.
     #[serde(default)]
     pub approvals: ApprovalPolicy,
+    /// Context tokens over which work sent back to its own worker (a failed check or review,
+    /// `task_rework`, the person's send-back) goes to a new model session of that same agent,
+    /// opened with a handover from the hub's records (docs/USAGE-TRIM.md §8). Absent:
+    /// [`DEFAULT_REWORK_NEW_SESSION_TOKENS`]; `0`: never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional, type = "number"))]
+    pub rework_new_session_tokens: Option<u64>,
 }
+
+/// The default of [`RunPolicy::rework_new_session_tokens`]. A starting point read off four
+/// tasks (docs/USAGE-TRIM.md §8), not a tuned value.
+pub const DEFAULT_REWORK_NEW_SESSION_TOKENS: u64 = 150_000;
 
 fn default_ask_timeout() -> f64 {
     30.0
@@ -184,11 +195,23 @@ impl Default for RunPolicy {
             spawn_models: None,
             delegate: false,
             approvals: ApprovalPolicy::default(),
+            rework_new_session_tokens: None,
         }
     }
 }
 
 impl RunPolicy {
+    /// The context size over which rework opens a new session; `None` when it never does.
+    pub fn rework_new_session_at(&self) -> Option<u64> {
+        match self
+            .rework_new_session_tokens
+            .unwrap_or(DEFAULT_REWORK_NEW_SESSION_TOKENS)
+        {
+            0 => None,
+            n => Some(n),
+        }
+    }
+
     /// No person needed: plans start at once, the lead lands, questions fall back to
     /// their defaults after 30 minutes.
     pub fn hands_off() -> Self {

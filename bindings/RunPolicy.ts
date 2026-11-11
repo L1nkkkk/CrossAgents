@@ -35,4 +35,11 @@ delegate: boolean,
 /**
  * Whether workers ask before dangerous actions.
  */
-approvals: ApprovalPolicy, };
+approvals: ApprovalPolicy, 
+/**
+ * Context tokens over which work sent back to its own worker (a failed check or review,
+ * `task_rework`, the person's send-back) goes to a new model session of that same agent,
+ * opened with a handover from the hub's records (docs/USAGE-TRIM.md §8). Absent:
+ * [`DEFAULT_REWORK_NEW_SESSION_TOKENS`]; `0`: never.
+ */
+rework_new_session_tokens?: number, };
