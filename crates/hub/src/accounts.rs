@@ -1972,7 +1972,7 @@ mod health_tests {
                     assert_eq!(
                         judge_for_model_with_top(
                             &[],
-                            &[group.clone()],
+                            std::slice::from_ref(&group),
                             Some(model),
                             None,
                             None,
@@ -1988,7 +1988,7 @@ mod health_tests {
                     matches!(
                         judge_for_model_with_top(
                             &[],
-                            &[group.clone()],
+                            std::slice::from_ref(&group),
                             Some(&format!("claude-{scope}-4")),
                             None,
                             None,
@@ -2109,7 +2109,7 @@ mod health_tests {
             assert!(matches!(
                 judge_for_model_with_top(
                     &[],
-                    &[group.clone()],
+                    std::slice::from_ref(&group),
                     Some("claude-fable-4"),
                     None,
                     None,

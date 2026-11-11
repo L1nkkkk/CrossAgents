@@ -1156,16 +1156,18 @@ mod tests {
             .await
             .unwrap();
         let state_path = dir.path().join("state.json");
-        let mut state = State::default();
-        state.pending = Some(Pending {
-            result: result.clone(),
-            base: base.clone(),
-            current,
-            merged: merged.clone(),
-            at: Utc::now(),
-            files: ops.iter().map(|op| op.path.clone()).collect(),
-            own_changes: Vec::new(),
-        });
+        let state = State {
+            pending: Some(Pending {
+                result: result.clone(),
+                base: base.clone(),
+                current,
+                merged: merged.clone(),
+                at: Utc::now(),
+                files: ops.iter().map(|op| op.path.clone()).collect(),
+                own_changes: Vec::new(),
+            }),
+            ..Default::default()
+        };
         state.write(&state_path).unwrap();
         // Write only a.txt out of the three.
         let only_a = ops

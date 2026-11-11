@@ -83,10 +83,10 @@ impl Devices {
         loop {
             let generation = {
                 let cache = self.cache.lock().await;
-                if let Some(entry) = cache.entries.get(&hash) {
-                    if entry.seen.elapsed() < self.ttl {
-                        return Ok(Some((entry.device.clone(), entry.cancel.clone())));
-                    }
+                if let Some(entry) = cache.entries.get(&hash)
+                    && entry.seen.elapsed() < self.ttl
+                {
+                    return Ok(Some((entry.device.clone(), entry.cancel.clone())));
                 }
                 cache.generation
             };

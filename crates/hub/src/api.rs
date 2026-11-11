@@ -3760,6 +3760,156 @@ async fn cancel_extension_call(
         .map(Json)
         .ok_or_else(|| no_such_call(&id))
 }
+
+async fn list_devices(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crossagents_api_types::ListDevicesResponse>> {
+    Ok(Json(crossagents_api_types::ListDevicesResponse {
+        devices: state.store().list_devices().await?,
+    }))
+}
+async fn create_device(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crossagents_api_types::CreateDeviceRequest>,
+) -> ApiResult<Json<crossagents_api_types::CreateDeviceResponse>> {
+    Ok(Json(
+        issue_device(
+            &state,
+            &req.name,
+            req.kind.unwrap_or_default(),
+            req.level.unwrap_or_default(),
+            req.os,
+        )
+        .await?,
+    ))
+}
+
+/// Records a new device and returns its token (shown only here). `POST /v1/devices` and a
+/// redeemed pairing code (crate::link) both issue through this.
+pub(crate) async fn issue_device(
+    state: &AppState,
+    name: &str,
+    kind: crossagents_core::DeviceKind,
+    level: crossagents_core::DeviceLevel,
+    os: Option<crossagents_core::DeviceOs>,
+) -> ApiResult<crossagents_api_types::CreateDeviceResponse> {
+    let name = name.trim();
+    if !(1..=64).contains(&name.chars().count()) || name.chars().any(char::is_control) {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::BadRequest,
+            "device name must contain 1–64 characters",
+        ));
+    }
+    let device = crossagents_core::Device {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.to_owned(),
+        kind,
+        level,
+        created_at: Utc::now(),
+        last_seen_at: None,
+        revoked_at: None,
+        os,
+    };
+    let token = format!(
+        "cad_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    state
+        .store()
+        .insert_device(&device, &crate::devices::hash(&token))
+        .await?;
+    tracing::info!(device = %device.name, level = ?device.level, kind = ?device.kind, "device created");
+    if let Err(error) = state
+        .bus
+        .publish(EventKind::DeviceCreated {
+            device: device.clone(),
+        })
+        .await
+    {
+        tracing::error!(device = %device.name, %error, "failed to publish device created event");
+    }
+    Ok(crossagents_api_types::CreateDeviceResponse { device, token })
+}
+
+/// Where the hub listens: the entrance pipes streams there.
+fn hub_addr(state: &AppState) -> ApiResult<std::net::SocketAddr> {
+    state
+        .url
+        .trim_start_matches("http://")
+        .parse()
+        .map_err(|_| {
+            AppError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
+                "the hub's own address is unknown",
+            )
+        })
+}
+
+async fn link_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<crossagents_api_types::LinkStatus> {
+    Json(state.link.status().await)
+}
+
+async fn set_link(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crossagents_api_types::SetLinkRequest>,
+) -> ApiResult<Json<crossagents_api_types::LinkStatus>> {
+    let addr = hub_addr(&state)?;
+    let status = state
+        .link
+        .set(&state, addr, req.enabled, req.relay)
+        .await
+        .map_err(|err| {
+            AppError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::BadRequest,
+                format!("{err:#}"),
+            )
+        })?;
+    tracing::info!(enabled = req.enabled, "link: entrance switched");
+    Ok(Json(status))
+}
+
+async fn create_link_invite(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crossagents_api_types::LinkInvite>> {
+    let invite = state.link.invite(hostname()).await.map_err(|err| {
+        AppError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Conflict,
+            format!("{err:#}"),
+        )
+    })?;
+    tracing::info!(expires = %invite.expires_at, "link: pairing code made");
+    Ok(Json(invite))
+}
+async fn revoke_device(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crossagents_core::Device>> {
+    let (device, newly_revoked) = state.devices.revoke(state.store().as_ref(), &id).await?;
+    let terminals = state.terminals.clone();
+    tokio::task::spawn_blocking(move || terminals.close_device(&id))
+        .await
+        .map_err(|e| CoreError::Agent(format!("terminal task failed: {e}")))?;
+    tracing::info!(device = %device.name, level = ?device.level, kind = ?device.kind, "device revoked");
+    if newly_revoked
+        && let Err(error) = state
+            .bus
+            .publish(EventKind::DeviceRevoked {
+                device: device.clone(),
+            })
+            .await
+    {
+        tracing::error!(device = %device.name, %error, "failed to publish device revoked event");
+    }
+    Ok(Json(device))
+}
+
 #[cfg(test)]
 mod candidate_policy_tests {
     use chrono::Utc;
@@ -3909,154 +4059,4 @@ mod candidate_policy_tests {
         hub.shutdown();
         hub.wait().await.unwrap();
     }
-}
-
-async fn list_devices(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<crossagents_api_types::ListDevicesResponse>> {
-    Ok(Json(crossagents_api_types::ListDevicesResponse {
-        devices: state.store().list_devices().await?,
-    }))
-}
-async fn create_device(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<crossagents_api_types::CreateDeviceRequest>,
-) -> ApiResult<Json<crossagents_api_types::CreateDeviceResponse>> {
-    Ok(Json(
-        issue_device(
-            &state,
-            &req.name,
-            req.kind.unwrap_or_default(),
-            req.level.unwrap_or_default(),
-            req.os,
-        )
-        .await?,
-    ))
-}
-
-/// Records a new device and returns its token (shown only here). `POST /v1/devices` and a
-/// redeemed pairing code (crate::link) both issue through this.
-pub(crate) async fn issue_device(
-    state: &AppState,
-    name: &str,
-    kind: crossagents_core::DeviceKind,
-    level: crossagents_core::DeviceLevel,
-    os: Option<crossagents_core::DeviceOs>,
-) -> ApiResult<crossagents_api_types::CreateDeviceResponse> {
-    let name = name.trim();
-    if !(1..=64).contains(&name.chars().count()) || name.chars().any(char::is_control) {
-        return Err(AppError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::BadRequest,
-            "device name must contain 1–64 characters",
-        ));
-    }
-    let device = crossagents_core::Device {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: name.to_owned(),
-        kind,
-        level,
-        created_at: Utc::now(),
-        last_seen_at: None,
-        revoked_at: None,
-        os,
-    };
-    let token = format!(
-        "cad_{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    );
-    state
-        .store()
-        .insert_device(&device, &crate::devices::hash(&token))
-        .await?;
-    tracing::info!(device = %device.name, level = ?device.level, kind = ?device.kind, "device created");
-    if let Err(error) = state
-        .bus
-        .publish(EventKind::DeviceCreated {
-            device: device.clone(),
-        })
-        .await
-    {
-        tracing::error!(device = %device.name, %error, "failed to publish device created event");
-    }
-    Ok(crossagents_api_types::CreateDeviceResponse { device, token })
-}
-
-/// Where the hub listens: the entrance pipes streams there.
-fn hub_addr(state: &AppState) -> ApiResult<std::net::SocketAddr> {
-    state
-        .url
-        .trim_start_matches("http://")
-        .parse()
-        .map_err(|_| {
-            AppError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::Internal,
-                "the hub's own address is unknown",
-            )
-        })
-}
-
-async fn link_status(
-    State(state): State<Arc<AppState>>,
-) -> Json<crossagents_api_types::LinkStatus> {
-    Json(state.link.status().await)
-}
-
-async fn set_link(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<crossagents_api_types::SetLinkRequest>,
-) -> ApiResult<Json<crossagents_api_types::LinkStatus>> {
-    let addr = hub_addr(&state)?;
-    let status = state
-        .link
-        .set(&state, addr, req.enabled, req.relay)
-        .await
-        .map_err(|err| {
-            AppError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::BadRequest,
-                format!("{err:#}"),
-            )
-        })?;
-    tracing::info!(enabled = req.enabled, "link: entrance switched");
-    Ok(Json(status))
-}
-
-async fn create_link_invite(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<crossagents_api_types::LinkInvite>> {
-    let invite = state.link.invite(hostname()).await.map_err(|err| {
-        AppError::new(
-            StatusCode::CONFLICT,
-            ErrorCode::Conflict,
-            format!("{err:#}"),
-        )
-    })?;
-    tracing::info!(expires = %invite.expires_at, "link: pairing code made");
-    Ok(Json(invite))
-}
-async fn revoke_device(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<crossagents_core::Device>> {
-    let (device, newly_revoked) = state.devices.revoke(state.store().as_ref(), &id).await?;
-    let terminals = state.terminals.clone();
-    tokio::task::spawn_blocking(move || terminals.close_device(&id))
-        .await
-        .map_err(|e| CoreError::Agent(format!("terminal task failed: {e}")))?;
-    tracing::info!(device = %device.name, level = ?device.level, kind = ?device.kind, "device revoked");
-    if newly_revoked {
-        if let Err(error) = state
-            .bus
-            .publish(EventKind::DeviceRevoked {
-                device: device.clone(),
-            })
-            .await
-        {
-            tracing::error!(device = %device.name, %error, "failed to publish device revoked event");
-        }
-    }
-    Ok(Json(device))
 }

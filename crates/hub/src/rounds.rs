@@ -225,7 +225,7 @@ impl Rounds {
                     *message_id,
                     Waiting {
                         id: *id,
-                        from: from.clone(),
+                        from: *from,
                     },
                 );
             }
@@ -275,7 +275,7 @@ impl Rounds {
                     *message_id,
                     Waiting {
                         id: *id,
-                        from: from.clone(),
+                        from: *from,
                     },
                 );
             }

@@ -647,14 +647,16 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), kill.notified())
             .await
             .unwrap();
-        let f = state.frames.lock().unwrap();
-        assert_eq!(f.acked, 1);
-        assert!(
-            f.kept
-                .iter()
-                .any(|(_, line)| line.contains("byte budget") && line.contains("queued bytes=81"))
-        );
-        drop(f);
+        {
+            let f = state.frames.lock().unwrap();
+            assert_eq!(f.acked, 1);
+            assert!(
+                f.kept
+                    .iter()
+                    .any(|(_, line)| line.contains("byte budget")
+                        && line.contains("queued bytes=81"))
+            );
+        }
         drop(peer);
         server.await.unwrap();
     }

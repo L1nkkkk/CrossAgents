@@ -378,6 +378,66 @@ fn source_label(source: &RoundSource) -> String {
     }
 }
 
+/// `usage --by task`: what each task spent, with the raw tokens, both cost figures (the agents'
+/// report and the price table's estimate), requests, rework rounds, minutes and check time.
+/// Unknown figures show as `-`; the notes say why a figure is missing.
+fn print_task_table(usage: &UsageResponse) {
+    let dash = || "-".to_owned();
+    let rows: Vec<Vec<String>> = usage
+        .rows
+        .iter()
+        .map(|r| {
+            vec![
+                r.key.clone(),
+                r.run_id
+                    .clone()
+                    .map_or_else(dash, |id| id.chars().take(8).collect()),
+                r.tokens.map_or_else(dash, |v| v.to_string()),
+                r.new_input.map_or_else(dash, |v| v.to_string()),
+                r.cached_input.map_or_else(dash, |v| v.to_string()),
+                r.cache_write_input.to_string(),
+                r.output.map_or_else(dash, |v| v.to_string()),
+                if r.cost_reported {
+                    format!("${:.4}", r.cost_usd)
+                } else {
+                    dash()
+                },
+                r.estimated_cost_usd
+                    .map_or_else(dash, |v| format!("${v:.4}")),
+                r.requests.map_or_else(dash, |v| v.to_string()),
+                r.rework.map_or_else(dash, |v| v.to_string()),
+                r.minutes.map_or_else(dash, |v| format!("{v:.1}")),
+                r.check_seconds.map_or_else(dash, |v| format!("{v:.1}")),
+            ]
+        })
+        .collect();
+    print_table(
+        &[
+            "TASK",
+            "RUN",
+            "TOKENS",
+            "NEW IN",
+            "CACHE IN",
+            "CACHE WRITE",
+            "OUTPUT",
+            "REPORTED",
+            "ESTIMATED",
+            "REQUESTS",
+            "REWORK",
+            "MINUTES",
+            "CHECK SEC",
+        ],
+        &rows,
+    );
+    for row in usage.rows.iter().filter(|r| !r.notes.is_empty()) {
+        for note in &row.notes {
+            println!("{}: {note}", row.key);
+        }
+    }
+    println!("\ntotal reported cost: ${:.4}", usage.total_cost_usd);
+    println!("(\"-\": not reported or not known; \"ESTIMATED\" uses the price table)");
+}
+
 #[cfg(test)]
 mod tests {
     use crossagents_core::{MessageId, NoticeClass, RoundNotice, RunId};
@@ -538,64 +598,4 @@ mod tests {
             format!("teammate {lee}")
         );
     }
-}
-
-/// `usage --by task`: what each task spent, with the raw tokens, both cost figures (the agents'
-/// report and the price table's estimate), requests, rework rounds, minutes and check time.
-/// Unknown figures show as `-`; the notes say why a figure is missing.
-fn print_task_table(usage: &UsageResponse) {
-    let dash = || "-".to_owned();
-    let rows: Vec<Vec<String>> = usage
-        .rows
-        .iter()
-        .map(|r| {
-            vec![
-                r.key.clone(),
-                r.run_id
-                    .clone()
-                    .map_or_else(dash, |id| id.chars().take(8).collect()),
-                r.tokens.map_or_else(dash, |v| v.to_string()),
-                r.new_input.map_or_else(dash, |v| v.to_string()),
-                r.cached_input.map_or_else(dash, |v| v.to_string()),
-                r.cache_write_input.to_string(),
-                r.output.map_or_else(dash, |v| v.to_string()),
-                if r.cost_reported {
-                    format!("${:.4}", r.cost_usd)
-                } else {
-                    dash()
-                },
-                r.estimated_cost_usd
-                    .map_or_else(dash, |v| format!("${v:.4}")),
-                r.requests.map_or_else(dash, |v| v.to_string()),
-                r.rework.map_or_else(dash, |v| v.to_string()),
-                r.minutes.map_or_else(dash, |v| format!("{v:.1}")),
-                r.check_seconds.map_or_else(dash, |v| format!("{v:.1}")),
-            ]
-        })
-        .collect();
-    print_table(
-        &[
-            "TASK",
-            "RUN",
-            "TOKENS",
-            "NEW IN",
-            "CACHE IN",
-            "CACHE WRITE",
-            "OUTPUT",
-            "REPORTED",
-            "ESTIMATED",
-            "REQUESTS",
-            "REWORK",
-            "MINUTES",
-            "CHECK SEC",
-        ],
-        &rows,
-    );
-    for row in usage.rows.iter().filter(|r| !r.notes.is_empty()) {
-        for note in &row.notes {
-            println!("{}: {note}", row.key);
-        }
-    }
-    println!("\ntotal reported cost: ${:.4}", usage.total_cost_usd);
-    println!("(\"-\": not reported or not known; \"ESTIMATED\" uses the price table)");
 }

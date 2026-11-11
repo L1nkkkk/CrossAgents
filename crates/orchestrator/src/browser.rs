@@ -280,10 +280,10 @@ fn shape(tool: &str, input: &Value, output: Value) -> Result<Value, CoreError> {
             other => other,
         }
     };
-    if let (Some(tab), Value::Object(map)) = (tab, &mut value) {
-        if !map.contains_key("tab") {
-            map.insert("tab".into(), json!(tab));
-        }
+    if let (Some(tab), Value::Object(map)) = (tab, &mut value)
+        && !map.contains_key("tab")
+    {
+        map.insert("tab".into(), json!(tab));
     }
     annotate(&mut value);
     Ok(value)
@@ -449,8 +449,10 @@ mod tests {
 
     #[tokio::test]
     async fn nobody_claiming_in_time_fails_with_the_sentence_and_is_announced() {
-        let mut browser = Browser::default();
-        browser.timeout = Duration::from_millis(50);
+        let browser = Browser {
+            timeout: Duration::from_millis(50),
+            ..Default::default()
+        };
         let browser = Arc::new(browser);
         let _viewer = gui(&browser);
         let bus = bus().await;
@@ -473,8 +475,10 @@ mod tests {
 
     #[tokio::test]
     async fn the_first_claim_wins_and_the_next_is_a_conflict() {
-        let mut browser = Browser::default();
-        browser.timeout = Duration::from_secs(5);
+        let browser = Browser {
+            timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
         let browser = Arc::new(browser);
         let _viewer = gui(&browser);
         let bus = bus().await;
@@ -529,8 +533,10 @@ mod tests {
 
     #[tokio::test]
     async fn human_control_is_passed_through_and_says_who_has_the_tab() {
-        let mut browser = Browser::default();
-        browser.timeout = Duration::from_secs(5);
+        let browser = Browser {
+            timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
         let browser = Arc::new(browser);
         let _viewer = gui(&browser);
         let bus = bus().await;
@@ -564,8 +570,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failure_that_is_not_human_control_is_passed_through_too() {
-        let mut browser = Browser::default();
-        browser.timeout = Duration::from_secs(5);
+        let browser = Browser {
+            timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
         let browser = Arc::new(browser);
         let _viewer = gui(&browser);
         let bus = bus().await;
@@ -604,8 +612,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_screenshot_becomes_an_image_and_tabs_keep_their_urls_marked() {
-        let mut browser = Browser::default();
-        browser.timeout = Duration::from_secs(5);
+        let browser = Browser {
+            timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
         let browser = Arc::new(browser);
         let _viewer = gui(&browser);
         let bus = bus().await;

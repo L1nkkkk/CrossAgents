@@ -1444,6 +1444,7 @@ impl Orchestrator {
     /// (`reviewed_sha`, `review_attempt`), so the verdict can be bound to them; the brief carries
     /// them, and the last round's findings with the worker's answers. The caller holds the run's
     /// lock.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open_review_locked(
         &self,
         run: &Run,
