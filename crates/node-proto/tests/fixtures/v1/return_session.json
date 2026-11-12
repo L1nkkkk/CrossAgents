@@ -1,0 +1,1 @@
+{"t":"return","seq":8,"id":"call-4","result":{"t":"ok","reply":{"t":"session","session":{"handle":"h-1","session_id":"sess-123","attachment_support":{"image":true,"pdf":true,"text":true},"outlives_hub":true,"commands":[{"name":"compact","description":"Compact the context","kind":"command"}]}}}}

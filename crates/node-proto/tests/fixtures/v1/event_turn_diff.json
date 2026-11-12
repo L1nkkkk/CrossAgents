@@ -1,0 +1,1 @@
+{"t":"event","seq":28,"session":"h-1","event":{"kind":{"t":"turn_diff","turn_id":"turn-3","diff":"--- a/src/login.rs\n+++ b/src/login.rs\n@@ -1 +1 @@\n-let x = 1;\n+let x = 2;\n"},"raw":null}}

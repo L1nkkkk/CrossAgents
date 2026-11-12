@@ -1,0 +1,1 @@
+{"t":"event","seq":25,"session":"h-1","event":{"kind":{"t":"tool_call_updated","tool_call_id":"tool-1","title":null,"status":"completed"},"raw":null}}

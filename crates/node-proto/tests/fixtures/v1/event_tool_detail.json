@@ -1,0 +1,1 @@
+{"t":"event","seq":27,"session":"h-1","event":{"kind":{"t":"tool_detail","tool_call_id":"tool-1","detail":{"command":"cargo test -p crossagents-node-proto","cwd":"/crossagents/work/repo","exit_code":0,"duration_ms":812,"output":"test result: ok","changes":[{"path":"crates/node-proto/src/v1/session.rs","kind":"update","diff":"@@ -1 +1 @@\n-old\n+new\n"}]}},"raw":null}}

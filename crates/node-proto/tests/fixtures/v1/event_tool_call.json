@@ -1,0 +1,1 @@
+{"t":"event","seq":24,"session":"h-1","event":{"kind":{"t":"tool_call","tool_call_id":"tool-1","title":"Run cargo test","kind":"execute","status":"in_progress"},"raw":null}}
