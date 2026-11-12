@@ -97,13 +97,13 @@ function AppearancePage() {
         <div className="setting-line">
           <div>
             <div className="setting-label">浅色底色</div>
-            <div className="setting-hint">{dark ? "现在是深色；切回浅色时用这一套。" : "页面的底色，卡片和输入区浮在上面。"}</div>
+            <div className="setting-hint">{dark ? (theme.paper === "ink" ? "现在是深色；墨色的主操作在深色下也生效。" : "现在是深色；切回浅色时用这一套。") : "页面的底色，卡片和输入区浮在上面。"}</div>
           </div>
           <div className="papers" role="radiogroup" aria-label="浅色底色">
             {PAPERS.map((p) => (
               <button key={p.key} role="radio" aria-checked={theme.paper === p.key} className={`paper ${theme.paper === p.key ? "on" : ""}`} onClick={() => setTheme({ paper: p.key })} title={p.hint}>
                 <span className="paper-swatch" style={{ background: p.swatch }}>
-                  <span className="paper-card" />
+                  <span className="paper-card" style={p.card ? { background: p.card, borderColor: p.card } : undefined} />
                 </span>
                 {p.label}
               </button>

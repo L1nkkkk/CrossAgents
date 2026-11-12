@@ -8,7 +8,8 @@
    A card has a border or a shadow, never both; only floating things (menus, popovers) cast one.
 
    Themes are `<html data-theme>` (src/lib/theme.ts): light (素白), light-paper (纸),
-   light-mist (雾), dark. :root is light. */
+   light-mist (雾), dark. :root is light. 墨 is light (素白) or dark plus `data-accent="ink"`:
+   the accent becomes ink (near black, near white in dark) instead of indigo. */
 :root {
   --page: #f4f4f2;
   /* Where conversations and pages are drawn. */
@@ -153,6 +154,23 @@
   --panel-edge: rgba(255, 255, 255, 0.06);
   --shadow-float: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
   color-scheme: dark;
+}
+
+/* 墨: ink for primary actions, live marks and the selected item; colour stays for status,
+   diffs and vendors. */
+:root[data-accent="ink"]:not([data-theme="dark"]) {
+  --accent: #18181b;
+  --accent-hover: #3a3a40;
+  --accent-bg: rgba(24, 24, 27, 0.075);
+  --accent-text: #18181b;
+  --on-accent: #ffffff;
+}
+:root[data-theme="dark"][data-accent="ink"] {
+  --accent: #e6e6e9;
+  --accent-hover: #ffffff;
+  --accent-bg: rgba(255, 255, 255, 0.09);
+  --accent-text: #f2f2f4;
+  --on-accent: #18181b;
 }
 
 * { box-sizing: border-box; }
@@ -2152,7 +2170,7 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .host-steps { padding: 14px 16px 16px; }
 .guide-steps > li { counter-increment: guide; position: relative; padding-left: 30px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .guide-steps > li::before { content: counter(guide); position: absolute; left: 0; top: 0; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 11.5px; font-weight: 600; background: var(--surface-sunk); color: var(--text-2); border: 1px solid var(--border); }
-.guide-steps > li.now::before { background: var(--accent); border-color: var(--accent); color: #fff; }
+.guide-steps > li.now::before { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .guide-steps > li.done::before { content: "✓"; background: var(--ok); border-color: var(--ok); color: #fff; }
 .guide-step-title { font-weight: 500; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .guide-line { padding: 0; border: none; gap: 12px; }

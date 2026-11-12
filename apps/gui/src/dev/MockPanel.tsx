@@ -10,9 +10,11 @@ export function MockPanel({ current, narrow, go }: { current: string; narrow: bo
   const scenario = SCENARIOS.find((s) => s.key === current);
   const looks: { label: string; mode: Mode; paper?: Paper }[] = [
     ...PAPERS.map((p) => ({ label: p.label, mode: "light" as Mode, paper: p.key })),
-    { label: "深色", mode: "dark" },
+    { label: "深色", mode: "dark", paper: theme.paper === "ink" ? "plain" : undefined },
+    { label: "深色·墨", mode: "dark", paper: "ink" },
   ];
-  const on = (l: (typeof looks)[number]) => theme.mode === l.mode && (l.mode === "dark" || theme.paper === l.paper);
+  const on = (l: (typeof looks)[number]) =>
+    theme.mode === l.mode && (l.mode === "dark" ? (theme.paper === "ink") === (l.paper === "ink") : theme.paper === l.paper);
 
   if (!open) {
     return (
