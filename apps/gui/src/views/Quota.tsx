@@ -194,7 +194,7 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
       {/* Always shown, even when there is nothing to report: an absent exit line would read
           as "nothing to see" rather than "never confirmed" (docs/ACCOUNT-RISK.md「出口指纹」). */}
       <div className={`account-egress ${egress.route}`}>
-        <span className="account-egress-label">出口</span>
+        <span className="account-egress-label" title="最后一次确认到的出口；采集不到时不写新记录，所以它可能来自上一次启动，而不是此刻正在用的">出口</span>
         {egress.known ? (
           <>
             <code className="egress-value" title="出口 IP">{egress.ip}</code>
