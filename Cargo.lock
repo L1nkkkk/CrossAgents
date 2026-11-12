@@ -830,10 +830,21 @@ dependencies = [
  "chrono",
  "crossagents-core",
  "crossagents-drivers",
+ "crossagents-node-proto",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "crossagents-node-proto"
+version = "0.2.23"
+dependencies = [
+ "chrono",
+ "crossagents-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

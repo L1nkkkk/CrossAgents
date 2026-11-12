@@ -9,6 +9,7 @@ description = "A node that runs agents on one machine, and the hub's remote driv
 [dependencies]
 async-trait.workspace = true
 crossagents-core.workspace = true
+crossagents-node-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

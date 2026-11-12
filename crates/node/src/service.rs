@@ -399,6 +399,7 @@ type OpResult = Result<
 
 async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) -> OpResult {
     match op {
+        Op::Unknown => Err(CoreError::Unsupported("unknown operation".into())),
         Op::Open {
             plugin,
             driver,
@@ -570,7 +571,17 @@ fn make_spec(
             events: events.clone(),
         }) as Arc<dyn PermissionHandler>
     });
-    (wire.into_spec(events, handler), receiver)
+    let spec = SessionSpec {
+        agent: wire.agent,
+        mcp_servers: wire.mcp_servers,
+        permission: wire.permission,
+        permissions: if wire.permissions { handler } else { None },
+        command: wire.command,
+        instructions: wire.instructions,
+        env: wire.env,
+        events,
+    };
+    (spec, receiver)
 }
 
 fn finish_open(
