@@ -1,6 +1,22 @@
 use crossagents_core as core;
-use crossagents_core::MessageId;
 use serde::{Deserialize, Serialize};
+
+/// The UUID string identifying a message in the event protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WireMessageId(pub uuid::Uuid);
+
+impl From<&core::MessageId> for WireMessageId {
+    fn from(id: &core::MessageId) -> Self {
+        Self(id.as_uuid())
+    }
+}
+
+impl From<WireMessageId> for core::MessageId {
+    fn from(id: WireMessageId) -> Self {
+        Self::from(id.0)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -543,7 +559,7 @@ pub enum WireSessionEventKind {
         stop_reason: WireStopReason,
     },
     SteerRead {
-        message_id: MessageId,
+        message_id: WireMessageId,
     },
     Compacted,
     PromptViaFile,
@@ -640,7 +656,7 @@ impl From<&core::SessionEventKind> for WireSessionEventKind {
                 stop_reason: stop_reason.into(),
             },
             core::SessionEventKind::SteerRead { message_id } => Self::SteerRead {
-                message_id: message_id.clone(),
+                message_id: message_id.into(),
             },
             core::SessionEventKind::Compacted => Self::Compacted,
             core::SessionEventKind::PromptViaFile => Self::PromptViaFile,
@@ -745,7 +761,7 @@ impl From<WireSessionEventKind> for Option<core::SessionEventKind> {
                 stop_reason: stop_reason.into(),
             },
             WireSessionEventKind::SteerRead { message_id } => core::SessionEventKind::SteerRead {
-                message_id: message_id,
+                message_id: message_id.into(),
             },
             WireSessionEventKind::Compacted => core::SessionEventKind::Compacted,
             WireSessionEventKind::PromptViaFile => core::SessionEventKind::PromptViaFile,

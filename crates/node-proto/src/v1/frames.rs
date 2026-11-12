@@ -168,6 +168,31 @@ mod tests {
     }
 
     #[test]
+    fn steer_read_preserves_uuid_wire_format_and_event() {
+        let id = "018f0c12-3456-789a-abcd-0123456789ab";
+        let event = SessionEvent::from(crossagents_core::SessionEventKind::SteerRead {
+            message_id: id.parse().unwrap(),
+        });
+        let frame = ToHub::Event {
+            seq: 17,
+            session: "s1".into(),
+            event: (&event).into(),
+            commands: None,
+        };
+        let line = encode(&frame);
+        assert_eq!(
+            line,
+            format!(
+                "{{\"t\":\"event\",\"seq\":17,\"session\":\"s1\",\"event\":{{\"kind\":{{\"t\":\"steer_read\",\"message_id\":\"{id}\"}},\"raw\":null}}}}\n"
+            )
+        );
+        let ToHub::Event { event: decoded, .. } = decode(&line).unwrap() else {
+            panic!("expected event");
+        };
+        assert_eq!(Option::<SessionEvent>::from(decoded), Some(event));
+    }
+
+    #[test]
     fn ask_round_trips() {
         let frame = ToHub::Ask {
             seq: 9,
