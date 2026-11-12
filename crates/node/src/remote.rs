@@ -146,6 +146,8 @@ struct HubShared {
     last_seq: AtomicU64,
     next_id: AtomicU64,
     register: Mutex<Option<Result<RegisterInfo, ProtocolMismatch>>>,
+    /// Kept across rejected registrations so a later restart resets replay tracking.
+    accepted_epoch: Mutex<Option<String>>,
 }
 
 impl HubShared {
@@ -368,13 +370,14 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
             }
             // A restarted node numbers its frames from 1 again; without this the hub would
             // take every one of them for a replay and drop it.
-            let restarted = register
+            let mut accepted_epoch = shared.accepted_epoch.lock().expect("epoch lock poisoned");
+            let restarted = accepted_epoch
                 .as_ref()
-                .and_then(|previous| previous.as_ref().ok())
-                .is_some_and(|previous| previous.epoch != epoch);
+                .is_some_and(|previous| previous != &epoch);
             if restarted {
                 shared.last_seq.store(0, Ordering::SeqCst);
             }
+            *accepted_epoch = Some(epoch.clone());
             *register = Some(Ok(RegisterInfo {
                 epoch,
                 protocol,
@@ -483,6 +486,7 @@ impl RemoteNode {
             last_seq: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
             register: Mutex::new(None),
+            accepted_epoch: Mutex::new(None),
         });
         let actor = tokio::spawn(run(shared.clone()));
         Self { shared, actor }

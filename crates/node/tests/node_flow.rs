@@ -742,3 +742,89 @@ async fn a_restarted_node_starts_its_sequence_over() {
     session.shutdown().await;
     second_service.abort();
 }
+
+#[tokio::test]
+async fn a_rejected_registration_does_not_forget_the_last_accepted_epoch() {
+    use crossagents_node::protocol::{ProtocolMismatch, RegisterInfo};
+
+    let driver: Arc<dyn Driver> = ScriptedDriver::new("scripted", Duration::ZERO);
+    let source: Arc<dyn DriverSource> = Arc::new(SingleDriverSource {
+        plugin: "scripted".into(),
+        driver: driver.clone(),
+    });
+    let (hub, node) = memory_pair();
+    let server: Arc<dyn TransportServer> = Arc::new(node);
+    let mut first_info = RegisterInfo::local();
+    first_info.epoch = "epoch-a".into();
+    let first = tokio::spawn(
+        NodeService::new(source.clone())
+            .with_register(first_info)
+            .run(server.clone()),
+    );
+    let node_link = Arc::new(RemoteNode::new(Arc::new(hub.clone())));
+    let remote = node_link.driver("scripted", None, Arc::new(LocalDriverInfo::new(driver)));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let session = remote.open(spec(tx, None)).await.unwrap();
+    session.prompt("before").await.unwrap();
+    assert_eq!(
+        text_of(&turn_events(&mut rx).await),
+        "echo[scripted]: before"
+    );
+    session.shutdown().await;
+
+    hub.disconnect().await;
+    first.abort();
+    let _ = first.await;
+    let mut incompatible = RegisterInfo::local();
+    incompatible.protocol.major = 2;
+    let rejected = tokio::spawn(
+        NodeService::new(source.clone())
+            .with_register(incompatible)
+            .run(server.clone()),
+    );
+    hub.set_online(true);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while node_link.protocol_mismatch() != Some(ProtocolMismatch::NodeTooNew) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("incompatible registration arrives");
+
+    hub.disconnect().await;
+    rejected.abort();
+    let _ = rejected.await;
+    let mut second_info = RegisterInfo::local();
+    second_info.epoch = "epoch-b".into();
+    let second = tokio::spawn(
+        NodeService::new(source)
+            .with_register(second_info)
+            .run(server),
+    );
+    hub.set_online(true);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !node_link
+            .register()
+            .is_some_and(|info| info.epoch == "epoch-b")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("compatible registration arrives");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let session = tokio::time::timeout(Duration::from_secs(5), remote.open(spec(tx, None)))
+        .await
+        .expect("sequence 1 is processed")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), session.prompt("after"))
+        .await
+        .expect("the call completes")
+        .unwrap();
+    assert_eq!(
+        text_of(&turn_events(&mut rx).await),
+        "echo[scripted]: after"
+    );
+    session.shutdown().await;
+    second.abort();
+}
