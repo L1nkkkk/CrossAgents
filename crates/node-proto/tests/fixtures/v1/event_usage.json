@@ -1,0 +1,1 @@
+{"t":"event","seq":29,"session":"h-1","event":{"kind":{"t":"usage","used":48000,"size":200000,"cost_usd":0.42,"tokens":{"input":41000,"cached_input":30000,"cache_write_input":2000,"output":7000,"reasoning_output":1500,"total":48000,"requests":6}},"raw":null}}

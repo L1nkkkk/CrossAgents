@@ -1,0 +1,1 @@
+{"t":"call","id":"call-7","op":{"op":"prompt","session":"h-1","prompt":{"text":"Fix the failing login test","attachments":[{"id":"9f2c1e","name":"failure.log","mime":"text/plain","size":1204,"path":"/crossagents/attachments/9f2c1e/failure.log"}]}}}

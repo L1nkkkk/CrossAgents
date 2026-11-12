@@ -1,0 +1,1 @@
+{"t":"register","epoch":"run-7f3a","protocol":{"major":1,"minor":0},"capabilities":["terminal","attachments"],"node_version":"0.2.20","os":"macos","hostname":"mac-studio","plugins":[{"name":"claude","installed":true,"version":"2.1.0"},{"name":"codex","installed":false}]}

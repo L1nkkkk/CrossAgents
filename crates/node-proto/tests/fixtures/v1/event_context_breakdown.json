@@ -1,0 +1,1 @@
+{"t":"event","seq":31,"session":"h-1","event":{"kind":{"t":"context_breakdown","parts":[{"id":"system_prompt","name":"System prompt","tokens":1800,"kind":"used"},{"id":"messages","name":"Messages","tokens":12400,"kind":"used"},{"id":"free_space","name":"Free space","tokens":185800,"kind":"free"}]},"raw":null}}
