@@ -193,6 +193,9 @@ impl Accounts {
         if record.asn.is_none() {
             record.country = None;
         }
+        if record.egress_ip.is_none() && record.asn.is_none() && record.country.is_none() {
+            return Ok(());
+        }
         let account = &record.account;
         let history = self
             .store()
@@ -2613,6 +2616,33 @@ mod egress_tests {
         assert_eq!(
             lookup_fingerprint("http://example.invalid", "http://127.0.0.1:1").await,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_fingerprint_preserves_last_known_observation() {
+        let accounts = accounts(None, &[], &[]).await;
+        let agent = AgentId::new();
+        accounts
+            .apply_fingerprint(agent, observed(Some("192.0.2.1"), Some("US")))
+            .await
+            .unwrap();
+        accounts
+            .apply_fingerprint(agent, observed(None, None))
+            .await
+            .unwrap();
+
+        let fingerprint = accounts.fingerprint("test").await.unwrap();
+        assert_eq!(fingerprint.ip.as_deref(), Some("192.0.2.1"));
+        assert_eq!(fingerprint.country.as_deref(), Some("US"));
+        assert_eq!(
+            accounts
+                .store()
+                .list_egress_records("test")
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 

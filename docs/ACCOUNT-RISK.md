@@ -58,6 +58,8 @@ JSON 里的 `egress` > 按 provider 的覆盖 > `egress_default` > provider 默�
 
 每次观察仅保存账号、IP、ASN、国家和时间。新 IP 通知但不阻断；已知国家发生变化时默认先询问，选择「允许」后重试启动。unknown 不触发国家变化判定；未配置代理时仍按 `proxy_only` 拒绝启动。
 
+库里只记录真实观察；完全采不到指纹时不写入，因此界面显示的是最后一次能确认的出口，可能来自上一次启动，而非此刻的出口。
+
 ASN 缺失时国家也按 unknown 处理，避免不完整的采集结果阻断启动或覆盖上次已知国家。
 
 - `[accounts] egress_echo_url`：自选 HTTP echo 地址，不配置则不请求任何端点。
