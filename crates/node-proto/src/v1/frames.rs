@@ -1,5 +1,7 @@
-use super::{Op, WirePermissionDecision, WirePermissionRequest, WireResult, WireSessionEvent};
-use crossagents_core::AgentCommand;
+use super::{
+    Op, WireAgentCommand, WirePermissionDecision, WirePermissionRequest, WireResult,
+    WireSessionEvent,
+};
 use serde::{Deserialize, Serialize};
 
 /// Sent by the hub.
@@ -40,7 +42,7 @@ pub enum ToHub {
         result: WireResult,
         /// The session's commands, when they changed while the call ran (`prompt`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        commands: Option<Vec<AgentCommand>>,
+        commands: Option<Vec<WireAgentCommand>>,
     },
     /// One `SessionEvent`, unchanged, for the session the node named `session`.
     Event {
@@ -49,7 +51,7 @@ pub enum ToHub {
         event: WireSessionEvent,
         /// The session's commands, when they changed with this event.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        commands: Option<Vec<AgentCommand>>,
+        commands: Option<Vec<WireAgentCommand>>,
     },
     /// A permission request the node needs the hub to decide.
     Ask {
@@ -212,9 +214,9 @@ mod tests {
     #[test]
     fn calls_round_trip() {
         let spec = WireSpec {
-            agent: agent(),
+            agent: (&agent()).into(),
             mcp_servers: vec![],
-            permission: PermissionPolicy::Deny,
+            permission: (&PermissionPolicy::Deny).into(),
             command: Some(vec!["agent".into(), "acp".into()]),
             instructions: Some("be kind".into()),
             env: vec![("A".into(), "B".into())],
@@ -233,16 +235,62 @@ mod tests {
     }
 
     #[test]
+    fn open_accepts_unknown_agent_fields() {
+        let mut expected = agent();
+        expected.name_source = crossagents_core::NameSource::Generated;
+        expected.role = crossagents_core::Role::Reviewer;
+        expected.driver = Some("native".into());
+        expected.model = Some("model".into());
+        expected.config = serde_json::json!({"nested": [1, true]});
+        expected.profile.title = Some("reviewer".into());
+        expected.topic = Some("topic".into());
+        expected.archived_at = Some(expected.created_at);
+        expected.node = Some("node".into());
+        assert_eq!(
+            serde_json::to_value(&expected).unwrap(),
+            serde_json::to_value(super::super::WireAgent::from(&expected)).unwrap()
+        );
+        let spec = WireSpec {
+            agent: (&expected).into(),
+            mcp_servers: vec![],
+            permission: (&PermissionPolicy::Deny).into(),
+            command: None,
+            instructions: None,
+            env: vec![],
+            permissions: false,
+        };
+        let call = ToNode::Call {
+            id: "c1".into(),
+            op: Op::Open {
+                plugin: "mock".into(),
+                driver: None,
+                spec: Box::new(spec),
+            },
+        };
+        let mut json = serde_json::to_value(call).unwrap();
+        json["op"]["spec"]["agent"]["future_field"] = serde_json::json!({"new": true});
+        let ToNode::Call {
+            op: Op::Open { spec, .. },
+            ..
+        } = serde_json::from_value(json).unwrap()
+        else {
+            panic!("expected open call");
+        };
+        assert_eq!(Agent::from(spec.agent), expected);
+    }
+
+    #[test]
     fn returns_round_trip() {
         let frame = ToHub::Return {
             seq: 12,
             id: "c1".into(),
             result: WireResult::Ok {
                 reply: WireReply::Turn {
-                    outcome: TurnOutcome {
+                    outcome: (&TurnOutcome {
                         stop_reason: StopReason::EndTurn,
                         turn_id: None,
-                    },
+                    })
+                        .into(),
                 },
             },
             commands: None,

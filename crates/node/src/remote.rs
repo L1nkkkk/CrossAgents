@@ -387,7 +387,7 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
                 return;
             }
             if let Some(commands) = commands {
-                shared.set_commands(&session, commands);
+                shared.set_commands(&session, commands.into_iter().map(Into::into).collect());
             }
             if let Some(event) = event.into() {
                 shared.deliver(&session, event);
@@ -413,7 +413,7 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
                 .remove(&id);
             if let Some(pending) = pending {
                 if let (Some(commands), Some(session)) = (commands, &pending.session) {
-                    shared.set_commands(session, commands);
+                    shared.set_commands(session, commands.into_iter().map(Into::into).collect());
                 }
                 let _ = pending.answer.send(result);
             }
@@ -593,14 +593,18 @@ fn attach_session(
     events: mpsc::UnboundedSender<SessionEvent>,
     permissions: Option<Arc<dyn PermissionHandler>>,
 ) -> RemoteSession {
-    let commands = Arc::new(Mutex::new(info.commands.clone()));
+    let commands = Arc::new(Mutex::new(
+        info.commands
+            .clone()
+            .map(|xs| xs.into_iter().map(Into::into).collect()),
+    ));
     node.shared
         .register(&info.handle, events, permissions, commands.clone());
     RemoteSession {
         node: node.clone(),
         handle: info.handle,
         session_id: info.session_id,
-        attachment_support: info.attachment_support,
+        attachment_support: info.attachment_support.map(Into::into),
         outlives_hub: info.outlives_hub,
         commands,
         closed: AtomicBool::new(false),
@@ -781,7 +785,7 @@ impl DriverSession for RemoteSession {
             })
             .await?;
         match reply {
-            WireReply::Turn { outcome } => Ok(outcome),
+            WireReply::Turn { outcome } => Ok(outcome.into()),
             other => Err(unexpected("a turn", &other)),
         }
     }
@@ -904,7 +908,7 @@ impl DriverSession for RemoteSession {
             })
             .await
         {
-            Ok(WireReply::MaybeTurn { outcome }) => outcome.map(Ok),
+            Ok(WireReply::MaybeTurn { outcome }) => outcome.map(|value| Ok(value.into())),
             Ok(other) => Some(Err(unexpected("an adopted turn", &other))),
             Err(err) => Some(Err(err)),
         }
