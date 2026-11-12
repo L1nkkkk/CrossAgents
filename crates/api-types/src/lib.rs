@@ -2573,6 +2573,20 @@ pub struct AccountQuota {
     /// Agents that run on this account (named in their config, or using the provider's
     /// own login).
     pub agents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub egress: Option<EgressFingerprint>,
+}
+
+/// Latest observed network exit for an account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EgressFingerprint {
+    pub ip: Option<String>,
+    pub asn: Option<String>,
+    pub country: Option<String>,
+    pub via_proxy: Option<bool>,
+    pub changed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

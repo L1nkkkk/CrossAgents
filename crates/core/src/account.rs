@@ -11,6 +11,16 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// One observed egress for an account. Missing values mean the lookup failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressRecord {
+    pub account: String,
+    pub egress_ip: Option<String>,
+    pub asn: Option<String>,
+    pub country: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
 use crate::error::CoreError;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -278,7 +278,7 @@ pub async fn check_proxy(
     reach: Option<&str>,
     policy: EgressPolicy,
 ) -> Result<Vec<(String, String)>, CoreError> {
-    let Some(proxy) = effective_proxy(env) else {
+    let Some(proxy) = require_proxy(effective_proxy(env), policy)? else {
         return Ok(Vec::new());
     };
     probe(&proxy).await?;
@@ -308,6 +308,18 @@ pub async fn check_proxy(
         return Ok(bypass_env(env, host));
     }
     Err(err)
+}
+
+fn require_proxy(
+    proxy: Option<ProxyUrl>,
+    policy: EgressPolicy,
+) -> Result<Option<ProxyUrl>, CoreError> {
+    if proxy.is_none() && policy == EgressPolicy::ProxyOnly {
+        return Err(CoreError::Agent(
+            "to protect this account, refusing a bare-IP direct connection: no proxy is configured — configure HTTPS_PROXY or a system proxy, or set [accounts.egress_by_account] for this account to allow_direct".to_owned(),
+        ));
+    }
+    Ok(proxy)
 }
 
 /// `env` without the hub-internal [`crossagents_core::EGRESS_ENV`] entries.
@@ -395,6 +407,62 @@ fn effective_proxy(overrides: &[(String, String)]) -> Option<ProxyUrl> {
         return ProxyUrl::parse(&raw);
     }
     ProxyUrl::parse(system_proxy().as_deref()?)
+}
+
+/// The same proxy selected for the vendor preflight, for an optional egress lookup.
+pub fn effective_proxy_url(overrides: &[(String, String)]) -> Option<String> {
+    effective_proxy(overrides).map(|proxy| {
+        if proxy.url.contains("://") {
+            proxy.url
+        } else {
+            format!("http://{}", proxy.url)
+        }
+    })
+}
+
+/// Read an explicitly configured HTTP echo through the selected HTTP proxy only.
+/// Unsupported URLs, proxy schemes, credentials, timeouts and malformed replies are unknown.
+pub async fn proxy_echo(url: &str, proxy_url: &str) -> Option<String> {
+    let proxy = ProxyUrl::parse(proxy_url)?;
+    if proxy.scheme != "http" || proxy_url.contains('@') {
+        return None;
+    }
+    let rest = url.strip_prefix("http://")?;
+    let authority = rest.split('/').next()?;
+    if authority.is_empty() || authority.contains('@') || url.contains(['\r', '\n', '#']) {
+        return None;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = TcpStream::connect((proxy.host.as_str(), proxy.port))
+            .await
+            .ok()?;
+        let request =
+            format!("GET {url} HTTP/1.0\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.ok()?;
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut buf).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..n]);
+            if bytes.len() > 16384 {
+                return None;
+            }
+        }
+        let response = String::from_utf8(bytes).ok()?;
+        let (headers, body) = response.split_once("\r\n\r\n")?;
+        if !headers.lines().next()?.contains(" 200 ")
+            || headers.to_ascii_lowercase().contains("transfer-encoding:")
+        {
+            return None;
+        }
+        Some(body.to_owned())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn probe(proxy: &ProxyUrl) -> Result<(), CoreError> {
@@ -838,6 +906,45 @@ mod tests {
         assert!(message.contains("protect this account"), "{message}");
         // Nothing was remembered that would send a later launch straight out.
         assert!(!goes_direct(host), "DIRECT_HOSTS must stay untouched");
+    }
+
+    #[test]
+    fn proxy_only_refuses_when_no_proxy_is_configured() {
+        let err = require_proxy(None, EgressPolicy::ProxyOnly).err().unwrap();
+        let message = err.to_string();
+        assert!(message.contains("no proxy is configured"), "{message}");
+        assert!(message.contains("HTTPS_PROXY"), "{message}");
+        assert!(message.contains("egress_by_account"), "{message}");
+        assert!(require_proxy(None, EgressPolicy::AllowDirect).is_ok());
+    }
+
+    #[tokio::test]
+    async fn echo_uses_the_selected_proxy_and_never_contacts_the_echo_directly() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&buf[..n])
+                    .starts_with("GET http://echo.invalid/ip HTTP/1.0")
+            );
+            stream
+                .write_all(b"HTTP/1.0 200 OK\r\n\r\n192.0.2.1")
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            proxy_echo("http://echo.invalid/ip", &proxy)
+                .await
+                .as_deref(),
+            Some("192.0.2.1")
+        );
+        server.await.unwrap();
+        assert_eq!(proxy_echo("https://echo.invalid/ip", &proxy).await, None);
     }
 
     #[tokio::test]

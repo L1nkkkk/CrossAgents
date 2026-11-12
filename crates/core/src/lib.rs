@@ -30,8 +30,8 @@ pub mod tool;
 
 pub use account::{
     Account, AccountProvider, AccountStatus, CodebuddySite, Credits, DataSource, EGRESS_ENV,
-    EgressPolicy, LimitGroup, LoginCommand, ModelInfo, RateWindow, RequestUsage, ResetCredit,
-    SessionUsage, TokenTotals, mask_email,
+    EgressPolicy, EgressRecord, LimitGroup, LoginCommand, ModelInfo, RateWindow, RequestUsage,
+    ResetCredit, SessionUsage, TokenTotals, mask_email,
 };
 pub use attachment::{Attachment, AttachmentKind, AttachmentSupport, Prompt};
 pub use bus::EventBus;
