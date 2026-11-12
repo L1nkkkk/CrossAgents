@@ -37,12 +37,12 @@ flowchart LR
 
 ## 3. 已定与建议定下的选择
 
-MULTI-NODE §11 有三条和 B1 直接相关，2026-11-12 人确认按下表定：
+MULTI-NODE §11 有三条和 B1 直接相关，2026-11-12 人确认按下表定；第 4 条在 2026-11-13 改过（见理由列）：
 
 | §11 | 建议 | 理由 |
 |---|---|---|
 | 第 10 条：节点怎么连中心 | **已定：走打洞**（`crates/link`），node 用 `kind = node` 的设备 token | 已经在 Mac 上跑通；不开端口、不要证书；A1 已为 node 预留 kind（[access.rs](../../crates/hub/src/access.rs) 里 node token 到不了现有路由） |
-| 第 4 条：通道格式 | **已定：一条 QUIC 流上的 JSON 行**，消息体直接用 `core` 里已经 `Serialize` 的类型（`SessionEvent`、`Agent`、`PermissionRequest` 等） | 和 runtime host 的 [wire.rs](../../crates/drivers/src/host/wire.rs) 同一种做法（带 `seq` 和 `ack`，重连补发），已经被进程监督验证过；不引入 gRPC |
+| 第 4 条：通道格式 | **已定（2026-11-13 改）：一条 QUIC 流上的 JSON 行**，消息体改用 `crates/node-proto` 的显式 DTO（`v1/` 下按主题分：`frames`、`ops`、`session`、`agent`、`cli`、`error`、`reply`），与 `core` 的域类型显式双向转换。原定：消息体直接用 `core` 里已经 `Serialize` 的类型（`SessionEvent`、`Agent`、`PermissionRequest` 等） | 为什么改：在 `core` 里改一个跨线类型的字段名，线上格式就变了，而没有任何测试会红，只会在 Mac 节点连上来时才发现。旧决定的依据是 runtime host 的 [wire.rs](../../crates/drivers/src/host/wire.rs)：自有子进程、同一个版本、同一处生成同一处消费，这个前提在跨机器上不成立。前例：oink 把线上契约单独做成 crate（[research/oink.md](../research/oink.md)）；本仓已落地 `crates/node-proto`（`171b2a0`）与事件路径 DTO（`69da2b9`）。边界：`node-proto` 不依赖 `crossagents-node` 也不依赖 tokio，域逻辑在结构上渗不进契约层。细节见 §4 |
 | 第 5 条：MCP | **已定：节点转发**：节点把中心 hub 的 API 端口经打洞转到自己的 `127.0.0.1`，agent 的 `crossagents mcp` 连这个端口 | agent 侧配置不变（MCP 仍是本机 stdio 进程）；会话 token 照旧由 hub 发、hub 验 |
 
 ### 3.1 切在哪里：`Driver` trait
@@ -60,20 +60,35 @@ hub 现在通过 [`Driver` / `DriverSession`](../../crates/core/src/driver.rs) �
 
 | 方向 | 消息 | 说明 |
 |---|---|---|
-| node → hub | `Register { node_version, os, hostname, plugins }` | 每次连上先发。`plugins`：每个插件是否已装、CLI 路径与版本（`CliStatus`）、模型与 effort、能力表 |
+| node → hub | `Register { epoch, node_version, protocol, capabilities, os, hostname, plugins }` | 每次连上先发。`protocol`：协议版本（主/次两段，当前 `1.0`）；`capabilities`：能力表（字符串列表，已知项至少 `terminal`、`attachments`、`install_cli`）；`epoch`：节点进程的这一次运行，换了说明 `seq` 从头开始；`node_version`：app 版本，只作展示，不参与判定。`plugins`：每个插件是否已装、CLI 路径与版本（`CliStatus`）、模型与 effort |
 | hub → node | `Call { id, op }` | `op` 对应 `Driver` / `DriverSession` 的方法：`open{agent_key, spec}`、`resume`、`adopt`、`prompt`、`steer`、`interrupt`、`suspend`、`fork`、`rollback`、`set_model`、`compact`、`shutdown`，以及 `probe_cli`、`refresh_cli`、`install_cli` |
 | node → hub | `Return { id, result }` | `Call` 的结果；`prompt` 的 `TurnOutcome` 在轮次结束时才回 |
-| node → hub | `Event { seq, session, event }` | `SessionEvent` 原样；`seq` 按节点单调递增 |
+| node → hub | `Event { seq, session, event }` | `SessionEvent` 的显式 DTO（`WireSessionEvent`）；`seq` 按节点单调递增 |
 | hub → node | `Ack { seq }` | 中心落库后确认；节点删掉 `seq` 及以前的缓存 |
 | node → hub | `Ask { id, session, request }` | 需要权限回调的驱动（`permission_callback`）问中心；中心跑 `Guard` 后回 `Answer { id, decision }` |
 | 双向 | `Ping` / `Pong` | 15 秒一次，45 秒没收到算掉线 |
+
+**为什么现在换契约层**：B1.3（打洞上的节点）和 B1.6（Mac 包）都还没落地，外面没有任何在跑的节点。现在换只动仓库里的 hub、内置节点和测试，是纯重构；等有节点在外面跑了再换，就要同时兼容旧报文、带着迁移做。契约层已落地一半：`crates/node-proto`（`171b2a0`）与事件路径的显式 DTO（`69da2b9`）已合，调用路径的 DTO 与能力协商随后补上。
 
 **`SessionSpec` 怎么过线**：`agent`、`mcp_servers`、`permission`、`command`、`instructions`、`env` 都能序列化；`events`（mpsc 发送端）在节点侧新建，事件经 `Event` 回传；`permissions`（回调）变成一个布尔，节点侧用一个发 `Ask` 的 `PermissionHandler` 代替。
 `mcp_servers` 里 `crossagents` 那一项的 `URL_ENV` 由**节点**改写成自己转发出来的本地端口，`program` 改成节点自己的 `crossagents` 程序（[collab.rs](../../crates/hub/src/collab.rs) `SessionExtras`）。
 
 **掉线与补发**：节点按 `seq` 缓存未确认的 `Event`，重连后 `Register` 之后先补发；中心按 `(node, seq)` 去重。agent 进程在节点上照常跑（节点里仍用 runtime host，见 PROCESS-SUPERVISION），掉线期间正在跑的 `prompt` 由中心标为「节点离线」，重连后用 `adopt` 接回（与 hub 重启时的接管同一套）。缓存上限 B1 先定为 10 万条或 200 MB、7 天，超了丢最旧的并发一条 `Warning`（§11 第 6 条，人可改）。
 
-**版本**：`Register.node_version` 与 hub 版本主次号不同时，中心拒绝并让 GUI 显示「这台机器的节点要升级」（MULTI-NODE §13.4）。
+**协议版本与能力协商（2026-11-13 定，取代原来的版本闸）**：协议版本 `PROTOCOL_V1` 分主、次两段，当前 `1.0`。
+
+- 能不能连只看**协议主版本**：主版本不同，中心拒绝并让 GUI 显示「这台机器的节点要升级」；主版本相同就放行。升级怎么走（节点下载、`bin/<版本>/` 重启、升级期间 agent 不停）仍按 MULTI-NODE §13.4。
+- 次版本和能力差异一律**降级**，不拒绝：节点不支持终端，界面上就不给开终端；不认识的能力项原样忽略；次版本不同只记下。
+- app 版本（`node_version`）不再参与任何判定，只留作展示。
+- 原来那条「`Register.node_version` 与 hub 版本主次号不同时，中心拒绝并显示『这台机器的节点要升级』」只写在文档里，代码里从未实现（[remote.rs](../../crates/node/src/remote.rs) 收到 `Register` 只存快照）。这次是定了新规则并落成代码，不是修一条已有的闸。
+
+**宽容解码（已实现）**：
+
+- 解码不拒绝未知字段：一方给旧对端加了字段，旧对端照常读。
+- 不认识的 `op` 回一条 `Unsupported` 错误 `Return`（`Op` 的 `#[serde(other)] Unknown` 保留调用 `id`）。不能把整行丢掉：丢了，中心的这次 `Call` 会一直挂着。
+- 不认识的事件种类丢弃，但照常 `Ack`；不 Ack 节点会一直补发。
+
+**报文留档（约定）**：每次发版把当时的报文录一份到 `crates/node-proto/tests/fixtures/v<协议主版本>/`，老版本的目录只增不改；跨版本解码测试拿旧报文喂新代码，格式变了就会红。目录还没建（另一步做）。
 
 ## 5. 数据与接口
 
