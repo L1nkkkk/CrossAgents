@@ -12,3 +12,4 @@ pub use error::*;
 pub use frames::*;
 pub use ops::*;
 pub use reply::*;
+pub use session::*;

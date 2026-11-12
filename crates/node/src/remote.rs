@@ -389,7 +389,11 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
             if let Some(commands) = commands {
                 shared.set_commands(&session, commands);
             }
-            shared.deliver(&session, event);
+            if let Some(event) = event.into() {
+                shared.deliver(&session, event);
+            } else {
+                tracing::debug!(seq, %session, "discarding unknown session event");
+            }
             shared.ack(seq);
         }
         ToHub::Return {
@@ -433,12 +437,16 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
                 .and_then(|route| route.permissions.clone());
             let shared = shared.clone();
             tokio::spawn(async move {
+                let request = request.into();
                 let decision = match handler {
                     Some(handler) => handler.decide(&request).await,
                     // The hub did not say it has a handler; refusing is the safe answer.
                     None => PermissionDecision::Deny,
                 };
-                shared.send(ToNode::Answer { id, decision });
+                shared.send(ToNode::Answer {
+                    id,
+                    decision: (&decision).into(),
+                });
             });
         }
         ToHub::Pong => {}

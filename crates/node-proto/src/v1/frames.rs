@@ -1,5 +1,5 @@
-use super::{Op, WireResult};
-use crossagents_core::{AgentCommand, PermissionDecision, PermissionRequest, SessionEvent};
+use super::{Op, WirePermissionDecision, WirePermissionRequest, WireResult, WireSessionEvent};
+use crossagents_core::AgentCommand;
 use serde::{Deserialize, Serialize};
 
 /// Sent by the hub.
@@ -13,7 +13,7 @@ pub enum ToNode {
     /// The hub's answer to one of the node's [`ToHub::Ask`]s.
     Answer {
         id: String,
-        decision: PermissionDecision,
+        decision: WirePermissionDecision,
     },
     /// Liveness; answered with [`ToHub::Pong`].
     Ping,
@@ -46,7 +46,7 @@ pub enum ToHub {
     Event {
         seq: u64,
         session: String,
-        event: SessionEvent,
+        event: WireSessionEvent,
         /// The session's commands, when they changed with this event.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         commands: Option<Vec<AgentCommand>>,
@@ -56,7 +56,7 @@ pub enum ToHub {
         seq: u64,
         id: String,
         session: String,
-        request: PermissionRequest,
+        request: WirePermissionRequest,
     },
     Pong,
 }
@@ -145,7 +145,9 @@ pub fn decode<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, serde_json:
 mod tests {
     use super::*;
     use crate::v1::{WireReply, WireSpec};
-    use crossagents_core::{Agent, OutputStream, PermissionPolicy, StopReason, TurnOutcome};
+    use crossagents_core::{
+        Agent, OutputStream, PermissionPolicy, SessionEvent, StopReason, TurnOutcome,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -157,7 +159,7 @@ mod tests {
         let frame = ToHub::Event {
             seq: 7,
             session: "s1".into(),
-            event,
+            event: (&event).into(),
             commands: None,
         };
         let line = encode(&frame);
@@ -166,12 +168,37 @@ mod tests {
     }
 
     #[test]
+    fn steer_read_preserves_uuid_wire_format_and_event() {
+        let id = "018f0c12-3456-789a-abcd-0123456789ab";
+        let event = SessionEvent::from(crossagents_core::SessionEventKind::SteerRead {
+            message_id: id.parse().unwrap(),
+        });
+        let frame = ToHub::Event {
+            seq: 17,
+            session: "s1".into(),
+            event: (&event).into(),
+            commands: None,
+        };
+        let line = encode(&frame);
+        assert_eq!(
+            line,
+            format!(
+                "{{\"t\":\"event\",\"seq\":17,\"session\":\"s1\",\"event\":{{\"kind\":{{\"t\":\"steer_read\",\"message_id\":\"{id}\"}},\"raw\":null}}}}\n"
+            )
+        );
+        let ToHub::Event { event: decoded, .. } = decode(&line).unwrap() else {
+            panic!("expected event");
+        };
+        assert_eq!(Option::<SessionEvent>::from(decoded), Some(event));
+    }
+
+    #[test]
     fn ask_round_trips() {
         let frame = ToHub::Ask {
             seq: 9,
             id: "a1".into(),
             session: "s1".into(),
-            request: PermissionRequest {
+            request: WirePermissionRequest {
                 id: "r1".into(),
                 turn_id: Some("t1".into()),
                 kind: "command".into(),
@@ -228,7 +255,7 @@ mod tests {
     fn answers_round_trip() {
         let frame = ToNode::Answer {
             id: "a1".into(),
-            decision: PermissionDecision::AllowForSession,
+            decision: WirePermissionDecision::AllowForSession,
         };
         let line = encode(&frame);
         assert_eq!(decode::<ToNode>(&line).unwrap(), frame);
@@ -284,5 +311,21 @@ mod tests {
             }
         );
         assert_eq!(Op::Unknown.session(), None);
+    }
+
+    #[test]
+    fn event_decoding_tolerates_future_kinds_and_fields() {
+        let unknown: ToHub = decode(r#"{"t":"event","seq":41,"session":"s","event":{"kind":{"t":"future_kind","extra":1},"raw":null}}"#).unwrap();
+        assert_eq!(unknown.seq(), Some(41));
+        let ToHub::Event { event, .. } = unknown else {
+            panic!("expected event")
+        };
+        assert!(Option::<SessionEvent>::from(event).is_none());
+        let known: ToHub = decode(r#"{"t":"event","seq":42,"session":"s","event":{"kind":{"t":"output","stream":"text","text":"hi","extra":1},"raw":null}}"#).unwrap();
+        assert_eq!(known.seq(), Some(42));
+        let ToHub::Event { event, .. } = known else {
+            panic!("expected event")
+        };
+        assert!(Option::<SessionEvent>::from(event).is_some());
     }
 }

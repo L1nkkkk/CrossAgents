@@ -845,6 +845,7 @@ dependencies = [
  "crossagents-core",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
