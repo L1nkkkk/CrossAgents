@@ -1,0 +1,288 @@
+use super::{Op, WireResult};
+use crossagents_core::{AgentCommand, PermissionDecision, PermissionRequest, SessionEvent};
+use serde::{Deserialize, Serialize};
+
+/// Sent by the hub.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum ToNode {
+    /// A `Driver` / `DriverSession` call; the answer is a [`ToHub::Return`] with this `id`.
+    Call { id: String, op: Op },
+    /// Everything up to `seq` arrived; the node may forget it.
+    Ack { seq: u64 },
+    /// The hub's answer to one of the node's [`ToHub::Ask`]s.
+    Answer {
+        id: String,
+        decision: PermissionDecision,
+    },
+    /// Liveness; answered with [`ToHub::Pong`].
+    Ping,
+}
+
+/// Sent by the node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum ToHub {
+    /// First frame of every connection, before anything is replayed.
+    Register {
+        /// Which run of the node this is; a new one means `seq` starts over.
+        #[serde(default)]
+        epoch: String,
+        node_version: String,
+        os: String,
+        hostname: String,
+        plugins: Vec<PluginSnapshot>,
+    },
+    /// The result of a [`ToNode::Call`].
+    Return {
+        seq: u64,
+        id: String,
+        result: WireResult,
+        /// The session's commands, when they changed while the call ran (`prompt`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commands: Option<Vec<AgentCommand>>,
+    },
+    /// One `SessionEvent`, unchanged, for the session the node named `session`.
+    Event {
+        seq: u64,
+        session: String,
+        event: SessionEvent,
+        /// The session's commands, when they changed with this event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commands: Option<Vec<AgentCommand>>,
+    },
+    /// A permission request the node needs the hub to decide.
+    Ask {
+        seq: u64,
+        id: String,
+        session: String,
+        request: PermissionRequest,
+    },
+    Pong,
+}
+
+impl ToHub {
+    /// The sequence number, for the frames that are kept until acknowledged.
+    pub fn seq(&self) -> Option<u64> {
+        match self {
+            Self::Return { seq, .. } | Self::Event { seq, .. } | Self::Ask { seq, .. } => {
+                Some(*seq)
+            }
+            Self::Register { .. } | Self::Pong => None,
+        }
+    }
+
+    /// The session a reliable frame belongs to (the one a dropped-frame warning names).
+    pub fn session(&self) -> Option<&str> {
+        match self {
+            Self::Return { .. } => None,
+            Self::Event { session, .. } | Self::Ask { session, .. } => Some(session),
+            Self::Register { .. } | Self::Pong => None,
+        }
+    }
+}
+
+/// A node's report of one plugin, as [`ToHub::Register`] carries it. B1.4 fills it in; B1.1
+/// sends an empty list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSnapshot {
+    pub name: String,
+    pub installed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Who the node is, as [`ToHub::Register`] says it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterInfo {
+    /// This run of the node. A restart makes a new one, so the hub knows `seq` starts over.
+    pub epoch: String,
+    pub node_version: String,
+    pub os: String,
+    pub hostname: String,
+    pub plugins: Vec<PluginSnapshot>,
+}
+
+impl RegisterInfo {
+    /// This process's answer: this run's epoch, the crate version and the machine's name.
+    pub fn local() -> Self {
+        Self {
+            epoch: new_epoch(),
+            node_version: env!("CARGO_PKG_VERSION").to_owned(),
+            os: std::env::consts::OS.to_owned(),
+            hostname: std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "unknown".to_owned()),
+            plugins: Vec::new(),
+        }
+    }
+}
+
+/// A name for this run of the node: the process, the time it was built up, and a counter, so
+/// two nodes started in the same nanosecond still differ.
+fn new_epoch() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let nth = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!("{}-{nanos}-{nth}", std::process::id())
+}
+
+/// One frame as a line, newline included.
+pub fn encode<T: Serialize>(frame: &T) -> String {
+    let mut line = serde_json::to_string(frame).expect("frames serialize");
+    line.push('\n');
+    line
+}
+
+pub fn decode<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, serde_json::Error> {
+    serde_json::from_str(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::v1::{WireReply, WireSpec};
+    use crossagents_core::{Agent, OutputStream, PermissionPolicy, StopReason, TurnOutcome};
+    use std::path::PathBuf;
+
+    #[test]
+    fn events_round_trip() {
+        let event = SessionEvent::from(crossagents_core::SessionEventKind::Output {
+            stream: OutputStream::Text,
+            text: "hi".into(),
+        });
+        let frame = ToHub::Event {
+            seq: 7,
+            session: "s1".into(),
+            event,
+            commands: None,
+        };
+        let line = encode(&frame);
+        assert_eq!(decode::<ToHub>(&line).unwrap(), frame);
+        assert_eq!(frame.seq(), Some(7));
+    }
+
+    #[test]
+    fn ask_round_trips() {
+        let frame = ToHub::Ask {
+            seq: 9,
+            id: "a1".into(),
+            session: "s1".into(),
+            request: PermissionRequest {
+                id: "r1".into(),
+                turn_id: Some("t1".into()),
+                kind: "command".into(),
+                title: "rm -rf /tmp/x".into(),
+            },
+        };
+        let line = encode(&frame);
+        assert_eq!(decode::<ToHub>(&line).unwrap(), frame);
+    }
+
+    #[test]
+    fn calls_round_trip() {
+        let spec = WireSpec {
+            agent: agent(),
+            mcp_servers: vec![],
+            permission: PermissionPolicy::Deny,
+            command: Some(vec!["agent".into(), "acp".into()]),
+            instructions: Some("be kind".into()),
+            env: vec![("A".into(), "B".into())],
+            permissions: true,
+        };
+        let call = ToNode::Call {
+            id: "c1".into(),
+            op: Op::Open {
+                plugin: "mock".into(),
+                driver: Some("acp-generic".into()),
+                spec: Box::new(spec),
+            },
+        };
+        let line = encode(&call);
+        assert_eq!(decode::<ToNode>(&line).unwrap(), call);
+    }
+
+    #[test]
+    fn returns_round_trip() {
+        let frame = ToHub::Return {
+            seq: 12,
+            id: "c1".into(),
+            result: WireResult::Ok {
+                reply: WireReply::Turn {
+                    outcome: TurnOutcome {
+                        stop_reason: StopReason::EndTurn,
+                        turn_id: None,
+                    },
+                },
+            },
+            commands: None,
+        };
+        let line = encode(&frame);
+        assert_eq!(decode::<ToHub>(&line).unwrap(), frame);
+    }
+
+    #[test]
+    fn answers_round_trip() {
+        let frame = ToNode::Answer {
+            id: "a1".into(),
+            decision: PermissionDecision::AllowForSession,
+        };
+        let line = encode(&frame);
+        assert_eq!(decode::<ToNode>(&line).unwrap(), frame);
+    }
+
+    #[test]
+    fn register_carries_the_epoch() {
+        let frame = ToHub::Register {
+            epoch: "run-1".into(),
+            node_version: "0.2.20".into(),
+            os: "linux".into(),
+            hostname: "box".into(),
+            plugins: vec![PluginSnapshot {
+                name: "mock".into(),
+                installed: true,
+                version: Some("1.0.0".into()),
+            }],
+        };
+        let line = encode(&frame);
+        assert_eq!(decode::<ToHub>(&line).unwrap(), frame);
+    }
+
+    fn agent() -> Agent {
+        use crossagents_core::{AgentId, AgentStatus, NameSource, Role};
+        Agent {
+            id: AgentId::new(),
+            name: "mocky".into(),
+            name_source: NameSource::Chosen,
+            plugin: "mock".into(),
+            driver: None,
+            model: None,
+            node: None,
+            role: Role::Worker,
+            home: PathBuf::from("/tmp"),
+            cwd: PathBuf::from("/tmp"),
+            config: serde_json::Value::Null,
+            status: AgentStatus::Idle,
+            created_at: chrono::Utc::now(),
+            profile: Default::default(),
+            topic: None,
+            archived_at: None,
+        }
+    }
+    #[test]
+    fn unknown_operation_preserves_call_id() {
+        let frame: ToNode =
+            decode(r#"{"t":"call","id":"c1","op":{"op":"future","extra":42}}"#).unwrap();
+        assert_eq!(
+            frame,
+            ToNode::Call {
+                id: "c1".into(),
+                op: Op::Unknown
+            }
+        );
+        assert_eq!(Op::Unknown.session(), None);
+    }
+}

@@ -10,6 +10,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 crossagents-core = { path = "crates/core" }
+crossagents-node-proto = { path = "crates/node-proto" }
 crossagents-api-types = { path = "crates/api-types" }
 crossagents-store-sqlite = { path = "crates/store-sqlite" }
 crossagents-hub = { path = "crates/hub" }
