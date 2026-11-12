@@ -3,20 +3,21 @@
 //! not a failure to retry. Retrying only deepens the profile the vendor is already wary of,
 //! so the account pauses here and a person decides what happens next.
 //!
-//! The shape is [`crate::breaker`]'s — a window, a minimum sample, a threshold and a pause
-//! that only a person clears — but the metric is risk signals, not failures. The record is
-//! [`crossagents_core::Health`]: `ok` runs are calls that showed nothing, `!ok` runs are
-//! risk signals. This module is the policy over it; [`crate::breaker`] is left untouched.
+//! The shape is [`crate::breaker`]'s — a window, a threshold and a pause that only a person
+//! clears — but the metric is the count of risk signals in the window, not a failure rate:
+//! counting risk signals against all calls would let a noisy account hide the one signal
+//! that matters, so two signals in the window pause it whatever the call volume. The record
+//! is [`crossagents_core::Health`]: a run recorded with `ok: false` is one risk signal.
+//! This module is the policy over it; [`crate::breaker`] is left untouched.
 
 use chrono::{Duration, Utc};
 use crossagents_core::{Health, RunRecord};
 
 /// The window the risk breaker looks at.
 pub const WINDOW_DAYS: i64 = 7;
-/// Under this many risk signals in the window, there is not enough to act on yet.
+/// This many risk signals in the window pause the account. Deliberately a raw count, not a
+/// share: one identity check is already one too many, and a busy account must not dilute it.
 pub const MIN_SIGNALS: usize = 2;
-/// At or above this share of calls in the window being risk signals, the account pauses.
-pub const SIGNAL_PERCENT: u64 = 50;
 
 /// The three things an account is not retried after.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +69,8 @@ impl Signal {
     }
 }
 
-/// A vendor refusal that names an identity check or a human check, if it does.
+/// A vendor refusal that names an identity check or a human check, if it does. A quota
+/// refusal ("rate limit", "overloaded") names none and is therefore not a risk signal.
 pub fn classify_refusal(text: &str) -> Option<Signal> {
     Signal::in_refusal(text)
 }
@@ -83,68 +85,42 @@ pub fn classify_login(was_logged_in: bool, logged_in: bool) -> Option<Signal> {
     Signal::from_login(was_logged_in, logged_in)
 }
 
-/// Calls still inside the window, and how many of them showed a risk signal.
-pub fn counts(health: &Health, now: chrono::DateTime<Utc>) -> (usize, usize) {
+/// Risk signals still inside the window.
+pub fn signals(health: &Health, now: chrono::DateTime<Utc>) -> usize {
     let since = now - Duration::days(WINDOW_DAYS);
-    let mut total = 0;
-    let mut signals = 0;
-    for run in health.runs.iter().filter(|run| run.at >= since) {
-        total += 1;
-        if !run.ok {
-            signals += 1;
-        }
-    }
-    (total, signals)
+    health
+        .runs
+        .iter()
+        .filter(|run| run.at >= since && !run.ok)
+        .count()
 }
 
-/// Counts one observed vendor answer (`None` when it showed nothing) and returns why the
-/// breaker tripped when it did. Tripping pauses the account; a paused account records
-/// nothing more and is never retried by this module — only a person re-arms it.
-pub fn record(
-    health: &mut Health,
-    now: chrono::DateTime<Utc>,
-    signal: Option<Signal>,
-) -> Option<String> {
+/// Records one risk signal and returns why the breaker tripped when it did. Tripping pauses
+/// the account; a paused account records nothing more and is never retried by this module —
+/// only a person re-arms it.
+pub fn record(health: &mut Health, now: chrono::DateTime<Utc>, signal: Signal) -> Option<String> {
     if health.is_paused() {
         return None;
     }
     let since = now - Duration::days(WINDOW_DAYS);
     health.runs.retain(|run| run.at >= since);
-    health.runs.push(RunRecord {
-        at: now,
-        ok: signal.is_none(),
-    });
-    let (total, signals) = counts(health, now);
-    if signals < MIN_SIGNALS || (signals as u64) * 100 < (total as u64) * SIGNAL_PERCENT {
+    health.runs.push(RunRecord { at: now, ok: false });
+    let count = signals(health, now);
+    if count < MIN_SIGNALS {
         return None;
     }
-    let latest = signal.map_or("an unflagged call", Signal::as_str);
     let reason = format!(
-        "{signals} risk signals in {total} calls over the last {WINDOW_DAYS} days \
-         (latest: {latest}); the account is paused until a person re-arms it"
+        "{count} risk signals within {WINDOW_DAYS} days (latest: {}); \
+         the account is paused until a person re-arms it",
+        signal.as_str()
     );
     health.pause(now, reason.clone());
     Some(reason)
 }
 
-/// [`record`] for a call that showed `signal`.
-pub fn record_signal(
-    health: &mut Health,
-    now: chrono::DateTime<Utc>,
-    signal: Signal,
-) -> Option<String> {
-    record(health, now, Some(signal))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ok_calls(health: &mut Health, now: chrono::DateTime<Utc>, count: usize) {
-        for _ in 0..count {
-            record(health, now, None);
-        }
-    }
 
     #[test]
     fn a_vendor_refusal_naming_an_identity_check_is_a_signal() {
@@ -164,6 +140,7 @@ mod tests {
         }
         assert_eq!(classify_refusal("rate limit exceeded"), None);
         assert_eq!(classify_refusal("model overloaded"), None);
+        assert_eq!(classify_refusal("quota exceeded, try again later"), None);
     }
 
     #[test]
@@ -184,36 +161,36 @@ mod tests {
     }
 
     #[test]
-    fn enough_signals_pause_the_account() {
+    fn two_signals_pause_the_account() {
         let now = Utc::now();
         let mut health = Health::default();
-        // One signal is not a sample yet, however bad it looks.
-        record_signal(&mut health, now, Signal::Auth);
+        // One signal is not enough yet, however bad it looks.
+        record(&mut health, now, Signal::Auth);
         assert!(!health.is_paused());
-        assert_eq!(counts(&health, now), (1, 1));
-        // The second trips it, and the reason names the signals and the latest one.
-        let reason = record_signal(&mut health, now, Signal::Logout).expect("the breaker trips");
+        assert_eq!(signals(&health, now), 1);
+        // The second trips it, and the reason names the count and the latest one.
+        let reason = record(&mut health, now, Signal::Logout).expect("the breaker trips");
         assert!(health.is_paused(), "{health:?}");
         assert!(reason.contains("2 risk signals"), "{reason}");
         assert!(reason.contains("login dropped"), "{reason}");
         assert_eq!(health.pause_reason.as_deref(), Some(reason.as_str()));
     }
 
+    /// The count is what trips it: a busy account cannot dilute two signals by making many
+    /// more calls, which is the whole reason this is not a failure rate.
     #[test]
-    fn the_share_of_signals_matters_not_only_their_count() {
+    fn the_signal_count_matters_not_a_rate() {
         let now = Utc::now();
-        // Two signals among many quiet calls is below half: nothing to conclude.
-        let mut below = Health::default();
-        ok_calls(&mut below, now, 10);
-        record_signal(&mut below, now, Signal::Auth);
-        record_signal(&mut below, now, Signal::Auth);
-        assert!(!below.is_paused(), "{:?}", counts(&below, now));
-        // Half of the calls are signals: at the line.
-        let mut exact = Health::default();
-        ok_calls(&mut exact, now, 2);
-        record_signal(&mut exact, now, Signal::IdentityCheck);
-        record_signal(&mut exact, now, Signal::IdentityCheck);
-        assert!(exact.is_paused(), "{:?}", counts(&exact, now));
+        let mut health = Health::default();
+        record(&mut health, now, Signal::Auth);
+        record(&mut health, now, Signal::IdentityCheck);
+        assert!(health.is_paused(), "{:?}", signals(&health, now));
+        // Quiet calls would have been recorded elsewhere; they are not signals.
+        let mut quiet = Health::default();
+        quiet.runs.push(RunRecord { at: now, ok: true });
+        quiet.runs.push(RunRecord { at: now, ok: true });
+        assert_eq!(signals(&quiet, now), 0);
+        assert!(!quiet.is_paused());
     }
 
     #[test]
@@ -221,32 +198,31 @@ mod tests {
         let now = Utc::now();
         let mut health = Health::default();
         let old = now - Duration::days(WINDOW_DAYS + 1);
-        // One stale signal is outside today's window and below the sample floor anyway.
-        record_signal(&mut health, old, Signal::Auth);
-        assert_eq!(counts(&health, now), (0, 0));
+        // One stale signal is outside today's window and below the floor anyway.
+        record(&mut health, old, Signal::Auth);
+        assert_eq!(signals(&health, now), 0);
         assert!(!health.is_paused());
-        // Recording a new observation prunes it, so the record cannot grow without bound.
-        record(&mut health, now, None);
+        // Recording a new signal prunes it, so the record cannot grow without bound.
+        record(&mut health, now, Signal::Auth);
         assert_eq!(health.runs.len(), 1);
     }
 
-    /// After a hit there is no retry: the record is closed, later calls change nothing and
+    /// After a hit there is no retry: the record is closed, later signals change nothing and
     /// the reason stays the first one until a person re-arms the account.
     #[test]
     fn a_paused_account_records_nothing_and_is_never_retried() {
         let now = Utc::now();
         let mut health = Health::default();
-        record_signal(&mut health, now, Signal::Auth);
-        let reason = record_signal(&mut health, now, Signal::IdentityCheck).expect("trips");
+        record(&mut health, now, Signal::Auth);
+        let reason = record(&mut health, now, Signal::IdentityCheck).expect("trips");
         let runs = health.runs.len();
         let paused_at = health.paused_at;
         assert!(health.is_paused());
 
-        // Every later vendor answer — signal or not — is ignored, not counted as a retry.
-        assert_eq!(record(&mut health, now, None), None);
-        assert_eq!(record_signal(&mut health, now, Signal::Logout), None);
+        // Every later vendor answer is ignored, not counted as a retry.
+        assert_eq!(record(&mut health, now, Signal::Logout), None);
         assert_eq!(health.runs.len(), runs);
-        assert_eq!(counts(&health, now), (runs, runs));
+        assert_eq!(signals(&health, now), runs);
         assert_eq!(health.paused_at, paused_at);
         assert_eq!(health.pause_reason.as_deref(), Some(reason.as_str()));
     }
