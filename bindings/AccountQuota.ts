@@ -12,4 +12,15 @@ export type AccountQuota = { account: Account, status: AccountStatus, models: Ar
  * Agents that run on this account (named in their config, or using the provider's
  * own login).
  */
-agents: Array<string>, egress?: EgressFingerprint, };
+agents: Array<string>, egress?: EgressFingerprint, 
+/**
+ * Why the risk breaker paused this account, when it did; the person reads it in the
+ * GUI and only a person re-arms the account (docs/ACCOUNT-RISK.md「风控熔断」).
+ */
+at_risk?: string, 
+/**
+ * Why a session on this account is held until a person confirms the exit country
+ * change, when one is pending (docs/ACCOUNT-RISK.md「出口指纹」). Written by the hub,
+ * not read off the notice text.
+ */
+egress_block?: string, };

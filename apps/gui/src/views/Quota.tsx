@@ -15,7 +15,7 @@ import { api, errorText } from "../api";
 import { DayColumns, RankBars, compact, dailySeries } from "../charts";
 import { ErrorBox, Field, Icon, VendorMark, ago, vendorName } from "../components";
 import { useHubData } from "../hub";
-import { creditText, level, planLabel, resetText, windowLabel, type Level } from "../lib/quota";
+import { creditText, egressOf, level, planLabel, resetText, windowLabel, type Level } from "../lib/quota";
 import { prettyModel } from "../lib/models";
 import { cursorMode } from "../lib/reasoning";
 import { useArmed } from "../parts";
@@ -107,6 +107,10 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
   const models = cursor ? byBase(quota.models) : quota.models;
   const levels = windows.map((w) => level(w.used_percent, status.limit_reached && w.used_percent >= 100));
   const worst: Level | undefined = levels.includes("danger") ? "danger" : levels.includes("warn") ? "warn" : levels.length ? "ok" : undefined;
+  // The hub's own words for the two states that stop a session; the GUI does not paraphrase them.
+  const atRisk = quota.at_risk;
+  const blocked = quota.egress_block;
+  const egress = egressOf(quota.egress);
 
   // The login notice goes once the account turns logged in.
   const wasLoggedIn = useRef(status.logged_in);
@@ -163,7 +167,13 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
           )}
         </span>
         <div className="account-actions">
-          <button className="ghost small" onClick={startLogin}>
+          <button
+            className="ghost small"
+            onClick={startLogin}
+            disabled={!!atRisk}
+            aria-disabled={atRisk ? true : undefined}
+            title={atRisk ? "账号已因风控信号暂停：现在重新登录等于再试一次，只会让厂家更怀疑。先处理验证，再由人解除暂停" : status.logged_in ? "重新登录" : "登录"}
+          >
             {status.logged_in ? "重新登录" : "登录"}
           </button>
           <button
@@ -180,6 +190,49 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
           </button>
         </div>
       </div>
+
+      {/* Always shown, even when there is nothing to report: an absent exit line would read
+          as "nothing to see" rather than "never confirmed" (docs/ACCOUNT-RISK.md「出口指纹」). */}
+      <div className={`account-egress ${egress.route}`}>
+        <span className="account-egress-label">出口</span>
+        {egress.known ? (
+          <>
+            <code className="egress-value" title="出口 IP">{egress.ip}</code>
+            <span className="egress-value" title="国家">{egress.country}</span>
+            <span className="egress-value muted" title="ASN">{egress.asn}</span>
+            <span className={`egress-route ${egress.route}`} title={egress.route === "unknown" ? "代理出口无法确认：allow_direct 可能回退直连，NO_PROXY 也可能绕过代理" : undefined}>
+              {egress.routeLabel}
+            </span>
+            <span className="muted">{egress.changed ? `上次变化 ${egress.changed}` : "上次变化时间未知"}</span>
+          </>
+        ) : (
+          <span className="muted">还没有记录到出口；下一次经代理启动会话时会采一次。</span>
+        )}
+      </div>
+
+      {/* The two states that stop work, as blocks rather than a grey line: the reason and
+          what the person has to do are both here (the repo's rule for disabled entries). */}
+      {atRisk && (
+        <div className="account-alert danger">
+          <span className="account-alert-title">
+            <span aria-hidden="true">✕</span> 风控暂停
+          </span>
+          <span className="account-alert-text">{atRisk}</span>
+          <span className="account-alert-hint">
+            CrossAgents 不会自动重试这个账号——重试只会让厂家更怀疑。要恢复：先在厂家那边完成身份验证或人机校验，再由人手动解除暂停；界面目前还没有解除按钮。
+            {quota.agents.length > 0 && ` 绑在它上面的 ${quota.agents.map((n) => `@${n}`).join(" ")} 已经停下。`}
+          </span>
+        </div>
+      )}
+      {blocked && (
+        <div className="account-alert warn">
+          <span className="account-alert-title">
+            <span aria-hidden="true">!</span> 出口变了 · 等你确认
+          </span>
+          <span className="account-alert-text">{blocked}</span>
+          <span className="account-alert-hint">确认前不会用这个出口启动会话。在通知里选「允许」，再重新启动就能解开。</span>
+        </div>
+      )}
 
       {login && (
         <div className="notice">
