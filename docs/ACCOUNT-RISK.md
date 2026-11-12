@@ -68,7 +68,38 @@ ASN 缺失时国家也按 unknown 处理，避免不完整的采集结果阻断�
 
 ## 风控熔断
 
-（待填）
+账号级熔断：一旦 vendor 开始怀疑这个登录，继续跑只会让画像更难看。命中后立刻停手，
+**不是**重试——这条是故意的，代码里没有任何自动重试、退避重连或换账号再试的路径。
+
+### 命中哪些信号
+
+- vendor 返回的拒绝里带 KYC、identity verification / identity check、captcha、
+  human verification / human check / verify you are human 字样；
+- 异常的 401 / 403：登录不再被接受，不是额度问题；
+- 登录态从 `logged_in: true` 突然变成 `false`。
+
+### 阈值
+
+在一个窗口内（`WINDOW_DAYS = 7` 天），风险信号至少 `MIN_SIGNALS = 2` 个，且占该账号
+窗口内被观察到的调用至少 `SIGNAL_PERCENT = 50%` 就命中。观察按账号记录在
+`crossagents_core::Health` 里：`ok` 的一次是没有信号的调用，`!ok` 的一次是一个风险信号。
+
+### 命中之后
+
+- 该账号上绑定的所有 agent 立即置为 `Stopped`；
+- 账号被 pause，`risk_reason` 保留原因给人读（GUI 由 T5 显示）；
+- `fit` / `weigh` 对该账号返回 at-risk，路由把它**排除**在挑选之外——不是降权，也不是
+  排到最后当备选；
+- 不重试：账号 pause 后 `risk::record` 不再计数，路由也不会再探测它。
+
+### 谁能重新 arm
+
+只有人。`Accounts::clear_risk(id)` 是唯一的清除入口；没有冷却时间，也没有任何自动恢复。
+
+### 配置项
+
+本节没有新增配置项；窗口、最小信号数和占比是代码里的常量
+（`WINDOW_DAYS` / `MIN_SIGNALS` / `SIGNAL_PERCENT`，见 `crates/orchestrator/src/risk.rs`）。
 
 ## 并发与作息
 
