@@ -229,7 +229,7 @@ impl Outgoing {
             } => ToHub::Event {
                 seq,
                 session,
-                event,
+                event: (&event).into(),
                 commands,
             },
             Self::Return {
@@ -251,7 +251,7 @@ impl Outgoing {
                 seq,
                 id,
                 session,
-                request,
+                request: (&request).into(),
             },
         }
     }
@@ -303,7 +303,7 @@ fn emit(
             let warning = ToHub::Event {
                 seq: next_seq,
                 session,
-                event: SessionEvent::from(SessionEventKind::Warning { message }),
+                event: (&SessionEvent::from(SessionEventKind::Warning { message })).into(),
                 commands: None,
             };
             next_seq += 1;
@@ -347,7 +347,7 @@ fn on_line(
                 .expect("answers lock poisoned")
                 .remove(&id)
             {
-                let _ = waiter.send(decision);
+                let _ = waiter.send(decision.into());
             }
         }
         ToNode::Ping => write(writer, encode(&ToHub::Pong)),
