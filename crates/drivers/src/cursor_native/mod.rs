@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 
 use crate::launch::{LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
+use crate::process::without_internal_env;
 use wire::{ChatArgs, Line, Turn};
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -119,7 +120,7 @@ impl Driver for CursorNativeDriver {
         create
             .args(&args)
             .current_dir(&spec.agent.cwd)
-            .envs(spec.env.iter().cloned())
+            .envs(without_internal_env(&spec.env))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

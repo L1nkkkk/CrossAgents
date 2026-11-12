@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, McpServerSpec,
-    MessageId, MessageSource, Role, RunId,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, EGRESS_ENV, Envelope, EventBus, EventKind,
+    McpServerSpec, MessageId, MessageSource, Role, RunId,
 };
 use crossagents_orchestrator::workspace::worktree_env;
 use crossagents_orchestrator::{AgentHost, RouteDecision, RouteMode};
@@ -116,6 +116,10 @@ impl CollabSetup {
 
 /// `account` plus each of `project` it does not set itself (names compared as the platform
 /// does).
+///
+/// `CROSSAGENTS_EGRESS_POLICY` is hub-owned: a project must not be able to push an unbound
+/// session onto a bare-IP direct connection, so a project entry for it is dropped rather
+/// than merged (docs/ACCOUNT-RISK.md).
 fn with_project_env(
     mut account: Vec<(String, String)>,
     project: Vec<(String, String)>,
@@ -128,7 +132,9 @@ fn with_project_env(
         }
     };
     for (name, value) in project {
-        if account.iter().any(|(n, _)| same(n, &name)) {
+        if same(&name, EGRESS_ENV) {
+            tracing::warn!(%name, "the hub sets it; the project's value is not used");
+        } else if account.iter().any(|(n, _)| same(n, &name)) {
             tracing::warn!(%name, "the account sets it; the project's value is not used");
         } else {
             account.push((name, value));
@@ -689,5 +695,24 @@ mod tests {
                 pair("CARGO_TARGET_DIR", "/b")
             ]
         );
+    }
+
+    #[test]
+    fn a_project_cannot_set_the_hubs_egress_policy() {
+        let pair = |n: &str, v: &str| (n.to_owned(), v.to_owned());
+        let env = with_project_env(
+            Vec::new(),
+            vec![
+                pair(EGRESS_ENV, "allow_direct"),
+                pair("CARGO_TARGET_DIR", "/b"),
+            ],
+        );
+        assert_eq!(env, [pair("CARGO_TARGET_DIR", "/b")]);
+        // Case does not let it in either, on any platform.
+        let env = with_project_env(
+            Vec::new(),
+            vec![pair("crossagents_egress_policy", "allow_direct")],
+        );
+        assert!(env.is_empty(), "{env:?}");
     }
 }

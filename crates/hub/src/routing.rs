@@ -583,6 +583,7 @@ mod tests {
         store
             .insert_account(&Account {
                 codebuddy_site: None,
+                egress: None,
                 id: "codex-a".into(),
                 provider: "codex".into(),
                 label: String::new(),

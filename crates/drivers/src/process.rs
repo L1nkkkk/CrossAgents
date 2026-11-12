@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossagents_core::CoreError;
+use crossagents_core::EgressPolicy;
 use crossagents_core::process::NoWindow;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -174,7 +175,7 @@ pub fn system_proxy_env() -> Vec<(String, String)> {
         // server is `crossagents mcp` talking to the hub on 127.0.0.1.
         return no_proxy_env();
     }
-    let Some(proxy) = SYSTEM_PROXY.get_or_init(windows_proxy) else {
+    let Some(proxy) = system_proxy() else {
         return Vec::new();
     };
     let mut env = vec![
@@ -257,13 +258,25 @@ const CONNECT_ANSWER_LIMIT: usize = 8 * 1024;
 /// `env` is what the caller adds to the CLI's environment after [`system_proxy_env`]: if it
 /// names a proxy, that is the one the CLI ends up using.
 ///
-/// When the proxy's route to `reach` is dead but the host answers directly (seen: a proxy
-/// rule sending a vendor that needs no proxy through a node that cannot reach it), the CLI
-/// is not failed: the returned variables exempt that host from the proxy, and the caller
-/// adds them to the CLI's environment last. Empty when the proxy carries the traffic.
+/// `policy` decides what happens when the proxy is up but its route to `reach` is dead
+/// (docs/ACCOUNT-RISK.md):
+///
+/// * [`EgressPolicy::ProxyOnly`] fails with an error that names the host and the policy to
+///   change. No direct connection is attempted, so the vendor never sees this machine's
+///   own address instead of the proxy node, and nothing is added to [`DIRECT_HOSTS`] — the
+///   fast path that would send a later launch straight out does not apply either. The
+///   account's login is what the proxy is there to protect; a session that cannot use the
+///   proxy is a session that does not run.
+/// * [`EgressPolicy::AllowDirect`] keeps the old behaviour byte for byte: a host that
+///   answers directly is exempted from the proxy for this launch, the returned variables
+///   go into the CLI's environment last, and that host is remembered in [`DIRECT_HOSTS`]
+///   for [`DIRECT_TTL`] so later launches skip the wait. This is the right choice for a
+///   vendor or gateway that is reachable without the proxy anyway, where a direct
+///   connection exposes nothing extra.
 pub async fn check_proxy(
     env: &[(String, String)],
     reach: Option<&str>,
+    policy: EgressPolicy,
 ) -> Result<Vec<(String, String)>, CoreError> {
     let Some(proxy) = effective_proxy(env) else {
         return Ok(Vec::new());
@@ -273,12 +286,20 @@ pub async fn check_proxy(
     let Some(host) = reach.filter(|_| proxy.scheme == "http") else {
         return Ok(Vec::new());
     };
-    if goes_direct(host) {
+    if policy == EgressPolicy::AllowDirect && goes_direct(host) {
         return Ok(bypass_env(env, host));
     }
     let Err(err) = reach_through(&proxy, host).await else {
         return Ok(Vec::new());
     };
+    if policy == EgressPolicy::ProxyOnly {
+        return Err(CoreError::Agent(format!(
+            "to protect this account, refusing to reach {host} over a bare-IP direct \
+             connection: the proxy {} is up but cannot carry the traffic ({err}) — fix the \
+             proxy node, or set the account's egress policy to allow_direct",
+            proxy.url
+        )));
+    }
     if reach_directly(host).await {
         DIRECT_HOSTS
             .lock()
@@ -287,6 +308,17 @@ pub async fn check_proxy(
         return Ok(bypass_env(env, host));
     }
     Err(err)
+}
+
+/// `env` without the hub-internal [`crossagents_core::EGRESS_ENV`] entries.
+///
+/// The hub passes an account's egress policy to drivers in that variable; it is not meant
+/// for the vendor CLI, so every path that hands `env` to a process strips it here.
+pub fn without_internal_env(env: &[(String, String)]) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case(crossagents_core::EGRESS_ENV))
+        .cloned()
+        .collect()
 }
 
 /// Hosts the proxy could not reach but a direct connection could, with when that was
@@ -362,7 +394,7 @@ fn effective_proxy(overrides: &[(String, String)]) -> Option<ProxyUrl> {
     {
         return ProxyUrl::parse(&raw);
     }
-    ProxyUrl::parse(SYSTEM_PROXY.get_or_init(windows_proxy).as_deref()?)
+    ProxyUrl::parse(system_proxy().as_deref()?)
 }
 
 async fn probe(proxy: &ProxyUrl) -> Result<(), CoreError> {
@@ -556,9 +588,35 @@ impl ProxyUrl {
     }
 }
 
-/// The Windows system proxy, read once per hub: restarting it picks up a change, as it does
-/// for the CLIs the hub starts.
-static SYSTEM_PROXY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+/// How long the Windows system proxy is trusted before the registry is read again: someone
+/// switching nodes while the hub runs is picked up without restarting it.
+const SYSTEM_PROXY_TTL: Duration = Duration::from_secs(45);
+
+/// The Windows system proxy, cached for [`SYSTEM_PROXY_TTL`] with when it was read.
+static SYSTEM_PROXY: std::sync::LazyLock<
+    std::sync::Mutex<Option<(std::time::Instant, Option<String>)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// `ProxyServer` from the user's Internet Settings when `ProxyEnable` is on, as a URL, read
+/// at most every [`SYSTEM_PROXY_TTL`].
+fn system_proxy() -> Option<String> {
+    let now = std::time::Instant::now();
+    {
+        let cached = SYSTEM_PROXY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((read_at, value)) = cached.as_ref()
+            && now.duration_since(*read_at) < SYSTEM_PROXY_TTL
+        {
+            return value.clone();
+        }
+    }
+    let value = windows_proxy();
+    *SYSTEM_PROXY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((now, value.clone()));
+    value
+}
 
 /// `ProxyServer` from the user's Internet Settings when `ProxyEnable` is on, as a URL.
 fn windows_proxy() -> Option<String> {
@@ -695,38 +753,45 @@ mod tests {
     /// A listener standing in for a proxy: `answer` goes back once the `CONNECT` line has
     /// been read, then `payload` once the client's hello arrives. Without a payload the
     /// connection is dropped where a proxy with a dead route would leave it.
+    ///
+    /// It serves one connection after another: [`check_proxy`] first opens a port probe and
+    /// only then the `CONNECT` the payload answers, so a single-accept stand-in would drop
+    /// the second one.
     async fn fake_proxy(answer: &'static str, payload: Option<&'static [u8]>) -> ProxyUrl {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bound");
         let port = listener.local_addr().expect("address").port();
         tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accepted");
-            let mut seen = Vec::new();
-            let mut byte = [0u8; 1];
-            while !seen.ends_with(b"\r\n\r\n") {
-                if socket.read(&mut byte).await.unwrap_or(0) == 0 {
-                    return;
-                }
-                seen.push(byte[0]);
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !seen.ends_with(b"\r\n\r\n") {
+                        if socket.read(&mut byte).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        seen.push(byte[0]);
+                    }
+                    socket.write_all(answer.as_bytes()).await.expect("answered");
+                    let Some(payload) = payload else {
+                        return;
+                    };
+                    // Drain the whole hello first: closing with bytes still unread resets the
+                    // connection on Windows, and the payload would be lost with it.
+                    let mut hello = Vec::new();
+                    let mut buffer = [0u8; 256];
+                    while hello.len() < 5 || hello.len() < 5 + hello_record_len(&hello) {
+                        let read = socket.read(&mut buffer).await.unwrap_or(0);
+                        if read == 0 {
+                            return;
+                        }
+                        hello.extend_from_slice(&buffer[..read]);
+                    }
+                    socket.write_all(payload).await.expect("payload");
+                    let _ = socket.shutdown().await;
+                });
             }
-            socket.write_all(answer.as_bytes()).await.expect("answered");
-            let Some(payload) = payload else {
-                return;
-            };
-            // Drain the whole hello first: closing with bytes still unread resets the
-            // connection on Windows, and the payload would be lost with it.
-            let mut hello = Vec::new();
-            let mut buffer = [0u8; 256];
-            while hello.len() < 5 || hello.len() < 5 + hello_record_len(&hello) {
-                let read = socket.read(&mut buffer).await.unwrap_or(0);
-                if read == 0 {
-                    return;
-                }
-                hello.extend_from_slice(&buffer[..read]);
-            }
-            socket.write_all(payload).await.expect("payload");
-            let _ = socket.shutdown().await;
         });
         ProxyUrl::parse(&format!("http://127.0.0.1:{port}")).expect("parsed")
     }
@@ -759,6 +824,49 @@ mod tests {
         assert!(err.to_string().contains("403"), "{err}");
     }
 
+    #[tokio::test]
+    async fn a_proxy_only_account_refuses_the_direct_fallback() {
+        let proxy = fake_proxy("HTTP/1.1 403 Forbidden\r\n\r\n", None).await;
+        let env = [("HTTPS_PROXY".to_owned(), proxy.url.clone())];
+        let host = "proxy-only.example.test";
+        let err = check_proxy(&env, Some(host), EgressPolicy::ProxyOnly)
+            .await
+            .expect_err("proxy_only never falls back");
+        let message = err.to_string();
+        assert!(message.contains(host), "{message}");
+        assert!(message.contains("allow_direct"), "{message}");
+        assert!(message.contains("protect this account"), "{message}");
+        // Nothing was remembered that would send a later launch straight out.
+        assert!(!goes_direct(host), "DIRECT_HOSTS must stay untouched");
+    }
+
+    #[tokio::test]
+    async fn a_remembered_direct_host_is_skipped_only_when_allowed() {
+        let host = "fast-path.example.test";
+        DIRECT_HOSTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(host.to_owned(), std::time::Instant::now());
+        let carried = "HTTP/1.1 200 Connection established\r\n\r\n";
+        let allowed = fake_proxy(carried, Some(&[0x16])).await;
+        let env = [("HTTPS_PROXY".to_owned(), allowed.url.clone())];
+        let extra = check_proxy(&env, Some(host), EgressPolicy::AllowDirect)
+            .await
+            .expect("the fast path bypasses the proxy");
+        assert!(
+            extra.iter().any(|(_, value)| value.contains(host)),
+            "{extra:?}"
+        );
+        // proxy_only does not take the fast path: the proxy carries the traffic, so the
+        // session runs through it and no direct exemption is handed out.
+        let only = fake_proxy(carried, Some(&[0x16])).await;
+        let env = [("HTTPS_PROXY".to_owned(), only.url.clone())];
+        let extra = check_proxy(&env, Some(host), EgressPolicy::ProxyOnly)
+            .await
+            .expect("the proxy carries it");
+        assert!(extra.is_empty(), "{extra:?}");
+    }
+
     #[test]
     fn a_host_reached_directly_is_added_to_no_proxy() {
         let env = [("NO_PROXY".to_owned(), "localhost,127.0.0.1".to_owned())];
@@ -782,7 +890,7 @@ mod tests {
     #[ignore]
     async fn a_dead_proxy_route_falls_back_to_direct() {
         let env = [("HTTPS_PROXY".to_owned(), "http://127.0.0.1:7890".to_owned())];
-        let extra = check_proxy(&env, Some("www.codebuddy.ai"))
+        let extra = check_proxy(&env, Some("www.codebuddy.ai"), EgressPolicy::AllowDirect)
             .await
             .expect("falls back to direct");
         assert!(

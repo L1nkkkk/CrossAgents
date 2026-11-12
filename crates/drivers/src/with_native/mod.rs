@@ -48,7 +48,7 @@ use tokio::sync::mpsc;
 
 use crate::launch::{LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
-use crate::process::{hide_console, resolve_program};
+use crate::process::{hide_console, resolve_program, without_internal_env};
 use wire::{ChatArgs, Line, ModelEntry, Turn};
 
 /// How long `with-cli model list` gets.
@@ -537,7 +537,7 @@ impl WithSession {
                 .arg("cancel")
                 .arg(format!("--session-id={}", self.id))
                 .arg(format!("--request-id={request_id}"))
-                .envs(self.env.iter().cloned())
+                .envs(without_internal_env(&self.env))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

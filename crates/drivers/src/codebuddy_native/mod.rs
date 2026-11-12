@@ -20,7 +20,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, SessionSpec,
+    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, EgressPolicy,
+    SessionSpec,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -29,7 +30,7 @@ use tokio::process::Command;
 use crate::claude_native::ClaudeNativeDriver;
 use crate::claude_native::wire::{self, Flavor};
 use crate::locate::Cli;
-use crate::process::{check_proxy, hide_console, system_proxy_env};
+use crate::process::{check_proxy, hide_console, system_proxy_env, without_internal_env};
 
 /// How long [`probe`] waits for the CLI to answer `initialize`.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -304,9 +305,13 @@ pub async fn probe(command: &[String], env: &[(String, String)]) -> Result<Value
         .ok_or_else(|| CoreError::Agent("empty codebuddy launch command".into()))?;
     // The CLI cannot answer `initialize` without reaching its API through the proxy.
     let api_host = Flavor::Codebuddy.api_host(env);
-    let direct = check_proxy(env, Some(&api_host)).await?;
+    // The hub passes the account's policy in `env`; a CodeBuddy login is domestic and keeps
+    // the direct fallback unless the account says otherwise (docs/ACCOUNT-RISK.md).
+    let egress = EgressPolicy::from_env(env)
+        .unwrap_or_else(|| EgressPolicy::default_for_provider(Flavor::Codebuddy.program()));
+    let direct = check_proxy(env, Some(&api_host), egress).await?;
     let mut process_env = system_proxy_env();
-    process_env.extend(env.iter().cloned());
+    process_env.extend(without_internal_env(env));
     process_env.extend(direct);
     let mut child = Command::new(program);
     for key in prepare_env(&mut process_env) {

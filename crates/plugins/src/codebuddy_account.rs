@@ -612,6 +612,7 @@ mod tests {
             label: String::new(),
             home: PathBuf::from(format!("/accounts/{}", site.environment())),
             codebuddy_site: Some(site),
+            egress: None,
             created_at: Utc::now(),
         });
         for account in &accounts {
@@ -826,6 +827,7 @@ mod tests {
         let accounts = CodebuddyAccounts::new(None);
         let account = |home: PathBuf| Account {
             codebuddy_site: None,
+            egress: None,
             id: "codebuddy".into(),
             provider: "codebuddy".into(),
             label: String::new(),

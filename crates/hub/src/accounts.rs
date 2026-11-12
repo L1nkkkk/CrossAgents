@@ -15,7 +15,8 @@ use crossagents_api_types::{
 };
 use crossagents_core::{
     Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, CoreError, DataSource,
-    Event, EventBus, EventKind, RateLimits, Role, RunId, Store, TokenTotals, validate_slug,
+    EGRESS_ENV, EgressPolicy, Event, EventBus, EventKind, RateLimits, Role, RunId, Store,
+    TokenTotals, validate_slug,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
@@ -34,6 +35,15 @@ const STATUS_TTL: Duration = Duration::from_secs(60);
 
 /// The last status read per account, with when.
 type Statuses = Arc<std::sync::Mutex<HashMap<String, (Instant, AccountStatus)>>>;
+
+/// `[accounts]` egress overrides from `config.toml`, resolved against each account's own
+/// choice and its provider default (docs/ACCOUNT-RISK.md).
+#[derive(Clone, Default)]
+struct EgressSettings {
+    default: Option<EgressPolicy>,
+    by_provider: BTreeMap<String, EgressPolicy>,
+    by_account: BTreeMap<String, EgressPolicy>,
+}
 
 #[derive(Clone)]
 struct Observation {
@@ -77,6 +87,8 @@ pub struct Accounts {
     default_models: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Serialize directory claims so concurrent site accounts cannot share a profile.
     creating: Mutex<()>,
+    /// `[accounts]` egress overrides; empty unless the hub is given them.
+    egress: std::sync::RwLock<EgressSettings>,
 }
 
 impl Accounts {
@@ -99,7 +111,42 @@ impl Accounts {
             refresh_attempts: std::sync::Mutex::default(),
             default_models: Arc::default(),
             creating: Mutex::new(()),
+            egress: std::sync::RwLock::default(),
         }
+    }
+
+    /// Adds the `[accounts]` egress overrides from `config.toml` (docs/ACCOUNT-RISK.md).
+    pub fn with_egress(
+        mut self,
+        default: Option<EgressPolicy>,
+        by_provider: BTreeMap<String, EgressPolicy>,
+        by_account: BTreeMap<String, EgressPolicy>,
+    ) -> Self {
+        self.egress = std::sync::RwLock::new(EgressSettings {
+            default,
+            by_provider,
+            by_account,
+        });
+        self
+    }
+
+    /// The egress policy for an account: a per-account override, then what the account
+    /// itself stores, then a per-provider override, then `[accounts] egress_default`, then
+    /// the provider default. The finer key wins: a broad provider table must not overturn
+    /// an account's explicit choice.
+    fn egress_for(&self, account: &Account) -> EgressPolicy {
+        let settings = self
+            .egress
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        settings
+            .by_account
+            .get(&account.id)
+            .copied()
+            .or(account.egress)
+            .or_else(|| settings.by_provider.get(&account.provider).copied())
+            .or(settings.default)
+            .unwrap_or_else(|| EgressPolicy::default_for_provider(&account.provider))
     }
 
     /// Registers each provider's own login (e.g. `~/.codex`) as an account, if it is
@@ -115,6 +162,7 @@ impl Accounts {
             }
             let probe = Account {
                 codebuddy_site: None,
+                egress: None,
                 id: name.clone(),
                 provider: name.clone(),
                 label: String::new(),
@@ -270,6 +318,7 @@ impl Accounts {
         };
         let account = Account {
             codebuddy_site: req.codebuddy_site,
+            egress: None,
             label: req.label.unwrap_or_else(|| req.id.clone()),
             id: req.id,
             provider: req.provider,
@@ -555,12 +604,20 @@ impl Accounts {
     }
 
     /// Environment for an agent bound to an account through `config.account`.
+    ///
+    /// Carries the account's egress policy too, in [`EGRESS_ENV`]: drivers take it from the
+    /// session's environment rather than reading configuration themselves.
     pub async fn agent_env(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
         let Some(id) = account_of(agent) else {
             return Ok(Vec::new());
         };
         let account = self.store().get_account(&id).await?;
-        Ok(self.provider(&account.provider)?.agent_env(&account))
+        let mut env = self.provider(&account.provider)?.agent_env(&account);
+        env.push((
+            EGRESS_ENV.to_owned(),
+            self.egress_for(&account).as_str().to_owned(),
+        ));
+        Ok(env)
     }
 
     /// Checks that `agent` may use the account it names.
@@ -1448,6 +1505,7 @@ mod login_tests {
         ));
         let account = Account {
             codebuddy_site: None,
+            egress: None,
             id: "cursor-work".into(),
             provider: "cursor".into(),
             label: "work".into(),
@@ -2207,5 +2265,100 @@ mod health_tests {
             ..empty
         };
         assert_eq!(judge(&[], None, Some(&unlimited)), Health::Ok);
+    }
+}
+
+#[cfg(test)]
+mod egress_tests {
+    use super::*;
+    use crossagents_store_sqlite::SqliteStore;
+
+    fn account(provider: &str, id: &str, egress: Option<EgressPolicy>) -> Account {
+        Account {
+            codebuddy_site: None,
+            egress,
+            id: id.into(),
+            provider: provider.into(),
+            label: String::new(),
+            home: PathBuf::from("/accounts").join(id),
+            created_at: Utc::now(),
+        }
+    }
+
+    async fn accounts(
+        default: Option<EgressPolicy>,
+        by_provider: &[(&str, EgressPolicy)],
+        by_account: &[(&str, EgressPolicy)],
+    ) -> Accounts {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
+        let bus = Arc::new(EventBus::new(store));
+        let map = |pairs: &[(&str, EgressPolicy)]| {
+            pairs
+                .iter()
+                .map(|(key, policy)| ((*key).to_owned(), *policy))
+                .collect()
+        };
+        Accounts::new(bus, Vec::new(), PathBuf::from("/accounts")).with_egress(
+            default,
+            map(by_provider),
+            map(by_account),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_account_then_the_config_then_the_provider_decides() {
+        // No override: the provider default, and the account's own choice when it has one.
+        let plain = accounts(None, &[], &[]).await;
+        assert_eq!(
+            plain.egress_for(&account("claude", "claude-work", None)),
+            EgressPolicy::ProxyOnly
+        );
+        assert_eq!(
+            plain.egress_for(&account("codebuddy", "buddy", None)),
+            EgressPolicy::AllowDirect
+        );
+        assert_eq!(
+            plain.egress_for(&account(
+                "claude",
+                "claude-work",
+                Some(EgressPolicy::AllowDirect)
+            )),
+            EgressPolicy::AllowDirect
+        );
+        // The finer key wins: the per-account override beats everything, and a provider
+        // table does not overturn an account's explicit choice.
+        let overridden = accounts(
+            Some(EgressPolicy::ProxyOnly),
+            &[("claude", EgressPolicy::AllowDirect)],
+            &[("claude-work", EgressPolicy::ProxyOnly)],
+        )
+        .await;
+        assert_eq!(
+            overridden.egress_for(&account("claude", "claude-work", None)),
+            EgressPolicy::ProxyOnly
+        );
+        assert_eq!(
+            overridden.egress_for(&account(
+                "claude",
+                "claude-other",
+                Some(EgressPolicy::ProxyOnly)
+            )),
+            EgressPolicy::ProxyOnly
+        );
+        assert_eq!(
+            overridden.egress_for(&account("claude", "claude-third", None)),
+            EgressPolicy::AllowDirect
+        );
+        assert_eq!(
+            overridden.egress_for(&account("codebuddy", "buddy", None)),
+            EgressPolicy::ProxyOnly
+        );
+        // The variable an agent gets carries the resolved value, not the raw field.
+        assert_eq!(
+            overridden
+                .egress_for(&account("codebuddy", "buddy", None))
+                .as_str(),
+            "proxy_only"
+        );
     }
 }
