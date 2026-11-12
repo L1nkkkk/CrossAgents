@@ -68,7 +68,54 @@ ASN 缺失时国家也按 unknown 处理，避免不完整的采集结果阻断�
 
 ## 风控熔断
 
-（待填）
+账号级熔断：一旦 vendor 开始怀疑这个登录，继续跑只会让画像更难看。命中后立刻停手，
+**不是**重试——这条是故意的，代码里没有任何自动重试、退避重连或换账号再试的路径。
+
+### 命中哪些信号
+
+三类信号，在生产路径上的接线如下：
+
+- **拒绝文本**：agent 每轮上报的 `RateLimits` 里带的 `reached` 是 vendor 的原话，在
+  `Accounts::observe` 里过 `classify_refusal`。带 KYC、identity verification /
+  identity check、captcha、human verification / human check / verify you are human
+  字样即命中；`rate limit`、`overloaded`、`quota exceeded` 只是额度问题，不是风控信号。
+- **登录态 true→false**：每次状态读取落库时（`record_status`，包括后台刷新）用
+  `classify_login(old.logged_in, fresh.logged_in)` 判断；`false→true`、`true→true`
+  都不算。
+- **异常的 401 / 403**：分类函数 `classify_status` 已就绪，但**当前未接入**生产路径。
+  401/403 只在 provider 自己的 HTTP 调用里可见（`crates/plugins/src/codex_account.rs`、
+  `cursor_account.rs`），那里把 401 转成了「登录过期」的错误字符串、403 转成了
+  `HTTP 403` 的 usage 错误，hub 侧拿不到结构化的状态码。要接上需要改这两个 provider
+  文件（把状态码带出来），本次没有改范围外的文件。文档如实写成两类已接、一类未接，
+  不声称三类都在跑。
+
+### 阈值
+
+**按信号个数，不是比率**：七天内（`WINDOW_DAYS = 7`）累计 `MIN_SIGNALS = 2` 个风险信号
+就熔断。分母刻意不是「所有调用」——一个高频账号会把两个信号稀释到看不见，而这正是要
+避免的。信号按账号记在 `crossagents_core::Health` 里，每个 `!ok` 的 run 是一次信号；
+窗口外的会被剪掉。
+
+### 命中之后
+
+- 该账号上绑定的所有 agent 立即置为 `Stopped`；
+- 账号被 pause，`risk_reason` 保留原因给人读（GUI 由 T5 显示）；
+- `fit` / `weigh` 对该账号返回 at-risk，路由 (`split_at_risk`) 把它**排除**在挑选之外——
+  不是降权，也不是排到最后当备选；
+- 不重试：账号 pause 后 `risk::record` 不再计数；`fit` / `weigh` / `status` 都不再探测
+  该账号（连状态读取也不会再打 provider）。
+- 已知残余：直接给该账号上已停的 agent 发消息，仍会让 `runtime.send` 把它重新拉起
+  （账号本身仍是 at-risk、也不会被路由选中）。要拦这一层得改 `crates/hub/src/runtime.rs`
+  的投递入口，不在本任务范围内。
+
+### 谁能重新 arm
+
+只有人。`Accounts::clear_risk(id)` 是唯一的清除入口；没有冷却时间，也没有任何自动恢复。
+
+### 配置项
+
+本节没有新增配置项；窗口和信号阈值是代码里的常量
+（`WINDOW_DAYS` / `MIN_SIGNALS`，见 `crates/orchestrator/src/risk.rs`）。
 
 ## 并发与作息
 

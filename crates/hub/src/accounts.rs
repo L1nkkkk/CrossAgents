@@ -14,9 +14,9 @@ use crossagents_api_types::{
     EgressFingerprint, LoginStarted, UsageSeriesGroup, UsageSeriesResponse,
 };
 use crossagents_core::{
-    Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, CoreError, DataSource,
-    EGRESS_ENV, EgressPolicy, Event, EventBus, EventKind, RateLimits, Role, RunId, Store,
-    TokenTotals, validate_slug,
+    Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, AgentStatus, CoreError,
+    DataSource, EGRESS_ENV, EgressPolicy, Event, EventBus, EventKind, RateLimits, Role, RunId,
+    Store, TokenTotals, validate_slug,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
@@ -35,6 +35,9 @@ const STATUS_TTL: Duration = Duration::from_secs(60);
 
 /// The last status read per account, with when.
 type Statuses = Arc<std::sync::Mutex<HashMap<String, (Instant, AccountStatus)>>>;
+
+/// The per-account risk record ([`crossagents_core::Health`]), shared with background reads.
+type RiskRecords = std::sync::Mutex<HashMap<String, crossagents_core::Health>>;
 
 /// `[accounts]` egress overrides from `config.toml`, resolved against each account's own
 /// choice and its provider default (docs/ACCOUNT-RISK.md).
@@ -92,6 +95,11 @@ pub struct Accounts {
     fingerprint_settings: FingerprintSettings,
     fingerprint_lock: Mutex<()>,
     fingerprint_proxy: std::sync::Mutex<HashMap<String, bool>>,
+    /// Per-account risk record (`crossagents_core::Health`): counting and the pause live in
+    /// [`crossagents_orchestrator::risk`]. An `Arc` so a background status read can record a
+    /// login that fell away without holding `Accounts`. A paused account is excluded from
+    /// routing and only a person re-arms it (docs/ACCOUNT-RISK.md 「风控熔断」).
+    risk: Arc<RiskRecords>,
 }
 
 #[derive(Default)]
@@ -297,6 +305,7 @@ impl Accounts {
             },
             fingerprint_lock: Mutex::new(()),
             fingerprint_proxy: std::sync::Mutex::default(),
+            risk: Arc::default(),
         }
     }
 
@@ -393,47 +402,60 @@ impl Accounts {
     async fn observe(&self, agent: AgentId, limits: &RateLimits) -> Option<String> {
         let agent = self.store().get_agent(&AgentKey::Id(agent)).await.ok()?;
         let id = self.account_for(&agent).await?;
-        let mut observed = self.observed.lock().unwrap();
-        // A per-call update names only the limit in use: merge it into what a full read
-        // reported, by limit id; reset credits stay until a read brings new ones.
-        let merged = match observed.get(&id) {
-            Some(old) => {
-                let mut merged = limits.clone();
-                let mut groups = old.limits.by_limit.clone();
-                for group in &limits.by_limit {
-                    match groups.iter_mut().find(|g| g.id == group.id) {
-                        Some(slot) => *slot = group.clone(),
-                        None => groups.push(group.clone()),
+        let changed = {
+            let mut observed = self.observed.lock().unwrap();
+            // A per-call update names only the limit in use: merge it into what a full read
+            // reported, by limit id; reset credits stay until a read brings new ones.
+            let merged = match observed.get(&id) {
+                Some(old) => {
+                    let mut merged = limits.clone();
+                    let mut groups = old.limits.by_limit.clone();
+                    for group in &limits.by_limit {
+                        match groups.iter_mut().find(|g| g.id == group.id) {
+                            Some(slot) => *slot = group.clone(),
+                            None => groups.push(group.clone()),
+                        }
                     }
+                    merged.by_limit = groups;
+                    if merged.reset_credits.is_none() {
+                        merged.reset_credits = old.limits.reset_credits.clone();
+                    }
+                    merged
                 }
-                merged.by_limit = groups;
-                if merged.reset_credits.is_none() {
-                    merged.reset_credits = old.limits.reset_credits.clone();
-                }
-                merged
-            }
-            None => limits.clone(),
+                None => limits.clone(),
+            };
+            let changed = observed
+                .get(&id)
+                .is_none_or(|old| old.limits != merged || old.refusal.is_some());
+            let top_group = if limits.by_limit.len() == 1
+                && !limits.windows.is_empty()
+                && limits.by_limit[0].windows == limits.windows
+            {
+                Some(limits.by_limit[0].id.clone())
+            } else {
+                None
+            };
+            observed.insert(
+                id.clone(),
+                Observation {
+                    at: Utc::now(),
+                    limits: merged,
+                    top_group,
+                    refusal: None,
+                },
+            );
+            changed
         };
-        let changed = observed
-            .get(&id)
-            .is_none_or(|old| old.limits != merged || old.refusal.is_some());
-        let top_group = if limits.by_limit.len() == 1
-            && !limits.windows.is_empty()
-            && limits.by_limit[0].windows == limits.windows
+        // The vendor's wording for why it refused can name an identity or human check; a
+        // quota refusal ("rate limit", "overloaded") is not a risk signal and says None.
+        if let Some(signal) = limits
+            .reached
+            .as_deref()
+            .and_then(crossagents_orchestrator::risk::classify_refusal)
         {
-            Some(limits.by_limit[0].id.clone())
-        } else {
-            None
-        };
-        observed.insert(
-            id.clone(),
-            Observation {
-                at: Utc::now(),
-                limits: merged,
-                top_group,
-                refusal: None,
-            },
-        );
+            // This stops the calling agent too, on the way out.
+            self.record_risk(&id, signal).await;
+        }
         changed.then_some(id)
     }
 
@@ -537,6 +559,17 @@ impl Accounts {
     /// starts in the background (one per account) and `account.quota_updated` says when it
     /// changed something. Only an account's first read is waited for.
     pub async fn status(&self, id: &str) -> Result<AccountStatus, CoreError> {
+        // A paused account is never probed again: serve the last read, else a paused stub.
+        // Reading it again would be exactly the retry the breaker exists to stop.
+        if let Some(reason) = self.risk_reason(id) {
+            let cached = self
+                .statuses
+                .lock()
+                .unwrap()
+                .get(id)
+                .map(|(_, status)| status.clone());
+            return Ok(cached.unwrap_or_else(|| paused_status(reason)));
+        }
         let account = self.store().get_account(id).await?;
         let provider = self.provider(&account.provider)?.clone();
         let cached = self.statuses.lock().unwrap().get(id).cloned();
@@ -549,7 +582,11 @@ impl Accounts {
             }
             None => {
                 let fresh = provider.status(&account).await;
-                record_status(&self.statuses, id, fresh).0
+                let (status, _, signal) = record_status(&self.statuses, id, fresh);
+                if let Some(signal) = signal {
+                    self.record_risk(id, signal).await;
+                }
+                status
             }
         };
         let observed = self.observed.lock().unwrap().get(id).cloned();
@@ -584,6 +621,14 @@ impl Accounts {
 
     /// What routing weighs an account by, from what is already known (see [`Fit`]).
     pub async fn fit(&self, id: &str, model: Option<&str>) -> Fit {
+        // A paused account is out of the running, whatever its quota says.
+        if let Some(reason) = self.risk_reason(id) {
+            return Fit {
+                health: Health::Exhausted(reason.clone()),
+                at_risk: Some(reason),
+                ..Fit::unknown()
+            };
+        }
         let Ok(account) = self.store().get_account(id).await else {
             return Fit::unknown();
         };
@@ -663,6 +708,7 @@ impl Accounts {
             resets_at,
             failed: refusal.is_some(),
             expiring,
+            at_risk: None,
         }
     }
 
@@ -670,6 +716,14 @@ impl Accounts {
     /// routing can weigh its quota instead of guessing (magpie-lancer §2.2: an account
     /// whose quota is unknown gets one try, which also learns what it has left).
     pub async fn weigh(&self, id: &str, model: Option<&str>) -> Fit {
+        // Never probe a paused account: reading it again is a retry it must not get.
+        if let Some(reason) = self.risk_reason(id) {
+            return Fit {
+                health: Health::Exhausted(reason.clone()),
+                at_risk: Some(reason),
+                ..Fit::unknown()
+            };
+        }
         let unknown = {
             let statuses = self.statuses.lock().unwrap();
             let observed = self.observed.lock().unwrap();
@@ -702,7 +756,50 @@ impl Accounts {
         );
     }
 
-    /// Health checks may be frequent; limit their background probes even after a failure.
+    /// Why the account is paused for risk, if it is: the note a person reads.
+    pub fn risk_reason(&self, id: &str) -> Option<String> {
+        self.risk
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|health| health.is_paused())
+            .and_then(|health| health.pause_reason.clone())
+    }
+
+    /// Whether the account paused itself on a risk signal.
+    pub fn is_at_risk(&self, id: &str) -> bool {
+        self.risk
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(crossagents_core::Health::is_paused)
+    }
+
+    /// Records one risk signal for the account and pauses it when
+    /// [`crossagents_orchestrator::risk`] says the threshold is crossed. A paused account
+    /// stops its agents and is never retried; this returns the reason on the call that
+    /// tripped it, `None` otherwise.
+    pub async fn record_risk(
+        &self,
+        id: &str,
+        signal: crossagents_orchestrator::risk::Signal,
+    ) -> Option<String> {
+        record_risk_signal(&self.bus, &self.risk, id, signal).await
+    }
+
+    /// Marks the account at risk: it is paused (only a person can re-arm it) and every agent
+    /// bound to it is stopped. Nothing here retries, reconnects or moves the work to another
+    /// account: a session that keeps going only deepens the profile the vendor already
+    /// doubts (docs/ACCOUNT-RISK.md 「风控熔断」).
+    pub async fn mark_at_risk(&self, id: &str, why: &str) {
+        pause_and_stop(&self.bus, &self.risk, id, why).await;
+    }
+
+    /// A person re-arms the account by hand; nothing else clears a risk pause.
+    pub fn clear_risk(&self, id: &str) {
+        self.risk.lock().unwrap().remove(id);
+    }
+
     fn refresh_status_throttled(&self, account: Account, provider: Arc<dyn AccountProvider>) {
         let mut attempts = self.refresh_attempts.lock().unwrap();
         if attempts
@@ -725,9 +822,14 @@ impl Accounts {
         let refreshing = self.refreshing.clone();
         let bus = self.bus.clone();
         let defaults = self.default_models.clone();
+        let risk = self.risk.clone();
         tokio::spawn(async move {
             let fresh = provider.status(&account).await;
-            let (_, changed) = record_status(&statuses, &account.id, fresh);
+            let (_, changed, signal) = record_status(&statuses, &account.id, fresh);
+            if let Some(signal) = signal {
+                // A login that fell away is a risk signal: pause and stop, never retry.
+                record_risk_signal(&bus, &risk, &account.id, signal).await;
+            }
             refreshing.lock().unwrap().remove(&account.id);
             if changed {
                 let _ = bus
@@ -1213,11 +1315,94 @@ impl Accounts {
     }
 }
 
+/// What an account reads as when it paused before any status was cached: logged out, with
+/// the risk reason as the note a person sees.
+fn paused_status(reason: String) -> AccountStatus {
+    AccountStatus {
+        logged_in: false,
+        auth_mode: None,
+        email: None,
+        plan: None,
+        subscription_until: None,
+        rate_limits: Vec::new(),
+        limit_reached: false,
+        credits: None,
+        limits: Vec::new(),
+        reset_credits: Vec::new(),
+        source: Some(DataSource::Snapshot),
+        as_of: None,
+        note: Some(reason),
+    }
+}
+
+/// Counts one risk signal and, when it trips, pauses the account and stops its agents. Free
+/// of `Accounts` so a spawned status read can call it too.
+async fn record_risk_signal(
+    bus: &EventBus,
+    risk: &RiskRecords,
+    id: &str,
+    signal: crossagents_orchestrator::risk::Signal,
+) -> Option<String> {
+    let tripped = {
+        let mut risk = risk.lock().unwrap();
+        let health = risk.entry(id.to_owned()).or_default();
+        crossagents_orchestrator::risk::record(health, Utc::now(), signal)
+    };
+    if let Some(reason) = &tripped {
+        pause_and_stop(bus, risk, id, reason).await;
+    }
+    tripped
+}
+
+/// Pauses the account and stops every agent bound to it. `pause` keeps the first reason; the
+/// agents are stopped either way. Store-only, so a background task can call it.
+async fn pause_and_stop(bus: &EventBus, risk: &RiskRecords, id: &str, why: &str) {
+    {
+        let mut risk = risk.lock().unwrap();
+        let health = risk.entry(id.to_owned()).or_default();
+        health.pause(Utc::now(), why.to_owned());
+    }
+    let Ok(agents) = bus.store().list_agents().await else {
+        return;
+    };
+    for agent in agents {
+        if account_of(&agent).as_deref() != Some(id) || agent.status == AgentStatus::Stopped {
+            continue;
+        }
+        if bus
+            .store()
+            .update_agent_status(agent.id, AgentStatus::Stopped)
+            .await
+            .is_ok()
+        {
+            let _ = bus
+                .publish(EventKind::AgentStatusChanged {
+                    id: agent.id,
+                    from: agent.status,
+                    to: AgentStatus::Stopped,
+                })
+                .await;
+        }
+    }
+}
+
 /// Stores a fresh read of account `id` (see [`keep_last_quota`]). Returns what is now
-/// served, and whether it differs from what was (apart from when it was read).
-fn record_status(statuses: &Statuses, id: &str, fresh: AccountStatus) -> (AccountStatus, bool) {
+/// served, whether it differs from what was (apart from when it was read), and the risk
+/// signal the change itself carried (a login that fell from `true` to `false`).
+fn record_status(
+    statuses: &Statuses,
+    id: &str,
+    fresh: AccountStatus,
+) -> (
+    AccountStatus,
+    bool,
+    Option<crossagents_orchestrator::risk::Signal>,
+) {
     let mut statuses = statuses.lock().unwrap();
     let previous = statuses.get(id).map(|(_, status)| status.clone());
+    let signal = previous.as_ref().and_then(|old| {
+        crossagents_orchestrator::risk::classify_login(old.logged_in, fresh.logged_in)
+    });
     let status = keep_last_quota(previous.as_ref(), fresh);
     let changed = previous.is_none_or(|old| {
         let undated = |s: &AccountStatus| AccountStatus {
@@ -1227,7 +1412,7 @@ fn record_status(statuses: &Statuses, id: &str, fresh: AccountStatus) -> (Accoun
         undated(&old) != undated(&status)
     });
     statuses.insert(id.to_owned(), (Instant::now(), status.clone()));
-    (status, changed)
+    (status, changed, signal)
 }
 
 /// A read that comes back logged in but without the quota (the vendor's usage call failed
@@ -1550,11 +1735,12 @@ mod tests {
     #[test]
     fn a_read_without_the_quota_keeps_the_last_one() {
         let statuses = Statuses::default();
-        let (first, changed) = record_status(&statuses, "claude", status(true, Some(52.0), None));
+        let (first, changed, _) =
+            record_status(&statuses, "claude", status(true, Some(52.0), None));
         assert!(changed && first.rate_limits.len() == 1);
 
         // The usage call failed this time: the 52% stays, marked as the earlier read's.
-        let (kept, changed) = record_status(
+        let (kept, changed, _) = record_status(
             &statuses,
             "claude",
             status(true, None, Some("no plan limits")),
@@ -1566,14 +1752,15 @@ mod tests {
         assert!(changed);
 
         // A new good read replaces it; the same figures again change nothing.
-        let (newer, _) = record_status(&statuses, "claude", status(true, Some(60.0), None));
+        let (newer, _, _) = record_status(&statuses, "claude", status(true, Some(60.0), None));
         assert_eq!(newer.rate_limits[0].used_percent, 60.0);
-        let (_, changed) = record_status(&statuses, "claude", status(true, Some(60.0), None));
+        let (_, changed, _) = record_status(&statuses, "claude", status(true, Some(60.0), None));
         assert!(!changed);
 
-        // Logged out is believed.
-        let (out, _) = record_status(&statuses, "claude", status(false, None, None));
+        // Logged out is believed, and the fall from `true` is a risk signal.
+        let (out, _, signal) = record_status(&statuses, "claude", status(false, None, None));
         assert!(!out.logged_in && out.rate_limits.is_empty());
+        assert_eq!(signal, Some(crossagents_orchestrator::risk::Signal::Logout));
     }
 
     #[test]
@@ -1644,6 +1831,7 @@ mod login_tests {
     use super::*;
     use crossagents_core::{LoginCommand, ModelInfo, SessionUsage};
     use crossagents_store_sqlite::SqliteStore;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// A provider whose login tool prints a page and stops, as `agent login` does once the
     /// page is done. `logged_in` is what its account reports afterwards.
@@ -1743,15 +1931,83 @@ mod login_tests {
         }
     }
 
+    /// A provider whose login state can be flipped between reads (and whose status reads are
+    /// counted), for the login-risk wiring.
+    struct FlipLogin {
+        logged_in: Arc<AtomicBool>,
+        reads: Arc<AtomicUsize>,
+        base: PrintLogin,
+    }
+
+    impl FlipLogin {
+        fn new(logged_in: bool) -> Self {
+            Self {
+                logged_in: Arc::new(AtomicBool::new(logged_in)),
+                reads: Arc::new(AtomicUsize::new(0)),
+                base: PrintLogin { logged_in, url: "" },
+            }
+        }
+
+        fn set(&self, logged_in: bool) {
+            self.logged_in.store(logged_in, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AccountProvider for FlipLogin {
+        fn name(&self) -> &str {
+            self.base.name()
+        }
+        fn default_home(&self) -> Option<PathBuf> {
+            self.base.default_home()
+        }
+        async fn status(&self, account: &Account) -> AccountStatus {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            AccountStatus {
+                logged_in: self.logged_in.load(Ordering::SeqCst),
+                ..self.base.status(account).await
+            }
+        }
+        async fn sessions(&self, account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+            self.base.sessions(account).await
+        }
+        async fn models(&self, account: &Account) -> Vec<ModelInfo> {
+            self.base.models(account).await
+        }
+        fn login_command(&self, account: &Account) -> LoginCommand {
+            self.base.login_command(account)
+        }
+        fn agent_env(&self, account: &Account) -> Vec<(String, String)> {
+            self.base.agent_env(account)
+        }
+    }
+
+    async fn wait_for(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(
+                Instant::now() < deadline,
+                "a background status read stalled"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn accounts_with(
         provider: PrintLogin,
+    ) -> (Arc<Accounts>, Arc<EventBus>, tempfile::TempDir, Account) {
+        accounts_with_any(Arc::new(provider)).await
+    }
+
+    async fn accounts_with_any(
+        provider: Arc<dyn AccountProvider>,
     ) -> (Arc<Accounts>, Arc<EventBus>, tempfile::TempDir, Account) {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
         let bus = Arc::new(EventBus::new(store.clone()));
         let accounts = Arc::new(Accounts::new(
             bus.clone(),
-            vec![Arc::new(provider)],
+            vec![provider],
             dir.path().join("accounts"),
         ));
         let account = Account {
@@ -1809,6 +2065,230 @@ mod login_tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn a_risk_hit_pauses_the_account_and_stops_its_agents() {
+        let (accounts, bus, _dir, account) = accounts_with(PrintLogin {
+            logged_in: true,
+            url: "",
+        })
+        .await;
+        let store = bus.store();
+        let agent = Agent {
+            id: AgentId::new(),
+            name: "worker".into(),
+            name_source: Default::default(),
+            plugin: "cursor".into(),
+            driver: None,
+            model: None,
+            role: Default::default(),
+            home: _dir.path().join("worker"),
+            cwd: _dir.path().join("worker"),
+            config: serde_json::json!({ "account": account.id }),
+            status: AgentStatus::Idle,
+            created_at: Utc::now(),
+            profile: Default::default(),
+            topic: None,
+            archived_at: None,
+            node: None,
+        };
+        store.insert_agent(&agent).await.unwrap();
+        assert!(accounts.fit(&account.id, None).await.at_risk.is_none());
+
+        // Two risk signals trip the account-level breaker.
+        accounts
+            .record_risk(&account.id, crossagents_orchestrator::risk::Signal::Auth)
+            .await;
+        let tripped = accounts
+            .record_risk(&account.id, crossagents_orchestrator::risk::Signal::Logout)
+            .await;
+        assert!(tripped.is_some(), "the account-level breaker trips");
+
+        assert!(accounts.is_at_risk(&account.id));
+        assert!(accounts.risk_reason(&account.id).is_some());
+        // Every way of weighing it says at-risk, so routing cannot pick it.
+        let fit = accounts.fit(&account.id, None).await;
+        assert!(fit.at_risk.is_some());
+        assert!(matches!(fit.health, Health::Exhausted(_)), "{fit:?}");
+        assert!(accounts.weigh(&account.id, None).await.at_risk.is_some());
+
+        // Every agent bound to it is stopped.
+        let stopped = store
+            .get_agent(&crossagents_core::AgentKey::Id(agent.id))
+            .await
+            .unwrap();
+        assert_eq!(stopped.status, AgentStatus::Stopped);
+
+        // No retry: a later signal records nothing and the first reason stands.
+        let reason = accounts.risk_reason(&account.id);
+        assert!(
+            accounts
+                .record_risk(
+                    &account.id,
+                    crossagents_orchestrator::risk::Signal::IdentityCheck,
+                )
+                .await
+                .is_none()
+        );
+        assert_eq!(accounts.risk_reason(&account.id), reason);
+
+        // Only a person re-arms it.
+        accounts.clear_risk(&account.id);
+        assert!(accounts.fit(&account.id, None).await.at_risk.is_none());
+    }
+
+    /// An agent bound to `account`, as `clone_agent_on` writes it.
+    async fn worker_on(
+        bus: &Arc<EventBus>,
+        dir: &tempfile::TempDir,
+        account: &Account,
+        status: AgentStatus,
+    ) -> Agent {
+        let agent = Agent {
+            id: AgentId::new(),
+            name: "worker".into(),
+            name_source: Default::default(),
+            plugin: "cursor".into(),
+            driver: None,
+            model: None,
+            role: Default::default(),
+            home: dir.path().join("worker"),
+            cwd: dir.path().join("worker"),
+            config: serde_json::json!({ "account": account.id }),
+            status,
+            created_at: Utc::now(),
+            profile: Default::default(),
+            topic: None,
+            archived_at: None,
+            node: None,
+        };
+        bus.store().insert_agent(&agent).await.unwrap();
+        agent
+    }
+
+    fn refused(reason: &str) -> RateLimits {
+        RateLimits {
+            reached: Some(reason.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// The real observe entry: an agent's rate-limit report carrying the vendor's refusal.
+    /// A quota refusal is not a risk signal; a human check is, and two of them pause.
+    #[tokio::test]
+    async fn a_human_check_in_a_rate_limit_report_pauses_through_observe() {
+        let (accounts, bus, dir, account) = accounts_with(PrintLogin {
+            logged_in: true,
+            url: "",
+        })
+        .await;
+        let agent = worker_on(&bus, &dir, &account, AgentStatus::Running).await;
+
+        // "rate limit" / "overloaded" name no human check: nothing pauses, however often.
+        for _ in 0..3 {
+            accounts
+                .observe(agent.id, &refused("rate limit exceeded, try again later"))
+                .await;
+        }
+        assert!(!accounts.is_at_risk(&account.id));
+
+        // One vendor refusal naming a human check is below the two-signal floor.
+        accounts
+            .observe(agent.id, &refused("Identity verification is required"))
+            .await;
+        assert!(!accounts.is_at_risk(&account.id));
+        // The second pauses the account and stops the agent that reported it.
+        accounts
+            .observe(agent.id, &refused("Please complete the captcha"))
+            .await;
+        assert!(accounts.is_at_risk(&account.id));
+        assert!(
+            accounts
+                .risk_reason(&account.id)
+                .unwrap()
+                .contains("captcha")
+        );
+        assert!(accounts.fit(&account.id, None).await.at_risk.is_some());
+        assert!(accounts.weigh(&account.id, None).await.at_risk.is_some());
+        assert_eq!(
+            bus.store()
+                .get_agent(&AgentKey::Id(agent.id))
+                .await
+                .unwrap()
+                .status,
+            AgentStatus::Stopped
+        );
+    }
+
+    /// The real status-refresh path: a login that falls from true to false. It takes two
+    /// falls in the window to pause, and each fall is classified where the read is stored.
+    #[tokio::test]
+    async fn a_login_that_falls_away_pauses_through_a_status_refresh() {
+        let provider = Arc::new(FlipLogin::new(true));
+        let (accounts, _bus, _dir, account) = accounts_with_any(provider.clone()).await;
+        // First read caches "logged in"; there is no previous, so no signal.
+        assert!(accounts.status(&account.id).await.unwrap().logged_in);
+
+        // Falls once: one signal, below the floor.
+        provider.set(false);
+        accounts.refresh_status(account.clone(), provider.clone());
+        wait_for(|| !accounts.statuses.lock().unwrap()[&account.id].1.logged_in).await;
+        assert!(!accounts.is_at_risk(&account.id));
+
+        // Back up, then falls again: the second signal pauses and excludes it.
+        provider.set(true);
+        accounts.refresh_status(account.clone(), provider.clone());
+        wait_for(|| accounts.statuses.lock().unwrap()[&account.id].1.logged_in).await;
+        provider.set(false);
+        accounts.refresh_status(account.clone(), provider.clone());
+        wait_for(|| accounts.is_at_risk(&account.id)).await;
+
+        assert!(
+            accounts
+                .risk_reason(&account.id)
+                .unwrap()
+                .contains("login dropped")
+        );
+        assert!(accounts.fit(&account.id, None).await.at_risk.is_some());
+        assert!(accounts.weigh(&account.id, None).await.at_risk.is_some());
+    }
+
+    /// After a hit nothing probes or retries the account: fit, weigh, status and further
+    /// signals leave the provider untouched, and the pause stays until a person clears it.
+    #[tokio::test]
+    async fn an_at_risk_account_is_never_probed_or_retried() {
+        let provider = Arc::new(FlipLogin::new(true));
+        let (accounts, _bus, _dir, account) = accounts_with_any(provider.clone()).await;
+        accounts
+            .record_risk(&account.id, crossagents_orchestrator::risk::Signal::Auth)
+            .await;
+        accounts
+            .record_risk(&account.id, crossagents_orchestrator::risk::Signal::Logout)
+            .await;
+        assert!(accounts.is_at_risk(&account.id));
+        let reads = provider.reads.load(Ordering::SeqCst);
+
+        assert!(accounts.fit(&account.id, None).await.at_risk.is_some());
+        assert!(accounts.weigh(&account.id, None).await.at_risk.is_some());
+        let status = accounts.status(&account.id).await.unwrap();
+        assert!(!status.logged_in && status.note.is_some());
+        // Another signal is ignored, not another try.
+        assert!(
+            accounts
+                .record_risk(&account.id, crossagents_orchestrator::risk::Signal::Auth)
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            provider.reads.load(Ordering::SeqCst),
+            reads,
+            "a paused account must never be probed again"
+        );
+
+        // Only a person re-arms it.
+        accounts.clear_risk(&account.id);
+        assert!(!accounts.is_at_risk(&account.id));
     }
 
     #[tokio::test]
@@ -1974,6 +2454,9 @@ pub struct Fit {
     pub failed: bool,
     /// A window that resets soon with much of it unused.
     pub expiring: Option<Expiring>,
+    /// Why the account paused itself on a risk signal, if it did. Such an account is
+    /// excluded from routing, not ranked lower (docs/ACCOUNT-RISK.md 「风控熔断」).
+    pub at_risk: Option<String>,
 }
 
 impl Fit {
@@ -1985,6 +2468,7 @@ impl Fit {
             resets_at: None,
             failed: false,
             expiring: None,
+            at_risk: None,
         }
     }
 }

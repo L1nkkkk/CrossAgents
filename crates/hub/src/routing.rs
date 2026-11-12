@@ -112,7 +112,10 @@ pub async fn route(
     }
 
     // The same vendor's accounts, each weighed on what is known. One nothing is known about
-    // is read once first: routing learns its quota instead of guessing.
+    // is read once first: routing learns its quota instead of guessing. An account that
+    // paused itself on a risk signal is left out entirely — excluded, not ranked lower — and
+    // is never probed or retried (docs/ACCOUNT-RISK.md 「风控熔断」).
+    let current = accounts.account_for(&template).await;
     let mut weighed = Vec::new();
     for account in store.list_accounts().await? {
         if account.provider != template.plugin {
@@ -123,17 +126,33 @@ pub async fn route(
             fit: accounts.weigh(&account.id, template.model.as_deref()).await,
         });
     }
+    let (weighed, paused_for_risk) = split_at_risk(weighed);
     if weighed.is_empty() {
+        if let Some(id) = current.as_deref()
+            && let Some(reason) = accounts.risk_reason(id)
+        {
+            // The template's own account is paused: stop here instead of trying anything.
+            return Ok(RouteDecision {
+                route: Route::Exhausted {
+                    reason: format!(
+                        "account {id} is paused for risk ({reason}); nothing is retried"
+                    ),
+                },
+                chosen: current,
+                candidates: Vec::new(),
+                current_usable: false,
+                expiring: Vec::new(),
+            });
+        }
         // Nothing to choose between: the clone runs as planned, on the vendor's own home.
         return Ok(RouteDecision {
             route: Route::Same,
             chosen: None,
             candidates: Vec::new(),
-            current_usable: true,
+            current_usable: !paused_for_risk,
             expiring: Vec::new(),
         });
     }
-    let current = accounts.account_for(&template).await;
     let ordered = order(&weighed, mode, current.as_deref());
 
     let current_usable = current
@@ -286,6 +305,21 @@ struct Row<'a> {
     reason: String,
 }
 
+/// Drops accounts that paused themselves on a risk signal: excluded from the choice, not
+/// ranked lower, so no later branch can still pick one. Returns whether any was dropped.
+fn split_at_risk(weighed: Vec<Weighed>) -> (Vec<Weighed>, bool) {
+    let mut usable = Vec::with_capacity(weighed.len());
+    let mut any = false;
+    for account in weighed {
+        if account.fit.at_risk.is_some() {
+            any = true;
+        } else {
+            usable.push(account);
+        }
+    }
+    (usable, any)
+}
+
 fn order(weighed: &[Weighed], mode: RouteMode, prefer: Option<&str>) -> Vec<Ordered> {
     let mut rows: Vec<Row> = weighed
         .iter()
@@ -399,6 +433,7 @@ mod tests {
             resets_at: resets_in.map(|secs| Utc::now() + ChronoDuration::seconds(secs)),
             failed,
             expiring: None,
+            at_risk: None,
         }
     }
 
@@ -408,6 +443,35 @@ mod tests {
 
     fn ids(ordered: &[Ordered]) -> Vec<&str> {
         ordered.iter().map(|entry| entry.id.as_str()).collect()
+    }
+
+    #[test]
+    fn an_at_risk_account_is_excluded_not_ranked_last() {
+        // A paused account is not a last resort: it is out of the choice entirely.
+        let (usable, dropped) = split_at_risk(vec![
+            weighed(
+                "risky",
+                Fit {
+                    at_risk: Some("captcha".into()),
+                    ..fit(Health::Ok, Some(5.0), None, false)
+                },
+            ),
+            weighed("healthy", fit(Health::Ok, Some(5.0), None, false)),
+        ]);
+        assert!(dropped);
+        assert_eq!(usable.len(), 1);
+        assert_eq!(usable[0].id, "healthy");
+
+        // Even alone it stays out, so no branch can pick it.
+        let (none, dropped) = split_at_risk(vec![weighed(
+            "risky",
+            Fit {
+                at_risk: Some("abnormal 403".into()),
+                ..fit(Health::Ok, Some(5.0), None, false)
+            },
+        )]);
+        assert!(dropped);
+        assert!(none.is_empty());
     }
 
     #[test]
