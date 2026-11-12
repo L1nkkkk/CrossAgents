@@ -3,7 +3,7 @@ import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
 import { useHubData, useVersionMismatch, type VersionMismatch } from "./hub";
-import { closeBeside, closeTools, focusSession, focusedOf, isTermTab, openTool, routeTool, setRatio, useLayout, usePanes } from "./panes";
+import { closeBeside, closeBottom, closeTools, focusSession, focusedOf, isTermTab, openTool, routeTool, setRatio, useLayout, usePanes } from "./panes";
 import { shownTab } from "./lib/docks";
 import { FileViewerHost } from "./FileViewer";
 import { TabDragLayer } from "./tabs";
@@ -14,7 +14,7 @@ import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
 import { Titlebar, closeSidebarPeek, hoverSidebar, inDesktop, toggleSidebar, unhoverSidebar, useSidebar } from "./titlebar";
 import { ToolColumn, useToolsFloat } from "./ToolColumn";
-import { BOTTOM, SIDEBAR, TOOLS, dragBottom, dragEdge, setBottomHeight, setSidebarWidth, setToolsWidth, useWidths } from "./lib/widths";
+import { BOTTOM, COLLAPSE, SIDEBAR, TOOLS, dragBottom, dragEdge, setBottomHeight, setSidebarWidth, setToolsWidth, useWidths } from "./lib/widths";
 import { HomeView } from "./views/Home";
 import { RunView } from "./views/Run";
 import { SessionView } from "./views/Session";
@@ -99,22 +99,47 @@ export function runAgents(detail: RunDetail, agents: Agent[]): Agent[] {
   return out;
 }
 
+/** A split half dragged narrower than this closes on release. */
+const SPLIT_COLLAPSE = 180;
+
 /** The routed session, and a second one beside it when one is open. */
 function Sessions({ primary, question }: { primary: string; question?: string }) {
   const { beside, ratio } = usePanes();
   const { focus } = useLayout();
   const ref = useRef<HTMLDivElement>(null);
+  const [doomed, setDoomed] = useState<"primary" | "beside" | null>(null);
   useEffect(() => { if (question) focusSession(primary); }, [primary, question]);
   if (!beside || beside === primary) return <SessionView key={primary} name={primary} questionId={question} />;
 
+  /** The left half goes: the one beside becomes the routed session. */
+  const closePrimary = () => {
+    window.addEventListener("hashchange", () => closeBeside(), { once: true });
+    navigate("s", beside);
+  };
+
   const drag = (e: ReactPointerEvent<HTMLDivElement>) => {
     const box = ref.current?.getBoundingClientRect();
-    if (!box) return;
+    if (!box || e.button !== 0) return;
     e.preventDefault();
-    const move = (ev: PointerEvent) => setRatio((ev.clientX - box.left) / box.width);
+    const start = ratio;
+    let side: typeof doomed = null;
+    document.body.classList.add("col-resizing");
+    const move = (ev: PointerEvent) => {
+      const x = ev.clientX - box.left;
+      side = x < SPLIT_COLLAPSE ? "primary" : box.width - x < SPLIT_COLLAPSE ? "beside" : null;
+      setDoomed(side);
+      setRatio(x / box.width);
+    };
     const up = () => {
+      document.body.classList.remove("col-resizing");
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      setDoomed(null);
+      if (!side) return;
+      // Closed, not squeezed: the next split opens at the width it had before this drag.
+      setRatio(start);
+      if (side === "primary") closePrimary();
+      else closeBeside();
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -122,9 +147,9 @@ function Sessions({ primary, question }: { primary: string; question?: string })
 
   return (
     <div className={`split ${focusedOf(primary, beside, focus) === beside ? "split-focus-beside" : "split-focus-primary"}`} ref={ref} style={{ gridTemplateColumns: `minmax(0, ${ratio}fr) 6px minmax(0, ${1 - ratio}fr)` }}>
-      <div className="split-session split-primary"><SessionView key={primary} name={primary} questionId={question} /><button className="split-switch" onClick={() => focusSession(beside)}>切换到另一会话</button></div>
-      <div className="divider" onPointerDown={drag} onDoubleClick={() => setRatio(0.5)} title="拖动调整宽度，双击平分" role="separator" aria-orientation="vertical" />
-      <div className="split-session split-beside"><SessionView key={beside} name={beside} onClose={closeBeside} /><button className="split-switch" onClick={() => focusSession(primary)}>切换到另一会话</button></div>
+      <div className={`split-session split-primary ${doomed === "primary" ? "doomed" : ""}`}><SessionView key={primary} name={primary} questionId={question} onClosePane={closePrimary} /><button className="split-switch" onClick={() => focusSession(beside)}>切换到另一会话</button></div>
+      <div className="divider" onPointerDown={drag} onDoubleClick={() => setRatio(0.5)} title="拖动调整宽度，双击平分；拖到边上关闭那一栏" role="separator" aria-orientation="vertical" />
+      <div className={`split-session split-beside ${doomed === "beside" ? "doomed" : ""}`}><SessionView key={beside} name={beside} onClose={closeBeside} /><button className="split-switch" onClick={() => focusSession(primary)}>切换到另一会话</button></div>
     </div>
   );
 }
@@ -317,8 +342,8 @@ export function App() {
           className="col-edge sidebar-edge"
           role="separator"
           aria-orientation="vertical"
-          title="拖动调整宽度，双击还原"
-          onPointerDown={(e) => dragEdge(e, widths.sidebar, "right", setSidebarWidth)}
+title="拖动调整宽度，双击还原，拖到边上收起"
+          onPointerDown={(e) => dragEdge(e, widths.sidebar, "right", setSidebarWidth, { below: COLLAPSE.sidebar, close: toggleSidebar, hint: "collapse-sidebar" })}
           onDoubleClick={() => setSidebarWidth(SIDEBAR.initial)}
         />
       )}
@@ -339,8 +364,8 @@ export function App() {
               className="row-edge"
               role="separator"
               aria-orientation="horizontal"
-              title="拖动调整高度，双击还原"
-              onPointerDown={(e) => dragBottom(e, widths.bottom)}
+title="拖动调整高度，双击还原，拖到底收起"
+              onPointerDown={(e) => dragBottom(e, widths.bottom, { below: COLLAPSE.bottom, close: closeBottom, hint: "collapse-bottom" })}
               onDoubleClick={() => setBottomHeight(BOTTOM.initial)}
             />
             <section className="bottom-dock">
@@ -359,8 +384,8 @@ export function App() {
           className="col-edge tools-edge"
           role="separator"
           aria-orientation="vertical"
-          title="拖动调整宽度，双击还原"
-          onPointerDown={(e) => dragEdge(e, widths.tools, "left", (w) => setToolsWidth(w, sidebar.docked))}
+title="拖动调整宽度，双击还原，拖到边上收起"
+          onPointerDown={(e) => dragEdge(e, widths.tools, "left", (w) => setToolsWidth(w, sidebar.docked), { below: COLLAPSE.tools, close: closeTools, hint: "collapse-tools" })}
           onDoubleClick={() => setToolsWidth(TOOLS.initial, sidebar.docked)}
         />
       )}

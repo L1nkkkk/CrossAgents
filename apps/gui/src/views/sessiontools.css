@@ -8,6 +8,19 @@
 .split-session { min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .split-session > .pane { flex: 1; min-height: 0; }
 .split-switch { display: none; }
+/* A narrow half drops its chips before its buttons, so 关闭这一栏 never leaves the topbar. */
+.split-session { container-type: inline-size; }
+.split .topbar { overflow: hidden; }
+@container (max-width: 380px) {
+  .split .topbar > .chip, .split .topbar .who-sub { display: none; }
+  .split .topbar { gap: 6px; padding: 10px 8px; }
+}
+/* Released now, the panel would close (lib/widths.ts Collapse, App.tsx Sessions): it fades. */
+.split-session.doomed, body.collapse-tools .drawer, body.collapse-bottom .bottom-dock, body.collapse-sidebar .app > .sidebar {
+  opacity: 0.35;
+  transition: opacity 0.12s;
+}
+.split-session.doomed { outline: 2px dashed var(--accent); outline-offset: -2px; }
 @media (max-width: 900px) {
   .split { display: block !important; }
   .split > .divider, .split-focus-primary .split-beside, .split-focus-beside .split-primary { display: none; }

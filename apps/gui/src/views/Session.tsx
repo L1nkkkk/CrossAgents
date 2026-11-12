@@ -121,6 +121,7 @@ export type RoundMark = { id: string; n: number; title: string; status: RunStatu
 export function SessionView({
   name,
   onClose,
+  onClosePane,
   questionId,
   header,
   top,
@@ -132,6 +133,8 @@ export function SessionView({
   name: string;
   questionId?: string;
   onClose?: () => void;
+  /** Closes this conversation's half of a split; unlike `onClose`, it is still the main one. */
+  onClosePane?: () => void;
   header?: ReactNode;
   top?: ReactNode;
   bottom?: ReactNode;
@@ -289,7 +292,7 @@ export function SessionView({
   return (
     <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
       <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)} onFocusCapture={() => focusSession(name)}>
-        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
+        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose ?? onClosePane} />}
         <WorkContext name={name} agent={agent} tasks={tasks} led={led} agents={everyone} execution={execution.data?.execution} />
         <ExecutionBar agent={agent} execution={execution.data?.execution} reload={execution.reload} />
         <NoticeBar agent={agent} />
@@ -599,7 +602,7 @@ function Header({
           graph={agent.plugin !== "external" ? () => openTool("graph", { agent: agent.name }) : undefined}
         />
         {onClose && (
-          <button className="ghost icon" onClick={onClose} title="关闭这一栏" aria-label="关闭这一栏">
+          <button className="ghost icon split-close" onClick={onClose} title="关闭这一栏" aria-label="关闭这一栏">
             <Icon name="close" size={15} />
           </button>
         )}

@@ -1,12 +1,14 @@
 // The colour theme (docs/tasks/V6-GUI.md §4.4): follow the system, or always light / dark; light
 // comes in three papers. Kept in localStorage `crossagents.theme`; applied as
 // `<html data-theme="light | light-paper | light-mist | dark">`, which styles.css keys on.
+// 墨 is 素白 with ink instead of indigo for the accent, in light and dark alike: it adds
+// `<html data-accent="ink">` on top of the plain theme.
 
 import { useSyncExternalStore } from "react";
 import { getBridge } from "../api";
 
 export type Mode = "system" | "light" | "dark";
-export type Paper = "plain" | "paper" | "mist";
+export type Paper = "plain" | "paper" | "mist" | "ink";
 export type ThemeChoice = { mode: Mode; paper: Paper };
 export type Applied = "light" | "light-paper" | "light-mist" | "dark";
 
@@ -16,10 +18,11 @@ export const MODES: { key: Mode; label: string }[] = [
   { key: "dark", label: "深色" },
 ];
 
-export const PAPERS: { key: Paper; label: string; hint: string; swatch: string }[] = [
+export const PAPERS: { key: Paper; label: string; hint: string; swatch: string; card?: string }[] = [
   { key: "plain", label: "素白", hint: "中性灰白", swatch: "#f4f4f2" },
   { key: "paper", label: "纸", hint: "偏暖，像纸", swatch: "#faf9f5" },
   { key: "mist", label: "雾", hint: "偏冷的灰", swatch: "#f3f4f6" },
+  { key: "ink", label: "墨", hint: "素白底，主操作用墨色不用靛紫；深色下也生效", swatch: "#f4f4f2", card: "#18181b" },
 ];
 
 const KEY = "crossagents.theme";
@@ -45,12 +48,14 @@ const dark = () => typeof matchMedia !== "undefined" && matchMedia("(prefers-col
 export function resolve(c: ThemeChoice, systemDark: boolean): Applied {
   const isDark = c.mode === "dark" || (c.mode === "system" && systemDark);
   if (isDark) return "dark";
-  return c.paper === "plain" ? "light" : `light-${c.paper}`;
+  return c.paper === "plain" || c.paper === "ink" ? "light" : `light-${c.paper}`;
 }
 
 function apply() {
   const applied = resolve(choice, dark());
   document.documentElement.dataset.theme = applied;
+  if (choice.paper === "ink") document.documentElement.dataset.accent = "ink";
+  else delete document.documentElement.dataset.accent;
   // The window frame follows (Electron); read the colours the stylesheet now gives.
   const css = getComputedStyle(document.documentElement);
   getBridge()?.setTheme?.({

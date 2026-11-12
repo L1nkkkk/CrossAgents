@@ -33,7 +33,21 @@ type WebviewTag = HTMLElement & {
   stop(): void;
   canGoBack(): boolean;
   canGoForward(): boolean;
+  insertCSS(css: string): Promise<string>;
 };
+
+/**
+ * Pages keep Chromium's default scrollbar, a wide light bar that stands out in the app. This
+ * thin, neutral one reads on light and dark pages alike; a page's own styling still wins where
+ * it sets one.
+ */
+const PAGE_SCROLLBAR = `
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-button { display: none; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, 0.35); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box; min-height: 32px; }
+::-webkit-scrollbar-thumb:hover { background-color: rgba(128, 128, 128, 0.6); }
+`;
 
 /** A navigation event of a `<webview>`. */
 type NavEvent = Event & { url?: string; title?: string; errorCode?: number; errorDescription?: string; isMainFrame?: boolean };
@@ -226,6 +240,7 @@ function makeWebview(page: Page, url: string): WebviewTag {
   el.addEventListener("dom-ready", () => {
     // A re-attached <webview> has a new guest, and so a new id: this is where it is learned.
     page.wcId = el.getWebContentsId();
+    el.insertCSS(PAGE_SCROLLBAR).catch(() => {});
     page.back = el.canGoBack();
     page.forward = el.canGoForward();
     publish();

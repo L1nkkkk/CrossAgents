@@ -68,7 +68,8 @@ const AVATAR_BODY_LIMIT: usize =
     crossagents_api_types::MAX_AVATAR_UPLOAD * crossagents_api_types::MAX_AVATAR_BYTES / 3 * 4
         + 1024 * 1024;
 
-/// A message with its files, base64 (a third larger than the files themselves).
+/// A message with its files, base64 (a third larger than the files themselves). Also the
+/// limit for starting a conversation or a run, which carry files the same way.
 const MESSAGE_BODY_LIMIT: usize =
     crossagents_api_types::MAX_ATTACHMENTS_TOTAL / 3 * 4 + 1024 * 1024;
 
@@ -125,7 +126,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/info", get(info))
         .route("/v1/agents", get(list_agents).post(create_agent))
         .route("/v1/session-candidates", get(session_candidates))
-        .route("/v1/agents/{key}/chat", post(start_chat))
+        .route(
+            "/v1/agents/{key}/chat",
+            post(start_chat).layer(DefaultBodyLimit::max(MESSAGE_BODY_LIMIT)),
+        )
         .route("/v1/agents/{key}", get(get_agent).delete(delete_agent))
         .route("/v1/agents/{key}/start", post(start_agent))
         .route("/v1/agents/{key}/stop", post(stop_agent))
@@ -217,7 +221,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/works/{id}", get(get_work))
         .route("/v1/works/{id}/runs", post(create_work_run))
         .route("/v1/history", get(list_history))
-        .route("/v1/runs", get(list_runs).post(create_run))
+        .route(
+            "/v1/runs",
+            get(list_runs).post(create_run).layer(DefaultBodyLimit::max(MESSAGE_BODY_LIMIT)),
+        )
         .route("/v1/runs/{key}", get(get_run).delete(delete_run))
         .route("/v1/runs/{key}/approve", post(approve_run))
         .route("/v1/runs/{key}/reject", post(reject_run))

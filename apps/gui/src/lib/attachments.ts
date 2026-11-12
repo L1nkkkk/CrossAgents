@@ -53,6 +53,33 @@ export function mimeAllowed(mime: string): boolean {
 
 export const isImage = (mime: string) => mime.startsWith("image/");
 
+/**
+ * Model APIs refuse an image over 5 MB (base64 a third larger) or with a side over 8000 px, and
+ * scale anything past ~2000 px down anyway. A picture past either bound is re-encoded smaller
+ * before it is sent, rather than refused.
+ */
+export const IMAGE_SEND_BYTES = 3.5 * 1024 * 1024;
+export const IMAGE_MAX_SIDE = 2560;
+
+/**
+ * Whether an image of this type, size and pixel dimensions should be shrunk before sending, and
+ * to what dimensions. GIFs are left alone (re-encoding drops the animation).
+ */
+export function shrinkPlan(mime: string, size: number, width: number, height: number): { width: number; height: number } | undefined {
+  if (!/^image\/(png|jpeg|webp)$/.test(mime)) return undefined;
+  const side = Math.max(width, height);
+  if (size <= IMAGE_SEND_BYTES && side <= IMAGE_MAX_SIDE) return undefined;
+  const scale = Math.min(1, IMAGE_MAX_SIDE / side);
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}
+
+/** The name a shrunk picture goes by: its own, with the extension of the type it became. */
+export function shrunkName(name: string, mime: string): string {
+  const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
+  const stem = name.includes(".") ? name.slice(0, name.lastIndexOf(".")) : name;
+  return `${stem || "图片"}.${ext}`;
+}
+
 /** Why adding `adding` to `held` breaks a limit, or undefined. */
 export function refusal(
   held: { size: number }[],

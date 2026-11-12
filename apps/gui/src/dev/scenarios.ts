@@ -16,7 +16,7 @@ import { expertiseScene } from "../views/Expertise.mock";
 import { lessonsScene } from "../views/Lessons/Lessons.mock";
 import { agent, ago, capabilitiesOf, devices, NOTES_REPO, planned, REPO, run, say, team, think, transcript, turn, uid } from "./fixtures";
 import { openFile } from "../FileViewer";
-import { docksNow, openTool, placeTab, shutTab } from "../panes";
+import { docksNow, openBeside, openTool, placeTab, shutTab } from "../panes";
 import { setBottomHeight, setSidebarWidth, setToolsWidth, SIDEBAR } from "../lib/widths";
 import { newTerminal } from "../terminal";
 import { openBrowserTab } from "../browser";
@@ -761,6 +761,7 @@ export const SCENARIOS: Scenario[] = [
     localStorage.setItem("crossagents.workspace.tab", "history");
     return { state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` };
   } },
+  { key: "split-close", label: "分屏：两栏都能关", hint: "Atlas 与 Lin 并排，右侧工具列打开：两栏标题栏都有「关闭这一栏」且没被挤掉；把中间的分隔线拖到边上松手，被挤的那一栏关掉（工具列、底部、侧栏同理）", build: () => ({ state: workspaceState(), script: [{ at: 0, act: () => { openBeside("lin"); openTool("changes"); } }], route: "#/s/Atlas" }) },
   { key: "agent-workspace-narrow", label: "窄窗口与长标题", hint: "Atlas 的长话题和 #b 的长中文标题：226px 侧栏下名字、状态和摘要仍可辨认，截断不挤坏布局；窄窗口请用截图调整宽度", build: () => ({ state: workspaceState(), script: [], route: "#/s/Atlas" }) },
   { key: "agent-workspace-auto", label: "自动审批：不出现待批卡片", hint: "三个 run 都在 awaiting_approval：登录页改版是我审批（进「需要你」），另两个是半托管与 auto_approve 的旧记录，都不该开审批卡片；Atlas 的会话里还该有一个完成未读（与待办分开计数）", build: () => {
     const state = workspaceState();
