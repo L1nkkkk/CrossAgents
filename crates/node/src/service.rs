@@ -230,7 +230,9 @@ impl Outgoing {
                 seq,
                 session,
                 event: (&event).into(),
-                commands,
+                commands: commands
+                    .as_ref()
+                    .map(|xs| xs.iter().map(Into::into).collect()),
             },
             Self::Return {
                 id,
@@ -241,7 +243,9 @@ impl Outgoing {
                 seq,
                 id,
                 result,
-                commands,
+                commands: commands
+                    .as_ref()
+                    .map(|xs| xs.iter().map(Into::into).collect()),
             },
             Self::Ask {
                 id,
@@ -452,13 +456,25 @@ async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) ->
                 Some(Err(err)) => return Err(err),
                 None => None,
             };
-            Ok((WireReply::MaybeTurn { outcome }, None, Some(state)))
+            Ok((
+                WireReply::MaybeTurn {
+                    outcome: outcome.as_ref().map(Into::into),
+                },
+                None,
+                Some(state),
+            ))
         }
         Op::Prompt { session, prompt } => {
             let state = shared.session(&session)?;
             let outcome = state.session.prompt_with(&prompt.into()).await?;
             let commands = state.changed_commands();
-            Ok((WireReply::Turn { outcome }, commands, Some(state)))
+            Ok((
+                WireReply::Turn {
+                    outcome: (&outcome).into(),
+                },
+                commands,
+                Some(state),
+            ))
         }
         Op::Steer {
             session,
@@ -567,14 +583,14 @@ fn make_spec(
         Arc::new(AskHandler {
             shared: shared.clone(),
             session: handle.to_owned(),
-            policy: wire.permission,
+            policy: wire.permission.into(),
             events: events.clone(),
         }) as Arc<dyn PermissionHandler>
     });
     let spec = SessionSpec {
-        agent: wire.agent,
-        mcp_servers: wire.mcp_servers,
-        permission: wire.permission,
+        agent: wire.agent.into(),
+        mcp_servers: wire.mcp_servers.into_iter().map(Into::into).collect(),
+        permission: wire.permission.into(),
         permissions: if wire.permissions { handler } else { None },
         command: wire.command,
         instructions: wire.instructions,
@@ -593,15 +609,22 @@ fn finish_open(
     let info = SessionInfo {
         handle: handle.clone(),
         session_id: session.session_id().to_owned(),
-        attachment_support: session.attachment_support(),
+        attachment_support: session.attachment_support().as_ref().map(Into::into),
         outlives_hub: session.outlives_hub(),
-        commands: session.commands(),
+        commands: session
+            .commands()
+            .as_ref()
+            .map(|xs| xs.iter().map(Into::into).collect()),
     };
     let (ordered, returns) = mpsc::unbounded_channel();
     let state = Arc::new(SessionState {
         handle: handle.clone(),
         session,
-        commands: Mutex::new(info.commands.clone()),
+        commands: Mutex::new(
+            info.commands
+                .clone()
+                .map(|xs| xs.into_iter().map(Into::into).collect()),
+        ),
         ordered,
     });
     shared

@@ -1,5 +1,4 @@
-use super::{SessionInfo, WireCliStatus, WireError};
-use crossagents_core::TurnOutcome;
+use super::{SessionInfo, WireCliStatus, WireError, WireTurnOutcome};
 use serde::{Deserialize, Serialize};
 
 /// What a call answered.
@@ -13,9 +12,9 @@ pub enum WireReply {
     /// `adopt` found no process to take over.
     NoSession,
     /// A turn ended.
-    Turn { outcome: TurnOutcome },
+    Turn { outcome: WireTurnOutcome },
     /// `adopted_turn`: the turn the previous hub started, when there was one.
-    MaybeTurn { outcome: Option<TurnOutcome> },
+    MaybeTurn { outcome: Option<WireTurnOutcome> },
     /// `cli_status`: what the driver says, when it says anything.
     CliStatus { status: Option<WireCliStatus> },
 }
