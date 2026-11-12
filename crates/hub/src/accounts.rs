@@ -100,6 +100,10 @@ pub struct Accounts {
     /// login that fell away without holding `Accounts`. A paused account is excluded from
     /// routing and only a person re-arms it (docs/ACCOUNT-RISK.md 「风控熔断」).
     risk: Arc<RiskRecords>,
+    /// Accounts a session may not start on until a person confirms the exit country change:
+    /// why, for the GUI. Set where the country change is refused, cleared when it is approved
+    /// or when a later exit passes without one (docs/ACCOUNT-RISK.md「出口指纹」).
+    egress_blocks: std::sync::Mutex<HashMap<String, String>>,
 }
 
 #[derive(Default)]
@@ -244,11 +248,17 @@ impl Accounts {
                     .as_ref()
                     .is_none_or(|i| i.status != crossagents_core::HumanItemStatus::Open)
                 {
-                    let item = fingerprint_item(agent_id, text, true);
+                    let item = fingerprint_item(agent_id, text.clone(), true);
                     if self.store().put_human_item(&item).await.is_ok() {
                         let _ = self.bus.publish(EventKind::HumanAsked { item }).await;
                     }
                 }
+                // Kept for the GUI, which shows that this account is held rather than
+                // parsing the notice text: the question carries no account id.
+                self.egress_blocks
+                    .lock()
+                    .unwrap()
+                    .insert(account.clone(), text.clone());
                 return Err(CoreError::Agent(
                     "出口国家已变化，请先在通知中确认，再重试启动".into(),
                 ));
@@ -276,6 +286,8 @@ impl Accounts {
             }
         }
         let _ = self.store().insert_egress_record(&record).await;
+        // A passing start means there is no pending country change to hold it for any more.
+        self.egress_blocks.lock().unwrap().remove(account);
         Ok(())
     }
 
@@ -306,6 +318,7 @@ impl Accounts {
             fingerprint_lock: Mutex::new(()),
             fingerprint_proxy: std::sync::Mutex::default(),
             risk: Arc::default(),
+            egress_blocks: std::sync::Mutex::default(),
         }
     }
 
@@ -545,6 +558,7 @@ impl Accounts {
     pub async fn remove(&self, id: &str) -> Result<(), CoreError> {
         self.store().delete_account(id).await?;
         self.statuses.lock().unwrap().remove(id);
+        self.egress_blocks.lock().unwrap().remove(id);
         if let Some(mut login) = self.logins.lock().await.remove(id) {
             login.kill();
         }
@@ -773,6 +787,12 @@ impl Accounts {
             .unwrap()
             .get(id)
             .is_some_and(crossagents_core::Health::is_paused)
+    }
+
+    /// Why a session on the account is held until a person confirms the exit country
+    /// change, if one is pending: the reason the GUI shows.
+    pub fn egress_block(&self, id: &str) -> Option<String> {
+        self.egress_blocks.lock().unwrap().get(id).cloned()
     }
 
     /// Records one risk signal for the account and pauses it when
@@ -3053,6 +3073,12 @@ mod egress_tests {
                 .await
                 .is_err()
         );
+        // What the person sees on the card: held, and why. The hub says it, not the notice.
+        let block = accounts
+            .egress_block("test")
+            .expect("the block is recorded");
+        assert!(block.contains("US"), "{block}");
+        assert!(block.contains("GB"), "{block}");
         let mut question = accounts
             .store()
             .list_human_items(false)
@@ -3068,6 +3094,8 @@ mod egress_tests {
             .apply_fingerprint(agent, observed(Some("192.0.2.2"), Some("GB")))
             .await
             .unwrap();
+        // Approved: the next start goes through, so the card stops saying it is held.
+        assert_eq!(accounts.egress_block("test"), None);
         assert_eq!(
             accounts
                 .store()

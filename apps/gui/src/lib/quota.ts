@@ -1,7 +1,9 @@
 // Subscription quota as people read it: window names, reset times, warning levels. Pure and
 // vendor-neutral (any provider's AccountStatus), tested in quota.test.ts.
 
+import type { EgressFingerprint } from "@bindings/EgressFingerprint";
 import type { RateWindow } from "@bindings/RateWindow";
+import { when } from "./time.ts";
 
 const HOUR = 3600;
 const DAY = 24 * HOUR;
@@ -72,4 +74,45 @@ export function tightest<T extends { windows: RateWindow[] }>(accounts: T[]): { 
     }
   }
   return best;
+}
+
+/** How a session reached the vendor the last time the hub looked. */
+export type EgressRoute = "proxy" | "direct" | "unknown";
+
+/** The exit line under an account, in the words a person reads (docs/ACCOUNT-RISK.md「出口指纹」). */
+export type Egress = {
+  /** Whether the hub has ever confirmed an exit for this account. */
+  known: boolean;
+  ip: string;
+  country: string;
+  asn: string;
+  route: EgressRoute;
+  /** "经代理" / "直连" / "无法确认". */
+  routeLabel: string;
+  /** When the exit last changed, as the GUI reads times ("3 小时前", "11:02"). */
+  changed?: string;
+};
+
+const ROUTE_LABEL: Record<EgressRoute, string> = {
+  proxy: "经代理",
+  direct: "直连",
+  unknown: "无法确认",
+};
+
+/**
+ * The exit line's values. A value the hub could not establish reads "未知" rather than
+ * being left out: a failed lookup and an old good record are different things, and the
+ * second is what the GUI shows until the next start can confirm the exit.
+ */
+export function egressOf(fingerprint: EgressFingerprint | undefined, now = Date.now()): Egress {
+  const route: EgressRoute = fingerprint?.via_proxy === true ? "proxy" : fingerprint?.via_proxy === false ? "direct" : "unknown";
+  return {
+    known: !!fingerprint,
+    ip: fingerprint?.ip ?? "IP 未知",
+    country: fingerprint?.country ?? "国家未知",
+    asn: fingerprint?.asn ?? "ASN 未知",
+    route,
+    routeLabel: ROUTE_LABEL[route],
+    changed: fingerprint?.changed_at ? when(fingerprint.changed_at, new Date(now)) : undefined,
+  };
 }

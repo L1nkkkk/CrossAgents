@@ -14,7 +14,14 @@ import { plugins } from "./Agents.mock";
 const HOUR = 3600;
 const inMinutes = (m: number) => new Date(Date.now() + m * 60_000).toISOString();
 
-function account(id: string, provider: string, label: string, status: Partial<AccountQuota["status"]>, agents: string[]): AccountQuota {
+function account(
+  id: string,
+  provider: string,
+  label: string,
+  status: Partial<AccountQuota["status"]>,
+  agents: string[],
+  risk: Pick<AccountQuota, "egress" | "at_risk" | "egress_block"> = {},
+): AccountQuota {
   return {
     account: { id, provider, label, codebuddy_site: null, home: `C:/Users/me/.crossagents/accounts/${id}`, created_at: ago(60 * 24 * 20) },
     status: {
@@ -35,6 +42,7 @@ function account(id: string, provider: string, label: string, status: Partial<Ac
     },
     models: [],
     agents,
+    ...risk,
   };
 }
 
@@ -59,6 +67,8 @@ export function quota(): QuotaResponse {
           ],
         },
         ["ada", "mia", "sam"],
+        // A plain proxied exit, last changed a few hours ago.
+        { egress: { ip: "203.0.113.9", asn: "AS13335", country: "US", via_proxy: true, changed_at: ago(3 * 60) } },
       ),
       // A second Claude login with no quota figures yet: model menus then group by login.
       account("claude-pro", "claude", "本机 Claude 登录", { plan: "pro", note: "no plan limits (API key or another provider)" }, []),
@@ -77,6 +87,7 @@ export function quota(): QuotaResponse {
           note: "每周限额已用完，正在用额外额度",
         },
         ["rex"],
+        { egress: { ip: "198.51.100.24", asn: "AS64500", country: "US", via_proxy: true, changed_at: ago(26 * 60) } },
       ),
       // Billed in credits: one pool per credit group, each with what is left.
       {
@@ -93,6 +104,8 @@ export function quota(): QuotaResponse {
             ],
           },
           ["iris"],
+          // allow_direct may fall back to a direct connection, so the route is unconfirmed.
+          { egress: { ip: "192.0.2.44", asn: "AS45090", country: "CN", via_proxy: null, changed_at: ago(9 * 60) } },
         ),
         models: [
           { id: "glm-5.3", name: "GLM-5.3", description: null, context_window: null, credit_multiplier: 0.69 },
@@ -171,6 +184,21 @@ export function accountUsage(): AccountUsageResponse {
 export function usageScene(usageSeriesVariant: "normal" | "empty" | "issues" | "session" = "normal"): MockState {
   const { ada, rex, mia, sam } = team();
   return { ...emptyState(), agents: [ada, rex, mia, sam], plugins: plugins(), quota: quota(), usage: usage(), accountUsage: accountUsage(), usageSeriesVariant };
+}
+
+/**
+ * The accounts a person has to act on (views/Quota.tsx): an exit whose country changed and is
+ * held until someone confirms it, and an account the risk breaker paused. Both carry the hub's
+ * own reason — the GUI shows it and does not write its own (docs/ACCOUNT-RISK.md「GUI 显示」).
+ */
+export function accountsRiskScene(): MockState {
+  const state = usageScene();
+  const codex = state.quota.accounts.find((a) => a.account.id === "codex-plus")!;
+  codex.egress = { ip: "203.0.113.77", asn: "AS64500", country: "GB", via_proxy: true, changed_at: ago(8) };
+  codex.egress_block = "账号 codex-plus 的出口国家从 US 变为 GB（IP 203.0.113.77）。确认后重试启动。";
+  const cursor = state.quota.accounts.find((a) => a.account.id === "cursor-work")!;
+  cursor.at_risk = "2 risk signals within 7 days (latest: an identity check (KYC / captcha / human verification)); the account is paused until a person re-arms it";
+  return state;
 }
 
 /** Fixture for the series endpoint, with range and source filtering. */
