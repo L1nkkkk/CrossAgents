@@ -81,37 +81,75 @@ export function useWidths(sidebar: boolean) {
 }
 
 /**
+ * Dragging a panel past its minimum, to under `below` pixels, closes it on release, as in
+ * VS Code: `close` runs and the panel keeps the size it had before the drag for next time.
+ * While the release would close it, `hint` is a class on the body, for the panel to fade.
+ */
+export type Collapse = { below: number; close: () => void; hint: string };
+
+/** Collapse thresholds: well under each minimum, so a drag to the minimum never closes. */
+export const COLLAPSE = { sidebar: 120, tools: 160, bottom: 60 };
+
+/**
  * Starts dragging a column edge: `apply` gets the column's new width. `from` is the edge's
  * side of the column, so moving right widens a sidebar ("right") and narrows a tool column
  * ("left").
  */
-export function dragEdge(e: ReactPointerEvent, width: number, from: "left" | "right", apply: (w: number) => void) {
+export function dragEdge(e: ReactPointerEvent, width: number, from: "left" | "right", apply: (w: number) => void, collapse?: Collapse) {
   if (e.button !== 0) return;
   e.preventDefault();
   const x0 = e.clientX;
+  let doomed = false;
   document.body.classList.add("col-resizing");
-  const move = (ev: PointerEvent) => apply(width + (from === "right" ? ev.clientX - x0 : x0 - ev.clientX));
+  const move = (ev: PointerEvent) => {
+    const raw = width + (from === "right" ? ev.clientX - x0 : x0 - ev.clientX);
+    doomed = mark(collapse, raw);
+    apply(raw);
+  };
   const up = () => {
     document.body.classList.remove("col-resizing");
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
+    finish(collapse, doomed, () => apply(width));
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
 }
 
 /** Starts dragging the bottom dock's top edge: moving up makes it taller. */
-export function dragBottom(e: ReactPointerEvent, height: number) {
+export function dragBottom(e: ReactPointerEvent, height: number, collapse?: Collapse) {
   if (e.button !== 0) return;
   e.preventDefault();
   const y0 = e.clientY;
+  let doomed = false;
   document.body.classList.add("row-resizing");
-  const move = (ev: PointerEvent) => setBottomHeight(height + y0 - ev.clientY);
+  const move = (ev: PointerEvent) => {
+    const raw = height + y0 - ev.clientY;
+    doomed = mark(collapse, raw);
+    setBottomHeight(raw);
+  };
   const up = () => {
     document.body.classList.remove("row-resizing");
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
+    finish(collapse, doomed, () => setBottomHeight(height));
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
+}
+
+/** Whether a release at `raw` would close the panel; shows the hint while it would. */
+function mark(collapse: Collapse | undefined, raw: number) {
+  if (!collapse) return false;
+  const doomed = raw < collapse.below;
+  document.body.classList.toggle(collapse.hint, doomed);
+  return doomed;
+}
+
+function finish(collapse: Collapse | undefined, doomed: boolean, restore: () => void) {
+  if (!collapse) return;
+  document.body.classList.remove(collapse.hint);
+  if (!doomed) return;
+  restore();
+  collapse.close();
 }
