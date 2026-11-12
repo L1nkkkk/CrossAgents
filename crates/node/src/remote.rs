@@ -24,8 +24,8 @@ use crossagents_core::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::{
-    Op, RegisterInfo, SessionInfo, ToHub, ToNode, WireError, WirePrompt, WireReply, WireResult,
-    WireSpec, decode, encode,
+    Op, PROTOCOL_V1, ProtocolMismatch, RegisterInfo, SessionInfo, ToHub, ToNode, WireError,
+    WirePrompt, WireReply, WireResult, WireSpec, decode, encode, negotiate_protocol,
 };
 use crate::transport::{Transport, TransportError};
 
@@ -145,7 +145,7 @@ struct HubShared {
     unrouted: Mutex<HashMap<String, Vec<SessionEvent>>>,
     last_seq: AtomicU64,
     next_id: AtomicU64,
-    register: Mutex<Option<RegisterInfo>>,
+    register: Mutex<Option<Result<RegisterInfo, ProtocolMismatch>>>,
 }
 
 impl HubShared {
@@ -354,27 +354,36 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
     match frame {
         ToHub::Register {
             epoch,
+            protocol,
+            capabilities,
             node_version,
             os,
             hostname,
             plugins,
         } => {
             let mut register = shared.register.lock().expect("register lock poisoned");
+            if let Err(mismatch) = negotiate_protocol(PROTOCOL_V1, protocol) {
+                *register = Some(Err(mismatch));
+                return;
+            }
             // A restarted node numbers its frames from 1 again; without this the hub would
             // take every one of them for a replay and drop it.
             let restarted = register
                 .as_ref()
+                .and_then(|previous| previous.as_ref().ok())
                 .is_some_and(|previous| previous.epoch != epoch);
             if restarted {
                 shared.last_seq.store(0, Ordering::SeqCst);
             }
-            *register = Some(RegisterInfo {
+            *register = Some(Ok(RegisterInfo {
                 epoch,
+                protocol,
+                capabilities,
                 node_version,
                 os,
                 hostname,
                 plugins,
-            });
+            }));
         }
         ToHub::Event {
             seq,
@@ -501,6 +510,17 @@ impl RemoteNode {
             .lock()
             .expect("register lock poisoned")
             .clone()
+            .and_then(Result::ok)
+    }
+
+    /// The most recent protocol mismatch, if registration was rejected.
+    pub fn protocol_mismatch(&self) -> Option<ProtocolMismatch> {
+        self.shared
+            .register
+            .lock()
+            .expect("register lock poisoned")
+            .as_ref()
+            .and_then(|result| result.as_ref().err().copied())
     }
 }
 

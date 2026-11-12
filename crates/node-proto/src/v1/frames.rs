@@ -4,6 +4,35 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+pub const PROTOCOL_V1: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+pub const CAPABILITY_TERMINAL: &str = "terminal";
+pub const CAPABILITY_ATTACHMENTS: &str = "attachments";
+pub const CAPABILITY_INSTALL_CLI: &str = "install_cli";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolMismatch {
+    NodeTooOld,
+    NodeTooNew,
+}
+
+/// Minor versions and capabilities never prevent registration.
+pub fn negotiate_protocol(
+    hub: ProtocolVersion,
+    node: ProtocolVersion,
+) -> Result<(), ProtocolMismatch> {
+    match node.major.cmp(&hub.major) {
+        std::cmp::Ordering::Less => Err(ProtocolMismatch::NodeTooOld),
+        std::cmp::Ordering::Greater => Err(ProtocolMismatch::NodeTooNew),
+        std::cmp::Ordering::Equal => Ok(()),
+    }
+}
+
 /// Sent by the hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -30,6 +59,8 @@ pub enum ToHub {
         /// Which run of the node this is; a new one means `seq` starts over.
         #[serde(default)]
         epoch: String,
+        protocol: ProtocolVersion,
+        capabilities: Vec<String>,
         node_version: String,
         os: String,
         hostname: String,
@@ -99,6 +130,8 @@ pub struct PluginSnapshot {
 pub struct RegisterInfo {
     /// This run of the node. A restart makes a new one, so the hub knows `seq` starts over.
     pub epoch: String,
+    pub protocol: ProtocolVersion,
+    pub capabilities: Vec<String>,
     pub node_version: String,
     pub os: String,
     pub hostname: String,
@@ -106,10 +139,17 @@ pub struct RegisterInfo {
 }
 
 impl RegisterInfo {
+    pub fn contains(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|item| item == capability)
+    }
+
     /// This process's answer: this run's epoch, the crate version and the machine's name.
     pub fn local() -> Self {
         Self {
             epoch: new_epoch(),
+            protocol: PROTOCOL_V1,
+            // Capabilities are advertised only when the node implements them.
+            capabilities: Vec::new(),
             node_version: env!("CARGO_PKG_VERSION").to_owned(),
             os: std::env::consts::OS.to_owned(),
             hostname: std::env::var("COMPUTERNAME")
@@ -146,6 +186,34 @@ pub fn decode<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, serde_json:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_major_alone_decides_compatibility() {
+        assert_eq!(
+            negotiate_protocol(
+                PROTOCOL_V1,
+                ProtocolVersion {
+                    major: 0,
+                    minor: 99
+                }
+            ),
+            Err(ProtocolMismatch::NodeTooOld)
+        );
+        assert_eq!(
+            negotiate_protocol(PROTOCOL_V1, ProtocolVersion { major: 2, minor: 0 }),
+            Err(ProtocolMismatch::NodeTooNew)
+        );
+        assert_eq!(
+            negotiate_protocol(
+                PROTOCOL_V1,
+                ProtocolVersion {
+                    major: 1,
+                    minor: 99
+                }
+            ),
+            Ok(())
+        );
+    }
     use crate::v1::{WireReply, WireSpec};
     use crossagents_core::{
         Agent, OutputStream, PermissionPolicy, SessionEvent, StopReason, TurnOutcome,
@@ -313,6 +381,8 @@ mod tests {
     fn register_carries_the_epoch() {
         let frame = ToHub::Register {
             epoch: "run-1".into(),
+            protocol: PROTOCOL_V1,
+            capabilities: vec!["future-capability".into()],
             node_version: "0.2.20".into(),
             os: "linux".into(),
             hostname: "box".into(),

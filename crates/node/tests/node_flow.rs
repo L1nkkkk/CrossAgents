@@ -225,6 +225,64 @@ fn serve(
     (hub, node, service)
 }
 
+#[tokio::test]
+async fn registration_negotiates_protocol_and_preserves_unknown_capabilities() {
+    use crossagents_node::protocol::{
+        PROTOCOL_V1, ProtocolMismatch, ProtocolVersion, RegisterInfo,
+    };
+
+    async fn register(info: RegisterInfo) -> (Arc<RemoteNode>, tokio::task::JoinHandle<()>) {
+        let driver: Arc<dyn Driver> = ScriptedDriver::new("scripted", Duration::from_millis(40));
+        let source: Arc<dyn DriverSource> = Arc::new(SingleDriverSource {
+            plugin: "scripted".into(),
+            driver,
+        });
+        let (hub, node) = memory_pair();
+        let service = tokio::spawn(
+            NodeService::new(source)
+                .with_register(info)
+                .run(Arc::new(node)),
+        );
+        let remote = Arc::new(RemoteNode::new(Arc::new(hub)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while remote.register().is_none() && remote.protocol_mismatch().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("registration arrives");
+        (remote, service)
+    }
+
+    let mut info = RegisterInfo::local();
+    info.protocol = ProtocolVersion {
+        minor: 99,
+        ..PROTOCOL_V1
+    };
+    info.capabilities = vec!["future-capability".into()];
+    for version in ["0.999.0", "999.0.0"] {
+        info.node_version = version.into();
+        let (remote, service) = register(info.clone()).await;
+        let accepted = remote
+            .register()
+            .expect("app version does not block registration");
+        assert_eq!(accepted, info);
+        assert!(accepted.contains("future-capability"));
+        assert!(!accepted.contains("terminal"));
+        assert_eq!(remote.protocol_mismatch(), None);
+        service.abort();
+    }
+
+    info.protocol.major = 2;
+    let (remote, service) = register(info).await;
+    assert!(remote.register().is_none());
+    assert_eq!(
+        remote.protocol_mismatch(),
+        Some(ProtocolMismatch::NodeTooNew)
+    );
+    service.abort();
+}
+
 fn harness_for(driver: Arc<ScriptedDriver>) -> Harness {
     let driver: Arc<dyn Driver> = driver;
     let source: Arc<dyn DriverSource> = Arc::new(SingleDriverSource {

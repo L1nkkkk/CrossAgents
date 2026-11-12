@@ -108,6 +108,8 @@ impl NodeService {
                     // Register first, then everything the hub may have missed.
                     let register = ToHub::Register {
                         epoch: self.register.epoch.clone(),
+                        protocol: self.register.protocol,
+                        capabilities: self.register.capabilities.clone(),
                         node_version: self.register.node_version.clone(),
                         os: self.register.os.clone(),
                         hostname: self.register.hostname.clone(),
