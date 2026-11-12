@@ -471,6 +471,9 @@ impl McpSection {
 #[derive(Debug, Default, Deserialize)]
 struct AccountsSection {
     codex_usage_url: Option<String>,
+    egress_echo_url: Option<String>,
+    egress_history_days: Option<u32>,
+    egress_block_country_change: Option<bool>,
     /// Register the vendors' own logins (e.g. `~/.codex`) as accounts at startup.
     detect: Option<bool>,
     /// Egress policy for accounts that do not name one, in place of the provider default
@@ -537,6 +540,9 @@ pub struct HubConfig {
     /// `[accounts.egress_by_account]`: overrides by account id, which win over the
     /// provider table.
     pub egress_by_account: BTreeMap<String, EgressPolicy>,
+    pub egress_echo_url: Option<String>,
+    pub egress_history_days: u32,
+    pub egress_block_country_change: bool,
     /// Command that runs a runtime host (`<this executable> runtime-host`): Codex and Claude
     /// Code then run in hosts that outlive the hub, and the next hub takes them over. `None`
     /// starts them as direct children (they end with the hub). Off in [`HubConfig::new`].
@@ -573,6 +579,9 @@ impl HubConfig {
             egress_default: None,
             egress_by_provider: BTreeMap::new(),
             egress_by_account: BTreeMap::new(),
+            egress_echo_url: None,
+            egress_history_days: 0,
+            egress_block_country_change: true,
             runtime_host: None,
             event_log: false,
             build_cache_limit: crossagents_orchestrator::DEFAULT_BUILD_CACHE_LIMIT,
@@ -630,6 +639,12 @@ impl HubConfig {
             egress_default: config.accounts.egress_default,
             egress_by_provider: config.accounts.egress_by_provider,
             egress_by_account: config.accounts.egress_by_account,
+            egress_echo_url: config.accounts.egress_echo_url,
+            egress_history_days: config.accounts.egress_history_days.unwrap_or(0),
+            egress_block_country_change: config
+                .accounts
+                .egress_block_country_change
+                .unwrap_or(true),
             runtime_host,
             event_log: config.hub.event_log.unwrap_or(true),
             build_cache_limit: config

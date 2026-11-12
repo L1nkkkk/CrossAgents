@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use crossagents_api_types::{
-    AccountUsageGroup, AccountUsageResponse, AccountUsageRow, CreateAccountRequest, LoginStarted,
-    UsageSeriesGroup, UsageSeriesResponse,
+    AccountUsageGroup, AccountUsageResponse, AccountUsageRow, CreateAccountRequest,
+    EgressFingerprint, LoginStarted, UsageSeriesGroup, UsageSeriesResponse,
 };
 use crossagents_core::{
     Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, CoreError, DataSource,
@@ -89,9 +89,185 @@ pub struct Accounts {
     creating: Mutex<()>,
     /// `[accounts]` egress overrides; empty unless the hub is given them.
     egress: std::sync::RwLock<EgressSettings>,
+    fingerprint_settings: FingerprintSettings,
+    fingerprint_lock: Mutex<()>,
+    fingerprint_proxy: std::sync::Mutex<HashMap<String, bool>>,
+}
+
+#[derive(Default)]
+struct FingerprintSettings {
+    echo_url: Option<String>,
+    history_days: u32,
+    block_country_change: bool,
 }
 
 impl Accounts {
+    pub fn with_fingerprint(
+        mut self,
+        echo_url: Option<String>,
+        history_days: u32,
+        block_country_change: bool,
+    ) -> Self {
+        self.fingerprint_settings = FingerprintSettings {
+            echo_url,
+            history_days,
+            block_country_change,
+        };
+        self
+    }
+
+    /// The latest observation, without assuming an unknown proxy state survived a restart.
+    pub async fn fingerprint(&self, account: &str) -> Option<EgressFingerprint> {
+        let rows = self.store().list_egress_records(account).await.ok()?;
+        let latest = rows.last()?;
+        let changed_at = rows
+            .iter()
+            .rev()
+            .take_while(|r| r.egress_ip == latest.egress_ip)
+            .last()
+            .map(|r| r.at);
+        Some(EgressFingerprint {
+            ip: latest.egress_ip.clone(),
+            asn: latest.asn.clone(),
+            country: latest.country.clone(),
+            via_proxy: self.fingerprint_proxy.lock().unwrap().get(account).copied(),
+            changed_at,
+        })
+    }
+
+    /// Called after account and project environments are merged, before starting a session.
+    pub async fn check_fingerprint(
+        &self,
+        agent: &Agent,
+        env: &[(String, String)],
+    ) -> Result<(), CoreError> {
+        let Some(account) = self.account_for(agent).await else {
+            return Ok(());
+        };
+        let proxy = crossagents_drivers::process::effective_proxy_url(env);
+        // A direct fallback or NO_PROXY can make the configured proxy differ from the
+        // vendor's route. Do not present an unrelated echo as the session's exit.
+        let no_proxy = env
+            .iter()
+            .any(|(key, value)| key.eq_ignore_ascii_case("NO_PROXY") && !value.is_empty())
+            || ["NO_PROXY", "no_proxy"]
+                .iter()
+                .any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()));
+        let certain_proxy = EgressPolicy::from_env(env)
+            .unwrap_or_else(|| EgressPolicy::default_for_provider(&agent.plugin))
+            == EgressPolicy::ProxyOnly
+            && !no_proxy;
+        let _guard = self.fingerprint_lock.lock().await;
+        {
+            let mut states = self.fingerprint_proxy.lock().unwrap();
+            if proxy.is_none() {
+                states.insert(account.clone(), false);
+            } else if certain_proxy {
+                states.insert(account.clone(), true);
+            } else {
+                states.remove(&account);
+            }
+        }
+        let (ip, asn, country) = match (
+            &self.fingerprint_settings.echo_url,
+            proxy.as_deref().filter(|_| certain_proxy),
+        ) {
+            (Some(url), Some(proxy)) => lookup_fingerprint(url, proxy).await.unwrap_or_default(),
+            _ => Default::default(),
+        };
+        let record = crossagents_core::EgressRecord {
+            account: account.clone(),
+            egress_ip: ip,
+            asn,
+            country,
+            at: Utc::now(),
+        };
+        self.apply_fingerprint(agent.id, record).await
+    }
+
+    async fn apply_fingerprint(
+        &self,
+        agent_id: AgentId,
+        mut record: crossagents_core::EgressRecord,
+    ) -> Result<(), CoreError> {
+        if record.asn.is_none() {
+            record.country = None;
+        }
+        let account = &record.account;
+        let history = self
+            .store()
+            .list_egress_records(&account)
+            .await
+            .unwrap_or_default();
+        let previous_country_record = history.iter().rev().find(|r| r.country.is_some());
+        let previous_country = previous_country_record.and_then(|r| r.country.as_deref());
+        let country_changed = record.asn.is_some()
+            && previous_country
+                .zip(record.country.as_deref())
+                .is_some_and(|(a, b)| a != b);
+        if country_changed && self.fingerprint_settings.block_country_change {
+            let text = format!(
+                "账号 {account} 的出口国家从 {} 变为 {}（IP {}）。确认后重试启动。",
+                previous_country.unwrap(),
+                record.country.as_deref().unwrap(),
+                record.egress_ip.as_deref().unwrap_or("unknown")
+            );
+            let existing = self
+                .store()
+                .list_human_items(false)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .rev()
+                .find(|i| {
+                    i.text == text
+                        && i.kind == crossagents_core::HumanItemKind::Question
+                        && previous_country_record.is_some_and(|r| i.created_at > r.at)
+                });
+            let approved = existing.as_ref().is_some_and(|i| {
+                i.status == crossagents_core::HumanItemStatus::Answered
+                    && i.answer.as_deref() == Some("允许")
+            });
+            if !approved {
+                if existing
+                    .as_ref()
+                    .is_none_or(|i| i.status != crossagents_core::HumanItemStatus::Open)
+                {
+                    let item = fingerprint_item(agent_id, text, true);
+                    if self.store().put_human_item(&item).await.is_ok() {
+                        let _ = self.bus.publish(EventKind::HumanAsked { item }).await;
+                    }
+                }
+                return Err(CoreError::Agent(
+                    "出口国家已变化，请先在通知中确认，再重试启动".into(),
+                ));
+            }
+        }
+        let cutoff =
+            Utc::now() - chrono::Duration::days(i64::from(self.fingerprint_settings.history_days));
+        let new_ip = record.egress_ip.as_ref().is_some_and(|ip| {
+            !history.iter().any(|r| {
+                r.egress_ip.as_ref() == Some(ip)
+                    && (self.fingerprint_settings.history_days == 0 || r.at >= cutoff)
+            })
+        });
+        if new_ip {
+            let item = fingerprint_item(
+                agent_id,
+                format!(
+                    "账号 {account} 使用了新出口 IP {}。",
+                    record.egress_ip.as_deref().unwrap()
+                ),
+                false,
+            );
+            if self.store().put_human_item(&item).await.is_ok() {
+                let _ = self.bus.publish(EventKind::HumanAsked { item }).await;
+            }
+        }
+        let _ = self.store().insert_egress_record(&record).await;
+        Ok(())
+    }
+
     pub fn new(
         bus: Arc<EventBus>,
         providers: Vec<Arc<dyn AccountProvider>>,
@@ -112,6 +288,12 @@ impl Accounts {
             default_models: Arc::default(),
             creating: Mutex::new(()),
             egress: std::sync::RwLock::default(),
+            fingerprint_settings: FingerprintSettings {
+                block_country_change: true,
+                ..Default::default()
+            },
+            fingerprint_lock: Mutex::new(()),
+            fingerprint_proxy: std::sync::Mutex::default(),
         }
     }
 
@@ -1086,6 +1268,72 @@ fn capitalize(word: &str) -> String {
 fn same_path(a: &Path, b: &Path) -> bool {
     let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canon(a) == canon(b)
+}
+
+async fn lookup_fingerprint(
+    url: &str,
+    proxy: &str,
+) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    let body = crossagents_drivers::process::proxy_echo(url, proxy).await?;
+    if body.len() > 16384 {
+        return None;
+    }
+    let json = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let raw = json
+        .as_ref()
+        .and_then(|v| v.get("ip"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(body.trim());
+    let ip = raw.parse::<std::net::IpAddr>().ok()?.to_string();
+    let asn = json
+        .as_ref()
+        .and_then(|v| v.get("asn"))
+        .and_then(|v| v.as_str())
+        .filter(|v| {
+            let digits = v
+                .strip_prefix("AS")
+                .or_else(|| v.strip_prefix("as"))
+                .unwrap_or(v);
+            !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && digits.parse::<u32>().is_ok()
+        })
+        .map(str::to_owned);
+    let country = json
+        .as_ref()
+        .and_then(|v| v.get("country"))
+        .and_then(|v| v.as_str())
+        .filter(|v| v.len() == 2 && v.bytes().all(|b| b.is_ascii_alphabetic()))
+        .map(str::to_ascii_uppercase);
+    Some((Some(ip), asn, country))
+}
+
+fn fingerprint_item(from: AgentId, text: String, question: bool) -> crossagents_core::HumanItem {
+    crossagents_core::HumanItem {
+        id: format!("egress-{}", uuid::Uuid::new_v4()),
+        kind: if question {
+            crossagents_core::HumanItemKind::Question
+        } else {
+            crossagents_core::HumanItemKind::Notice
+        },
+        from,
+        run_id: None,
+        task_id: None,
+        text,
+        detail: None,
+        options: if question {
+            vec!["允许".into(), "拒绝".into()]
+        } else {
+            Vec::new()
+        },
+        default: None,
+        timeout_at: None,
+        status: crossagents_core::HumanItemStatus::Open,
+        answer: None,
+        answered_at: None,
+        action: None,
+        created_at: Utc::now(),
+    }
 }
 
 pub fn account_of(agent: &Agent) -> Option<String> {
@@ -2272,6 +2520,120 @@ mod health_tests {
 mod egress_tests {
     use super::*;
     use crossagents_store_sqlite::SqliteStore;
+
+    fn observed(ip: Option<&str>, country: Option<&str>) -> crossagents_core::EgressRecord {
+        crossagents_core::EgressRecord {
+            account: "test".into(),
+            egress_ip: ip.map(str::to_owned),
+            asn: ip.map(|_| "AS1".to_owned()),
+            country: country.map(str::to_owned),
+            at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn new_ip_notifies_without_blocking() {
+        let accounts = accounts(None, &[], &[]).await;
+        accounts
+            .apply_fingerprint(AgentId::new(), observed(Some("192.0.2.1"), Some("US")))
+            .await
+            .unwrap();
+        let items = accounts.store().list_human_items(false).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, crossagents_core::HumanItemKind::Notice);
+        assert_eq!(
+            accounts
+                .store()
+                .list_egress_records("test")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_country_waits_for_explicit_confirmation() {
+        let accounts = accounts(None, &[], &[]).await;
+        let agent = AgentId::new();
+        accounts
+            .apply_fingerprint(agent, observed(Some("192.0.2.1"), Some("US")))
+            .await
+            .unwrap();
+        assert!(
+            accounts
+                .apply_fingerprint(agent, observed(Some("192.0.2.2"), Some("GB")))
+                .await
+                .is_err()
+        );
+        let mut question = accounts
+            .store()
+            .list_human_items(false)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|i| i.kind == crossagents_core::HumanItemKind::Question)
+            .unwrap();
+        question.status = crossagents_core::HumanItemStatus::Answered;
+        question.answer = Some("允许".into());
+        accounts.store().put_human_item(&question).await.unwrap();
+        accounts
+            .apply_fingerprint(agent, observed(Some("192.0.2.2"), Some("GB")))
+            .await
+            .unwrap();
+        assert_eq!(
+            accounts
+                .store()
+                .list_egress_records("test")
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .country
+                .as_deref(),
+            Some("GB")
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_fingerprint_does_not_block() {
+        let accounts = accounts(None, &[], &[]).await;
+        accounts
+            .apply_fingerprint(AgentId::new(), observed(None, None))
+            .await
+            .unwrap();
+        assert!(
+            accounts
+                .store()
+                .list_human_items(false)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            lookup_fingerprint("http://example.invalid", "http://127.0.0.1:1").await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_asn_does_not_turn_a_country_lookup_into_a_block_or_baseline() {
+        let accounts = accounts(None, &[], &[]).await;
+        let agent = AgentId::new();
+        accounts
+            .apply_fingerprint(agent, observed(Some("192.0.2.1"), Some("US")))
+            .await
+            .unwrap();
+        let mut incomplete = observed(Some("192.0.2.2"), Some("GB"));
+        incomplete.asn = None;
+        accounts.apply_fingerprint(agent, incomplete).await.unwrap();
+        assert!(
+            accounts
+                .apply_fingerprint(agent, observed(Some("192.0.2.2"), Some("GB")))
+                .await
+                .is_err()
+        );
+    }
 
     fn account(provider: &str, id: &str, egress: Option<EgressPolicy>) -> Account {
         Account {

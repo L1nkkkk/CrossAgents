@@ -2265,6 +2265,39 @@ impl Store for SqliteStore {
         }
         Ok(())
     }
+
+    async fn insert_egress_record(
+        &self,
+        record: &crossagents_core::EgressRecord,
+    ) -> Result<(), CoreError> {
+        sqlx::query("INSERT INTO egress_records (account, egress_ip, asn, country, at) VALUES (?, ?, ?, ?, ?)")
+            .bind(&record.account).bind(&record.egress_ip).bind(&record.asn)
+            .bind(&record.country).bind(record.at.to_rfc3339())
+            .execute(&self.pool).await.map_err(storage)?;
+        Ok(())
+    }
+
+    async fn list_egress_records(
+        &self,
+        account: &str,
+    ) -> Result<Vec<crossagents_core::EgressRecord>, CoreError> {
+        let rows = sqlx::query("SELECT account, egress_ip, asn, country, at FROM egress_records WHERE account = ? ORDER BY julianday(at), rowid")
+            .bind(account).fetch_all(&self.pool).await.map_err(storage)?;
+        rows.into_iter()
+            .map(|row| {
+                let at: String = row.try_get("at").map_err(storage)?;
+                Ok(crossagents_core::EgressRecord {
+                    account: row.try_get("account").map_err(storage)?,
+                    egress_ip: row.try_get("egress_ip").map_err(storage)?,
+                    asn: row.try_get("asn").map_err(storage)?,
+                    country: row.try_get("country").map_err(storage)?,
+                    at: DateTime::parse_from_rfc3339(&at)
+                        .map_err(storage)?
+                        .with_timezone(&Utc),
+                })
+            })
+            .collect()
+    }
 }
 
 fn device_row(row: sqlx::sqlite::SqliteRow) -> Result<crossagents_core::Device, CoreError> {
@@ -2315,6 +2348,35 @@ fn scope_name(scope: NoteScope) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn egress_records_survive_reopening_and_are_account_scoped() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("egress.db");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let record = crossagents_core::EgressRecord {
+            account: "work".into(),
+            egress_ip: Some("192.0.2.1".into()),
+            asn: Some("AS1".into()),
+            country: Some("US".into()),
+            at: Utc::now(),
+        };
+        store.insert_egress_record(&record).await.unwrap();
+        store.close().await;
+        let reopened = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(
+            reopened.list_egress_records("work").await.unwrap(),
+            vec![record]
+        );
+        assert!(
+            reopened
+                .list_egress_records("other")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn unavailable_model_survives_reopening() {
         use super::*;

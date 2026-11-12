@@ -174,6 +174,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             config.egress_default,
             config.egress_by_provider.clone(),
             config.egress_by_account.clone(),
+        )
+        .with_fingerprint(
+            config.egress_echo_url.clone(),
+            config.egress_history_days,
+            config.egress_block_country_change,
         ),
     );
     accounts.watch();

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::account::Account;
+use crate::account::{Account, EgressRecord};
 use crate::claim::AgentClaim;
 use crate::error::CoreError;
 use crate::event::{Event, EventKind};
@@ -302,6 +302,18 @@ pub trait Store: Send + Sync {
     async fn get_account(&self, id: &str) -> Result<Account, CoreError>;
     async fn list_accounts(&self) -> Result<Vec<Account>, CoreError>;
     async fn delete_account(&self, id: &str) -> Result<(), CoreError>;
+
+    /// Records an observation. By default no fingerprint records are stored.
+    async fn insert_egress_record(&self, record: &EgressRecord) -> Result<(), CoreError> {
+        let _ = record;
+        Ok(())
+    }
+
+    /// Returns observations in chronological order. The default has no fingerprint records.
+    async fn list_egress_records(&self, account: &str) -> Result<Vec<EgressRecord>, CoreError> {
+        let _ = account;
+        Ok(Vec::new())
+    }
 
     async fn insert_reminder(&self, reminder: &Reminder) -> Result<(), CoreError> {
         let _ = reminder;

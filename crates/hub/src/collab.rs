@@ -107,10 +107,11 @@ impl CollabSetup {
     /// worktree; the account's wins (docs/tasks/TOOLCHAIN.md §3.2).
     async fn agent_env(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
         let account = self.accounts.agent_env(agent).await?;
-        Ok(with_project_env(
+        let env = with_project_env(
             account,
             worktree_env(&self.worktrees, &agent.cwd, self.shims.as_deref()),
-        ))
+        );
+        Ok(env)
     }
 }
 
@@ -156,6 +157,16 @@ impl SessionSetup for CollabSetup {
         // before.
         crate::version_gate::check(agent, &self.plugins).await?;
         let agent_env = self.agent_env(agent).await?;
+        // Use the driver's existing proxy-only refusal for sessions that have no proxy,
+        // including drivers which do not otherwise run the vendor reachability probe.
+        if crossagents_drivers::process::effective_proxy_url(&agent_env).is_none() {
+            let policy =
+                crossagents_core::EgressPolicy::from_env(&agent_env).unwrap_or_else(|| {
+                    crossagents_core::EgressPolicy::default_for_provider(&agent.plugin)
+                });
+            crossagents_drivers::process::check_proxy(&agent_env, None, policy).await?;
+        }
+        self.accounts.check_fingerprint(agent, &agent_env).await?;
         let (permission, permissions) = self.permissions(agent).await;
         let (lessons, groups) = match self.orchestrator.get() {
             Some(orchestrator) => (

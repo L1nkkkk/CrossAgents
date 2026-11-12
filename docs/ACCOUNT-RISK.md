@@ -9,7 +9,7 @@
 
 ### 取值
 
-- `proxy_only`：只走代理。代理本身连不上时直接失败；代理连得上但到目标 host 的路由
+- `proxy_only`：必须配置并使用代理；没有配置代理时直接失败。代理本身连不上时直接失败；代理连得上但到目标 host 的路由
   是死的，也直接失败，**不**尝试直连、**不**缓存直连结果、**不**给 CLI 发 `NO_PROXY`
   豁免。失败信息会写明是哪个 host、并要求修好代理节点，或把该账号改成 `allow_direct`。
 - `allow_direct`：保持改动前的行为。代理到目标 host 不通而直连能通时，为这次启动豁免
@@ -32,6 +32,8 @@ JSON 里的 `egress` > 按 provider 的覆盖 > `egress_default` > provider 默�
 - `[accounts.egress_by_account]` — 按账号 id 覆盖，例如
   `claude-work = "allow_direct"`。
 
+使用自定义 `ANTHROPIC_BASE_URL` 连接国内中转网关的 claude 账号也继承 `proxy_only`；若该网关直连不会额外暴露账号，可在 `[accounts.egress_by_account]` 将该账号设为 `allow_direct`。
+
 另外，Windows 的系统代理现在每 45 秒最多读一次注册表（原来整个 hub 生命周期只读一次），
 在系统里换节点后不必重启 hub。`CROSSAGENTS_EGRESS_POLICY` 这个变量由 hub 自己设置：项目
 `crossagents.toml` 的 `[run] env` 里写同名变量会被忽略，也不会被传给厂家的 CLI。
@@ -50,7 +52,17 @@ JSON 里的 `egress` > 按 provider 的覆盖 > `egress_default` > provider 默�
 
 ## 出口指纹
 
-（待填）
+会话启动前，用合并后的账号和项目环境选出实际代理，通过它访问用户配置的 echo 端点；不会使用内置第三方服务。端点返回纯文本 IP，或 JSON `{"ip":"...","asn":"AS...","country":"US"}`；ASN 和国家可缺省。当前支持 HTTP 端点和不带认证的 HTTP 代理，其他情况及超时、无效响应均视为 unknown，不拦启动。未配置端点时 IP 也为 unknown。
+
+`allow_direct` 可能回退直连，`NO_PROXY` 也可能让目标绕过代理；在这些情况下无法确认代理出口是会话出口，指纹记为 unknown。
+
+每次观察仅保存账号、IP、ASN、国家和时间。新 IP 通知但不阻断；已知国家发生变化时默认先询问，选择「允许」后重试启动。unknown 不触发国家变化判定；未配置代理时仍按 `proxy_only` 拒绝启动。
+
+ASN 缺失时国家也按 unknown 处理，避免不完整的采集结果阻断启动或覆盖上次已知国家。
+
+- `[accounts] egress_echo_url`：自选 HTTP echo 地址，不配置则不请求任何端点。
+- `[accounts] egress_history_days`：判定新 IP 时检查的历史天数，默认 `0` 表示全部历史。
+- `[accounts] egress_block_country_change`：已知国家变化是否要求确认，默认 `true`。
 
 ## 风控熔断
 

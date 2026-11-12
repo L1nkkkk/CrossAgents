@@ -3342,11 +3342,13 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<QuotaRespon
         async move {
             let status = state.accounts.status(&account.id).await?;
             let models = state.accounts.models(&account.id).await?;
+            let egress = state.accounts.fingerprint(&account.id).await;
             Ok::<_, CoreError>(AccountQuota {
                 account,
                 status,
                 models,
                 agents: users,
+                egress,
             })
         }
     }))
