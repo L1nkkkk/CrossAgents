@@ -14,7 +14,7 @@
 //!   [`crossagents_core::DriverSession`] over that connection: [`remote::RemoteDriver`] and
 //!   [`remote::RemoteSession`].
 
-pub mod protocol;
+pub use crossagents_node_proto as protocol;
 pub mod remote;
 pub mod service;
 pub mod transport;

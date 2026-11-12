@@ -1,0 +1,1 @@
+{"t":"event","seq":39,"session":"h-1","event":{"kind":{"t":"exited","message":"agent process crashed (exit code 1)","cause":"crashed","code":1},"raw":null}}

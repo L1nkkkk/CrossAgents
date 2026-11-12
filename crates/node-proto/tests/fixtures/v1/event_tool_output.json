@@ -1,0 +1,1 @@
+{"t":"event","seq":26,"session":"h-1","event":{"kind":{"t":"tool_output","tool_call_id":"tool-1","text":"test result: ok. 42 passed"},"raw":null}}

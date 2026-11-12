@@ -108,6 +108,8 @@ impl NodeService {
                     // Register first, then everything the hub may have missed.
                     let register = ToHub::Register {
                         epoch: self.register.epoch.clone(),
+                        protocol: self.register.protocol,
+                        capabilities: self.register.capabilities.clone(),
                         node_version: self.register.node_version.clone(),
                         os: self.register.os.clone(),
                         hostname: self.register.hostname.clone(),
@@ -229,8 +231,10 @@ impl Outgoing {
             } => ToHub::Event {
                 seq,
                 session,
-                event,
-                commands,
+                event: (&event).into(),
+                commands: commands
+                    .as_ref()
+                    .map(|xs| xs.iter().map(Into::into).collect()),
             },
             Self::Return {
                 id,
@@ -241,7 +245,9 @@ impl Outgoing {
                 seq,
                 id,
                 result,
-                commands,
+                commands: commands
+                    .as_ref()
+                    .map(|xs| xs.iter().map(Into::into).collect()),
             },
             Self::Ask {
                 id,
@@ -251,7 +257,7 @@ impl Outgoing {
                 seq,
                 id,
                 session,
-                request,
+                request: (&request).into(),
             },
         }
     }
@@ -303,7 +309,7 @@ fn emit(
             let warning = ToHub::Event {
                 seq: next_seq,
                 session,
-                event: SessionEvent::from(SessionEventKind::Warning { message }),
+                event: (&SessionEvent::from(SessionEventKind::Warning { message })).into(),
                 commands: None,
             };
             next_seq += 1;
@@ -347,7 +353,7 @@ fn on_line(
                 .expect("answers lock poisoned")
                 .remove(&id)
             {
-                let _ = waiter.send(decision);
+                let _ = waiter.send(decision.into());
             }
         }
         ToNode::Ping => write(writer, encode(&ToHub::Pong)),
@@ -399,6 +405,7 @@ type OpResult = Result<
 
 async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) -> OpResult {
     match op {
+        Op::Unknown => Err(CoreError::Unsupported("unknown operation".into())),
         Op::Open {
             plugin,
             driver,
@@ -451,13 +458,25 @@ async fn run_op(source: &Arc<dyn DriverSource>, shared: &Arc<Shared>, op: Op) ->
                 Some(Err(err)) => return Err(err),
                 None => None,
             };
-            Ok((WireReply::MaybeTurn { outcome }, None, Some(state)))
+            Ok((
+                WireReply::MaybeTurn {
+                    outcome: outcome.as_ref().map(Into::into),
+                },
+                None,
+                Some(state),
+            ))
         }
         Op::Prompt { session, prompt } => {
             let state = shared.session(&session)?;
             let outcome = state.session.prompt_with(&prompt.into()).await?;
             let commands = state.changed_commands();
-            Ok((WireReply::Turn { outcome }, commands, Some(state)))
+            Ok((
+                WireReply::Turn {
+                    outcome: (&outcome).into(),
+                },
+                commands,
+                Some(state),
+            ))
         }
         Op::Steer {
             session,
@@ -566,11 +585,21 @@ fn make_spec(
         Arc::new(AskHandler {
             shared: shared.clone(),
             session: handle.to_owned(),
-            policy: wire.permission,
+            policy: wire.permission.into(),
             events: events.clone(),
         }) as Arc<dyn PermissionHandler>
     });
-    (wire.into_spec(events, handler), receiver)
+    let spec = SessionSpec {
+        agent: wire.agent.into(),
+        mcp_servers: wire.mcp_servers.into_iter().map(Into::into).collect(),
+        permission: wire.permission.into(),
+        permissions: if wire.permissions { handler } else { None },
+        command: wire.command,
+        instructions: wire.instructions,
+        env: wire.env,
+        events,
+    };
+    (spec, receiver)
 }
 
 fn finish_open(
@@ -582,15 +611,22 @@ fn finish_open(
     let info = SessionInfo {
         handle: handle.clone(),
         session_id: session.session_id().to_owned(),
-        attachment_support: session.attachment_support(),
+        attachment_support: session.attachment_support().as_ref().map(Into::into),
         outlives_hub: session.outlives_hub(),
-        commands: session.commands(),
+        commands: session
+            .commands()
+            .as_ref()
+            .map(|xs| xs.iter().map(Into::into).collect()),
     };
     let (ordered, returns) = mpsc::unbounded_channel();
     let state = Arc::new(SessionState {
         handle: handle.clone(),
         session,
-        commands: Mutex::new(info.commands.clone()),
+        commands: Mutex::new(
+            info.commands
+                .clone()
+                .map(|xs| xs.into_iter().map(Into::into).collect()),
+        ),
         ordered,
     });
     shared

@@ -24,8 +24,8 @@ use crossagents_core::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::{
-    Op, RegisterInfo, SessionInfo, ToHub, ToNode, WireError, WirePrompt, WireReply, WireResult,
-    WireSpec, decode, encode,
+    Op, PROTOCOL_V1, ProtocolMismatch, RegisterInfo, SessionInfo, ToHub, ToNode, WireError,
+    WirePrompt, WireReply, WireResult, WireSpec, decode, encode, negotiate_protocol,
 };
 use crate::transport::{Transport, TransportError};
 
@@ -139,13 +139,16 @@ struct HubShared {
     link: Arc<dyn HubLink>,
     writer: Mutex<Option<mpsc::UnboundedSender<OutFrame>>>,
     ever_connected: AtomicBool,
+    negotiating: AtomicBool,
     pending: Mutex<HashMap<String, Pending>>,
     sessions: Mutex<HashMap<String, Route>>,
     /// Events for a handle whose `open`/`fork` has not returned yet.
     unrouted: Mutex<HashMap<String, Vec<SessionEvent>>>,
     last_seq: AtomicU64,
     next_id: AtomicU64,
-    register: Mutex<Option<RegisterInfo>>,
+    register: Mutex<Option<Result<RegisterInfo, ProtocolMismatch>>>,
+    /// Kept across rejected registrations so a later restart resets replay tracking.
+    accepted_epoch: Mutex<Option<String>>,
 }
 
 impl HubShared {
@@ -182,14 +185,19 @@ impl HubShared {
         if let Some(writer) = self.writer() {
             return Ok(writer);
         }
-        if self.ever_connected.load(Ordering::SeqCst) {
-            return Err(offline());
+        if self.ever_connected.load(Ordering::SeqCst) && !self.negotiating.load(Ordering::SeqCst) {
+            return self.writer().ok_or_else(offline);
         }
         let deadline = tokio::time::Instant::now() + INITIAL_CONNECT_TIMEOUT;
         loop {
             tokio::time::sleep(RECONNECT_DELAY).await;
             if let Some(writer) = self.writer() {
                 return Ok(writer);
+            }
+            if self.ever_connected.load(Ordering::SeqCst)
+                && !self.negotiating.load(Ordering::SeqCst)
+            {
+                return self.writer().ok_or_else(offline);
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(offline());
@@ -310,19 +318,41 @@ async fn run(shared: Arc<HubShared>) {
     loop {
         match shared.link.connect().await {
             Ok(conn) => {
+                shared.negotiating.store(true, Ordering::SeqCst);
                 let (writer, frames) = mpsc::unbounded_channel();
-                *shared.writer.lock().expect("writer lock poisoned") = Some(writer);
-                shared.ever_connected.store(true, Ordering::SeqCst);
                 tokio::spawn(write_loop(shared.clone(), conn.clone(), frames));
+                // Nothing crosses the link until its first Register is accepted. A rejected
+                // connection stays rejected even if it sends another Register.
+                let mut registered = false;
+                let mut accepted = false;
                 while let Some(line) = conn.recv_line().await {
                     match decode::<ToHub>(&line) {
-                        Ok(frame) => dispatch(&shared, frame),
+                        Ok(frame @ ToHub::Register { .. }) if !registered => {
+                            registered = true;
+                            dispatch(&shared, frame);
+                            accepted = shared
+                                .register
+                                .lock()
+                                .expect("register lock poisoned")
+                                .as_ref()
+                                .is_some_and(Result::is_ok);
+                            if accepted {
+                                *shared.writer.lock().expect("writer lock poisoned") =
+                                    Some(writer.clone());
+                            }
+                            shared.ever_connected.store(true, Ordering::SeqCst);
+                            shared.negotiating.store(false, Ordering::SeqCst);
+                        }
+                        Ok(ToHub::Register { .. }) => {}
+                        Ok(frame) if accepted => dispatch(&shared, frame),
+                        Ok(_) => {}
                         Err(err) => tracing::warn!("hub: unreadable frame: {err}"),
                     }
                 }
                 // The connection is gone; frames that never made it fail their calls, and
                 // calls already written wait for the node's replay after the next connect.
                 *shared.writer.lock().expect("writer lock poisoned") = None;
+                shared.negotiating.store(false, Ordering::SeqCst);
             }
             Err(_) => tokio::time::sleep(RECONNECT_DELAY).await,
         }
@@ -354,27 +384,37 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
     match frame {
         ToHub::Register {
             epoch,
+            protocol,
+            capabilities,
             node_version,
             os,
             hostname,
             plugins,
         } => {
             let mut register = shared.register.lock().expect("register lock poisoned");
+            if let Err(mismatch) = negotiate_protocol(PROTOCOL_V1, protocol) {
+                *register = Some(Err(mismatch));
+                return;
+            }
             // A restarted node numbers its frames from 1 again; without this the hub would
             // take every one of them for a replay and drop it.
-            let restarted = register
+            let mut accepted_epoch = shared.accepted_epoch.lock().expect("epoch lock poisoned");
+            let restarted = accepted_epoch
                 .as_ref()
-                .is_some_and(|previous| previous.epoch != epoch);
+                .is_some_and(|previous| previous != &epoch);
             if restarted {
                 shared.last_seq.store(0, Ordering::SeqCst);
             }
-            *register = Some(RegisterInfo {
+            *accepted_epoch = Some(epoch.clone());
+            *register = Some(Ok(RegisterInfo {
                 epoch,
+                protocol,
+                capabilities,
                 node_version,
                 os,
                 hostname,
                 plugins,
-            });
+            }));
         }
         ToHub::Event {
             seq,
@@ -387,9 +427,13 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
                 return;
             }
             if let Some(commands) = commands {
-                shared.set_commands(&session, commands);
+                shared.set_commands(&session, commands.into_iter().map(Into::into).collect());
             }
-            shared.deliver(&session, event);
+            if let Some(event) = event.into() {
+                shared.deliver(&session, event);
+            } else {
+                tracing::debug!(seq, %session, "discarding unknown session event");
+            }
             shared.ack(seq);
         }
         ToHub::Return {
@@ -409,7 +453,7 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
                 .remove(&id);
             if let Some(pending) = pending {
                 if let (Some(commands), Some(session)) = (commands, &pending.session) {
-                    shared.set_commands(session, commands);
+                    shared.set_commands(session, commands.into_iter().map(Into::into).collect());
                 }
                 let _ = pending.answer.send(result);
             }
@@ -433,12 +477,16 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
                 .and_then(|route| route.permissions.clone());
             let shared = shared.clone();
             tokio::spawn(async move {
+                let request = request.into();
                 let decision = match handler {
                     Some(handler) => handler.decide(&request).await,
                     // The hub did not say it has a handler; refusing is the safe answer.
                     None => PermissionDecision::Deny,
                 };
-                shared.send(ToNode::Answer { id, decision });
+                shared.send(ToNode::Answer {
+                    id,
+                    decision: (&decision).into(),
+                });
             });
         }
         ToHub::Pong => {}
@@ -460,12 +508,14 @@ impl RemoteNode {
             link,
             writer: Mutex::new(None),
             ever_connected: AtomicBool::new(false),
+            negotiating: AtomicBool::new(false),
             pending: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             unrouted: Mutex::new(HashMap::new()),
             last_seq: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
             register: Mutex::new(None),
+            accepted_epoch: Mutex::new(None),
         });
         let actor = tokio::spawn(run(shared.clone()));
         Self { shared, actor }
@@ -493,6 +543,17 @@ impl RemoteNode {
             .lock()
             .expect("register lock poisoned")
             .clone()
+            .and_then(Result::ok)
+    }
+
+    /// The most recent protocol mismatch, if registration was rejected.
+    pub fn protocol_mismatch(&self) -> Option<ProtocolMismatch> {
+        self.shared
+            .register
+            .lock()
+            .expect("register lock poisoned")
+            .as_ref()
+            .and_then(|result| result.as_ref().err().copied())
     }
 }
 
@@ -585,14 +646,18 @@ fn attach_session(
     events: mpsc::UnboundedSender<SessionEvent>,
     permissions: Option<Arc<dyn PermissionHandler>>,
 ) -> RemoteSession {
-    let commands = Arc::new(Mutex::new(info.commands.clone()));
+    let commands = Arc::new(Mutex::new(
+        info.commands
+            .clone()
+            .map(|xs| xs.into_iter().map(Into::into).collect()),
+    ));
     node.shared
         .register(&info.handle, events, permissions, commands.clone());
     RemoteSession {
         node: node.clone(),
         handle: info.handle,
         session_id: info.session_id,
-        attachment_support: info.attachment_support,
+        attachment_support: info.attachment_support.map(Into::into),
         outlives_hub: info.outlives_hub,
         commands,
         closed: AtomicBool::new(false),
@@ -773,7 +838,7 @@ impl DriverSession for RemoteSession {
             })
             .await?;
         match reply {
-            WireReply::Turn { outcome } => Ok(outcome),
+            WireReply::Turn { outcome } => Ok(outcome.into()),
             other => Err(unexpected("a turn", &other)),
         }
     }
@@ -896,7 +961,7 @@ impl DriverSession for RemoteSession {
             })
             .await
         {
-            Ok(WireReply::MaybeTurn { outcome }) => outcome.map(Ok),
+            Ok(WireReply::MaybeTurn { outcome }) => outcome.map(|value| Ok(value.into())),
             Ok(other) => Some(Err(unexpected("an adopted turn", &other))),
             Err(err) => Some(Err(err)),
         }

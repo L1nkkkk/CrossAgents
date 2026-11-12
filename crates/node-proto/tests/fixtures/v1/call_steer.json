@@ -1,0 +1,1 @@
+{"t":"call","id":"call-7","op":{"op":"steer","session":"h-1","message_id":"018f0c12-3456-789a-abcd-0123456789ab","prompt":{"text":"Fix the failing login test","attachments":[{"id":"9f2c1e","name":"failure.log","mime":"text/plain","size":1204,"path":"/crossagents/attachments/9f2c1e/failure.log"}]}}}
