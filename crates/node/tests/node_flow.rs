@@ -283,6 +283,126 @@ async fn registration_negotiates_protocol_and_preserves_unknown_capabilities() {
     service.abort();
 }
 
+#[tokio::test]
+async fn rejected_connection_cannot_call_or_pollute_replay_before_reconnect() {
+    use crossagents_node::{
+        Transport,
+        protocol::{ProtocolMismatch, RegisterInfo},
+    };
+
+    struct TapServer {
+        inner: Arc<dyn TransportServer>,
+        accepted: mpsc::UnboundedSender<Arc<dyn Transport>>,
+    }
+    #[async_trait]
+    impl TransportServer for TapServer {
+        async fn accept(&self) -> Option<Arc<dyn Transport>> {
+            let conn = self.inner.accept().await?;
+            self.accepted.send(conn.clone()).unwrap();
+            Some(conn)
+        }
+    }
+
+    let driver: Arc<dyn Driver> = ScriptedDriver::new("scripted", Duration::ZERO);
+    let source: Arc<dyn DriverSource> = Arc::new(SingleDriverSource {
+        plugin: "scripted".into(),
+        driver: driver.clone(),
+    });
+    let (hub, node) = memory_pair();
+    let (tx, mut connections) = mpsc::unbounded_channel();
+    let server: Arc<dyn TransportServer> = Arc::new(TapServer {
+        inner: Arc::new(node),
+        accepted: tx,
+    });
+    let mut info = RegisterInfo::local();
+    info.protocol.major = 2;
+    let rejected = tokio::spawn(
+        NodeService::new(source.clone())
+            .with_register(info)
+            .run(server.clone()),
+    );
+    let node_link = Arc::new(RemoteNode::new(Arc::new(hub.clone())));
+    let remote = node_link.driver("scripted", None, Arc::new(LocalDriverInfo::new(driver)));
+    let conn = connections.recv().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while node_link.protocol_mismatch() != Some(ProtocolMismatch::NodeTooNew) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("mismatch recorded");
+    let (tx, _rx) = mpsc::unbounded_channel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), remote.open(spec(tx, None)))
+            .await
+            .unwrap()
+            .is_err()
+    );
+    // A rejected node cannot advance the replay watermark or receive an acknowledgement.
+    let frame = crossagents_node::ToHub::Return {
+        seq: 999999,
+        id: "unknown".into(),
+        result: crossagents_node::WireResult::Ok {
+            reply: crossagents_node::WireReply::Unit,
+        },
+        commands: None,
+    };
+    conn.send_line(crossagents_node::protocol::encode(&frame))
+        .await
+        .unwrap();
+    // A duplicate Register cannot turn the same rejected connection into an accepted one.
+    let info = RegisterInfo::local();
+    let frame = crossagents_node::ToHub::Register {
+        epoch: info.epoch,
+        protocol: info.protocol,
+        capabilities: info.capabilities,
+        node_version: info.node_version,
+        os: info.os,
+        hostname: info.hostname,
+        plugins: info.plugins,
+    };
+    conn.send_line(crossagents_node::protocol::encode(&frame))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), conn.recv_line())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        node_link.protocol_mismatch(),
+        Some(ProtocolMismatch::NodeTooNew)
+    );
+
+    hub.disconnect().await;
+    rejected.abort();
+    let _ = rejected.await;
+    let compatible = tokio::spawn(NodeService::new(source).run(server));
+    hub.set_online(true);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while node_link.register().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("compatible registration arrives");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let session = tokio::time::timeout(Duration::from_secs(5), remote.open(spec(tx, None)))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), session.prompt("after"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        text_of(&turn_events(&mut rx).await),
+        "echo[scripted]: after"
+    );
+    session.shutdown().await;
+    compatible.abort();
+}
+
 fn harness_for(driver: Arc<ScriptedDriver>) -> Harness {
     let driver: Arc<dyn Driver> = driver;
     let source: Arc<dyn DriverSource> = Arc::new(SingleDriverSource {
@@ -720,6 +840,7 @@ async fn a_restarted_node_starts_its_sequence_over() {
     let before = turn_events(&mut rx).await;
     assert_eq!(text_of(&before), "echo[scripted]: before");
     session.shutdown().await;
+    let previous_epoch = node_link.register().unwrap().epoch;
 
     // The node restarts on the same link: a new `NodeService`, so a new epoch and seq 1.
     first_service.abort();
@@ -728,7 +849,17 @@ async fn a_restarted_node_starts_its_sequence_over() {
         NodeService::new(source).run(server).await;
     });
 
-    // The hub reconnects by itself; opening waits for the connection.
+    // Wait for the replacement connection to complete its registration.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !node_link
+            .register()
+            .is_some_and(|info| info.epoch != previous_epoch)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("restarted node registers");
     let (tx, mut rx) = mpsc::unbounded_channel();
     let session = remote.open(spec(tx, None)).await.unwrap();
     session.prompt("after").await.unwrap();
