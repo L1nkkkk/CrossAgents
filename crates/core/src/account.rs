@@ -11,6 +11,16 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// One observed egress for an account. Missing values mean the lookup failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressRecord {
+    pub account: String,
+    pub egress_ip: Option<String>,
+    pub asn: Option<String>,
+    pub country: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
 use crate::error::CoreError;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,6 +30,12 @@ pub struct Account {
     /// None preserves the existing machine login behavior.
     #[serde(default)]
     pub codebuddy_site: Option<CodebuddySite>,
+    /// Whether a session on this account may reach the vendor's API without the proxy.
+    /// `None` takes [`EgressPolicy::default_for_provider`]'s answer, so accounts stored
+    /// before the policy existed read as their provider's default (docs/ACCOUNT-RISK.md).
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub egress: Option<EgressPolicy>,
     /// Unique, same rules as agent names (e.g. `codex-main`).
     pub id: String,
     /// The provider that manages it, e.g. `codex`.
@@ -44,6 +60,71 @@ impl CodebuddySite {
             Self::China => "internal",
             Self::International => "external",
         }
+    }
+}
+
+impl Account {
+    /// The egress policy to enforce: what the account says, else its provider's default.
+    pub fn egress_policy(&self) -> EgressPolicy {
+        self.egress
+            .unwrap_or_else(|| EgressPolicy::default_for_provider(&self.provider))
+    }
+}
+
+/// How far a session on an account may go to reach its vendor's API, in particular
+/// whether a dead proxy may fall back to a direct connection (docs/ACCOUNT-RISK.md).
+///
+/// A direct connection carries no proxy node: the vendor sees this machine's own address,
+/// and the login is the one thing CrossAgents exists to keep out of that position. Overseas
+/// vendors default to [`EgressPolicy::ProxyOnly`]; a domestic vendor that is reachable
+/// directly anyway keeps the old fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum EgressPolicy {
+    /// Never fall back to a direct connection: a proxy that cannot carry the traffic fails
+    /// the session instead.
+    ProxyOnly,
+    /// Fall back to a direct connection when the proxy cannot carry it, as CrossAgents did
+    /// before this policy existed.
+    AllowDirect,
+}
+
+/// The variable the hub sets in an agent's environment to pass its account's
+/// [`EgressPolicy`]; drivers take it from there and do not read configuration.
+pub const EGRESS_ENV: &str = "CROSSAGENTS_EGRESS_POLICY";
+
+impl EgressPolicy {
+    /// The policy an account gets when it does not name one.
+    ///
+    /// `claude` and `codex` logins are overseas vendors, where a bare-IP direct connection
+    /// is exactly the exposure the policy exists to stop; everything else keeps the old
+    /// behaviour. `[accounts] egress_default` / `egress_by_provider` in `config.toml`
+    /// override this.
+    pub fn default_for_provider(provider: &str) -> Self {
+        match provider {
+            "claude" | "codex" => Self::ProxyOnly,
+            _ => Self::AllowDirect,
+        }
+    }
+
+    /// The value written to [`EGRESS_ENV`] and `config.toml`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProxyOnly => "proxy_only",
+            Self::AllowDirect => "allow_direct",
+        }
+    }
+
+    /// The policy named by [`EGRESS_ENV`] in `env` (the session's own environment), if any.
+    pub fn from_env(env: &[(String, String)]) -> Option<Self> {
+        env.iter()
+            .find_map(|(key, value)| key.eq_ignore_ascii_case(EGRESS_ENV).then_some(value))
+            .and_then(|value| match value.trim() {
+                "proxy_only" => Some(Self::ProxyOnly),
+                "allow_direct" => Some(Self::AllowDirect),
+                _ => None,
+            })
     }
 }
 
@@ -312,6 +393,43 @@ mod tests {
                 site
             );
         }
+    }
+
+    #[test]
+    fn old_accounts_take_their_providers_egress_default_and_a_choice_round_trips() {
+        let old = serde_json::json!({"id":"claude", "provider":"claude", "label":"old", "home":"/old", "created_at":"2026-10-30T00:00:00Z"});
+        let account: Account = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(account.egress, None);
+        assert_eq!(account.egress_policy(), EgressPolicy::ProxyOnly);
+        let old: Account = serde_json::from_value(serde_json::json!({
+            "id": "codebuddy", "provider": "codebuddy", "label": "old", "home": "/old",
+            "created_at": "2026-10-30T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(old.egress_policy(), EgressPolicy::AllowDirect);
+        // An explicit choice is kept, including one that differs from the provider default.
+        let mut data = serde_json::json!({"id":"claude", "provider":"claude", "label":"old", "home":"/old", "created_at":"2026-10-30T00:00:00Z"});
+        data["egress"] = "allow_direct".into();
+        let account: Account = serde_json::from_value(data).unwrap();
+        assert_eq!(account.egress_policy(), EgressPolicy::AllowDirect);
+        assert_eq!(
+            serde_json::to_value(&account).unwrap()["egress"],
+            "allow_direct"
+        );
+    }
+
+    #[test]
+    fn the_egress_marker_in_a_sessions_env_is_read() {
+        let env = [(EGRESS_ENV.to_owned(), "allow_direct".to_owned())];
+        assert_eq!(
+            EgressPolicy::from_env(&env),
+            Some(EgressPolicy::AllowDirect)
+        );
+        assert_eq!(EgressPolicy::from_env(&[]), None);
+        assert_eq!(
+            EgressPolicy::from_env(&[(EGRESS_ENV.to_owned(), "nonsense".to_owned())]),
+            None
+        );
     }
 
     #[test]

@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use crossagents_core::{
     AgentCommand, AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind,
-    DriverSession, MessageId, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
-    SessionEventKind, SessionSpec, StopReason, TurnOutcome,
+    DriverSession, EgressPolicy, MessageId, PermissionHandler, PermissionPolicy, Prompt,
+    SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -30,7 +30,9 @@ use tokio::sync::{mpsc, oneshot};
 use self::wire::{Flavor, Launch, Start, Translator};
 use crate::launch::{self, BoxRead, BoxWrite, ExitWatch, LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
-use crate::process::{StderrTail, check_proxy, hide_console, system_proxy_env};
+use crate::process::{
+    StderrTail, check_proxy, hide_console, system_proxy_env, without_internal_env,
+};
 
 /// `entrypoint` of the sessions CrossAgents starts, in Claude Code's transcripts.
 pub const ENTRYPOINT: &str = "crossagents";
@@ -967,11 +969,16 @@ impl ClaudeSession {
         ];
         env.extend(system_proxy_env());
         env.extend(spec.env.iter().cloned());
+        // The account's egress policy travels in this environment (set by the hub, which
+        // knows the account); `launch` drops it before the CLI starts.
+        let egress = EgressPolicy::from_env(&spec.env)
+            .unwrap_or_else(|| EgressPolicy::default_for_provider(flavor.program()));
         // A CLI pointed at a dead proxy starts fine and then cannot reach its API; the
         // turn would stall instead of saying why. Fail here, where the proxy can be named.
         let api_host = flavor.api_host(&spec.env);
-        // A host the proxy cannot reach but a direct connection can is exempted instead.
-        env.extend(check_proxy(&spec.env, Some(&api_host)).await?);
+        // `allow_direct` may exempt a host the proxy cannot reach but a direct connection
+        // can; `proxy_only` never does, so the account is not exposed (docs/ACCOUNT-RISK.md).
+        env.extend(check_proxy(&spec.env, Some(&api_host), egress).await?);
         let env_remove = if flavor == Flavor::Codebuddy {
             crate::codebuddy_native::prepare_env(&mut env)
         } else {
@@ -1354,7 +1361,7 @@ pub async fn auth_status(program: &Path, env: &[(String, String)]) -> Option<Val
     command
         .args(["auth", "status"])
         .envs(system_proxy_env())
-        .envs(env.iter().cloned())
+        .envs(without_internal_env(env))
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .kill_on_drop(true);
@@ -1386,7 +1393,7 @@ pub async fn probe_account(
             wire::DEFAULT_SETTING_SOURCES,
         ])
         .envs(system_proxy_env())
-        .envs(env.iter().cloned())
+        .envs(without_internal_env(env))
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

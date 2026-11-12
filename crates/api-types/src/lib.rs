@@ -2573,6 +2573,31 @@ pub struct AccountQuota {
     /// Agents that run on this account (named in their config, or using the provider's
     /// own login).
     pub agents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub egress: Option<EgressFingerprint>,
+    /// Why the risk breaker paused this account, when it did; the person reads it in the
+    /// GUI and only a person re-arms the account (docs/ACCOUNT-RISK.md「风控熔断」).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub at_risk: Option<String>,
+    /// Why a session on this account is held until a person confirms the exit country
+    /// change, when one is pending (docs/ACCOUNT-RISK.md「出口指纹」). Written by the hub,
+    /// not read off the notice text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub egress_block: Option<String>,
+}
+
+/// Latest observed network exit for an account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EgressFingerprint {
+    pub ip: Option<String>,
+    pub asn: Option<String>,
+    pub country: Option<String>,
+    pub via_proxy: Option<bool>,
+    pub changed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

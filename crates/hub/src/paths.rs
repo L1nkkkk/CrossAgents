@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use crossagents_core::McpServerSpec;
+use crossagents_core::{EgressPolicy, McpServerSpec};
 use crossagents_orchestrator::files::{FileError, rel_of, resolve_in_root};
 use crossagents_orchestrator::{FilesScope, Orchestrator};
 use crossagents_plugins::PluginConfig;
@@ -471,8 +471,22 @@ impl McpSection {
 #[derive(Debug, Default, Deserialize)]
 struct AccountsSection {
     codex_usage_url: Option<String>,
+    egress_echo_url: Option<String>,
+    egress_history_days: Option<u32>,
+    egress_block_country_change: Option<bool>,
     /// Register the vendors' own logins (e.g. `~/.codex`) as accounts at startup.
     detect: Option<bool>,
+    /// Egress policy for accounts that do not name one, in place of the provider default
+    /// (`proxy_only` for `claude` and `codex`, `allow_direct` for the rest). See
+    /// docs/ACCOUNT-RISK.md.
+    egress_default: Option<EgressPolicy>,
+    /// Per-provider overrides: `[accounts.egress_by_provider] claude = "proxy_only"`.
+    #[serde(default)]
+    egress_by_provider: BTreeMap<String, EgressPolicy>,
+    /// Per-account overrides, which win over the provider table: `[accounts.egress_by_account]
+    /// claude-work = "allow_direct"`.
+    #[serde(default)]
+    egress_by_account: BTreeMap<String, EgressPolicy>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -518,6 +532,17 @@ pub struct HubConfig {
     /// (`[accounts] detect`, on by default; off in [`HubConfig::new`] so tests never touch
     /// the user's own logins).
     pub detect_accounts: bool,
+    /// `[accounts] egress_default`: policy for accounts that do not name one, in place of
+    /// the provider default.
+    pub egress_default: Option<EgressPolicy>,
+    /// `[accounts.egress_by_provider]`: overrides by provider name.
+    pub egress_by_provider: BTreeMap<String, EgressPolicy>,
+    /// `[accounts.egress_by_account]`: overrides by account id, which win over the
+    /// provider table.
+    pub egress_by_account: BTreeMap<String, EgressPolicy>,
+    pub egress_echo_url: Option<String>,
+    pub egress_history_days: u32,
+    pub egress_block_country_change: bool,
     /// Command that runs a runtime host (`<this executable> runtime-host`): Codex and Claude
     /// Code then run in hosts that outlive the hub, and the next hub takes them over. `None`
     /// starts them as direct children (they end with the hub). Off in [`HubConfig::new`].
@@ -551,6 +576,12 @@ impl HubConfig {
             mcp_servers: Vec::new(),
             codex_usage_url: None,
             detect_accounts: false,
+            egress_default: None,
+            egress_by_provider: BTreeMap::new(),
+            egress_by_account: BTreeMap::new(),
+            egress_echo_url: None,
+            egress_history_days: 0,
+            egress_block_country_change: true,
             runtime_host: None,
             event_log: false,
             build_cache_limit: crossagents_orchestrator::DEFAULT_BUILD_CACHE_LIMIT,
@@ -605,6 +636,15 @@ impl HubConfig {
             mcp_servers,
             codex_usage_url: config.accounts.codex_usage_url,
             detect_accounts: config.accounts.detect.unwrap_or(true),
+            egress_default: config.accounts.egress_default,
+            egress_by_provider: config.accounts.egress_by_provider,
+            egress_by_account: config.accounts.egress_by_account,
+            egress_echo_url: config.accounts.egress_echo_url,
+            egress_history_days: config.accounts.egress_history_days.unwrap_or(0),
+            egress_block_country_change: config
+                .accounts
+                .egress_block_country_change
+                .unwrap_or(true),
             runtime_host,
             event_log: config.hub.event_log.unwrap_or(true),
             build_cache_limit: config
@@ -658,6 +698,40 @@ mod tests {
         assert_eq!(config.port, 0);
         assert_eq!(config.build_cache_limit, 8 << 30);
         assert!(!config.builtin_node);
+    }
+
+    #[test]
+    fn egress_overrides_come_from_the_accounts_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let defaults = HubConfig::load(paths.clone()).unwrap();
+        assert_eq!(defaults.egress_default, None);
+        assert!(defaults.egress_by_provider.is_empty());
+        assert!(defaults.egress_by_account.is_empty());
+        std::fs::write(
+            paths.config(),
+            r#"
+[accounts]
+egress_default = "proxy_only"
+
+[accounts.egress_by_provider]
+codebuddy = "allow_direct"
+
+[accounts.egress_by_account]
+claude-work = "allow_direct"
+"#,
+        )
+        .unwrap();
+        let config = HubConfig::load(paths).unwrap();
+        assert_eq!(config.egress_default, Some(EgressPolicy::ProxyOnly));
+        assert_eq!(
+            config.egress_by_provider.get("codebuddy"),
+            Some(&EgressPolicy::AllowDirect)
+        );
+        assert_eq!(
+            config.egress_by_account.get("claude-work"),
+            Some(&EgressPolicy::AllowDirect)
+        );
     }
 
     #[test]

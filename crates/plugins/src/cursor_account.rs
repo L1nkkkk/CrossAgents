@@ -664,6 +664,7 @@ mod tests {
     fn account(home: &Path) -> Account {
         Account {
             codebuddy_site: None,
+            egress: None,
             id: "cursor-work".into(),
             provider: "cursor".into(),
             label: String::new(),

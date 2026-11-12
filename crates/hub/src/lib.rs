@@ -159,16 +159,28 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         Some(url) => CodexAccounts::with_usage_url(url.clone()),
         None => CodexAccounts::default(),
     };
-    let accounts = Arc::new(Accounts::new(
-        bus.clone(),
-        vec![
-            Arc::new(codex_accounts),
-            Arc::new(ClaudeAccounts::default()),
-            Arc::new(CodebuddyAccounts::default()),
-            Arc::new(CursorAccounts::default()),
-        ],
-        paths.accounts(),
-    ));
+    let accounts = Arc::new(
+        Accounts::new(
+            bus.clone(),
+            vec![
+                Arc::new(codex_accounts),
+                Arc::new(ClaudeAccounts::default()),
+                Arc::new(CodebuddyAccounts::default()),
+                Arc::new(CursorAccounts::default()),
+            ],
+            paths.accounts(),
+        )
+        .with_egress(
+            config.egress_default,
+            config.egress_by_provider.clone(),
+            config.egress_by_account.clone(),
+        )
+        .with_fingerprint(
+            config.egress_echo_url.clone(),
+            config.egress_history_days,
+            config.egress_block_country_change,
+        ),
+    );
     accounts.watch();
     let tokens = Arc::new(AgentTokens::load(paths.agent_tokens()));
     let (plugins, plugin_warnings) = PluginRegistry::load(&config.plugins, &paths.plugins());

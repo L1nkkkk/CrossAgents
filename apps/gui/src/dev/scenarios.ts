@@ -11,7 +11,7 @@ import { runCostScene } from "../views/RunCost.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, diagramSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
-import { usageScene } from "../views/Usage.mock";
+import { accountsRiskScene, usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
 import { lessonsScene } from "../views/Lessons/Lessons.mock";
 import { agent, ago, capabilitiesOf, devices, NOTES_REPO, planned, REPO, run, say, team, think, transcript, turn, uid } from "./fixtures";
@@ -211,6 +211,19 @@ export const SCENARIOS: Scenario[] = [
     const state = usageScene();
     return { state, route: "#/usage", script: [
       { at: 700, act: () => [...document.querySelectorAll<HTMLButtonElement>(".account-who")].find((b) => b.textContent?.includes("Cursor"))?.click() },
+    ] };
+  } },
+  { key: "accounts-risk", label: "账号：出口变了与 at-risk", hint: "每行都有出口（IP、国家、ASN、经代理/直连/无法确认、上次变化）；换国家被拦住等人确认；风控暂停的账号显眼，重新登录被禁用并写明原因", build: () => {
+    const state = accountsRiskScene();
+    return { state, route: "#/usage", script: [
+      { at: 600, act: () => {
+        const rows = document.querySelectorAll(".account-egress").length;
+        if (rows !== state.quota.accounts.length) throw new Error(`exit line missing: ${rows}/${state.quota.accounts.length}`);
+        if (!document.querySelector(".account-alert.danger")) throw new Error("at-risk block missing");
+        if (!document.querySelector(".account-alert.warn")) throw new Error("exit held block missing");
+        if (!document.querySelector<HTMLButtonElement>(".account-alert.danger")?.closest(".account-row")?.querySelector("button[disabled]")) throw new Error("re-login should be disabled for the at-risk account");
+        document.querySelector(".account-alert.danger")?.scrollIntoView({ block: "center" });
+      } },
     ] };
   } },
   { key: "tool-image-paths", label: "工具参数图片路径", hint: "加载、拒绝与去重", build: () => toolImagePathsSession() },
