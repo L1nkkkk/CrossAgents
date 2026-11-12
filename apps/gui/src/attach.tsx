@@ -9,7 +9,7 @@ import { api } from "./api";
 import { Icon, ImageThumb } from "./components";
 
 export { ImageThumb };
-import { acceptFor, bytes, isImage, mimeOf, refusal, supportNote } from "./lib/attachments";
+import { IMAGE_SEND_BYTES, acceptFor, bytes, isImage, mimeOf, refusal, shrinkPlan, shrunkName, supportNote } from "./lib/attachments";
 
 /** A file in the composer: what goes to the hub, and a preview for images. */
 export type Held = AttachmentUpload & { key: number; size: number; preview?: string };
@@ -29,6 +29,54 @@ function read(file: File): Promise<Held> {
   });
 }
 
+function encode(canvas: HTMLCanvasElement, mime: string, quality?: number): Promise<Blob | null> {
+  return new Promise((done) => canvas.toBlob(done, mime, quality));
+}
+
+/**
+ * A picture too big for the models (shrinkPlan says when), drawn again smaller: PNG stays
+ * PNG when that is small enough, else JPEG, at lower quality and size until it fits. Any
+ * failure leaves the file as it was, for the usual limits to judge.
+ */
+async function shrink(file: File): Promise<File> {
+  const mime = mimeOf(file.name, file.type);
+  if (!/^image\/(png|jpeg|webp)$/.test(mime)) return file;
+  let bitmap: ImageBitmap | undefined;
+  try {
+    bitmap = await createImageBitmap(file);
+    let plan = shrinkPlan(mime, file.size, bitmap.width, bitmap.height);
+    if (!plan) return file;
+    const canvas = document.createElement("canvas");
+    for (let pass = 0; pass < 4; pass++) {
+      canvas.width = plan.width;
+      canvas.height = plan.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return file;
+      ctx.fillStyle = "#fff";
+      if (mime !== "image/png") ctx.fillRect(0, 0, plan.width, plan.height);
+      ctx.drawImage(bitmap, 0, 0, plan.width, plan.height);
+      if (mime === "image/png") {
+        const png = await encode(canvas, "image/png");
+        if (png && png.size <= IMAGE_SEND_BYTES) return new File([png], shrunkName(file.name, "image/png"), { type: "image/png" });
+        // JPEG has no transparency: paint white under the picture first.
+        ctx.globalCompositeOperation = "destination-over";
+        ctx.fillRect(0, 0, plan.width, plan.height);
+        ctx.globalCompositeOperation = "source-over";
+      }
+      for (const quality of [0.9, 0.8, 0.7]) {
+        const jpeg = await encode(canvas, "image/jpeg", quality);
+        if (jpeg && jpeg.size <= IMAGE_SEND_BYTES) return new File([jpeg], shrunkName(file.name, "image/jpeg"), { type: "image/jpeg" });
+      }
+      plan = { width: Math.max(1, Math.round(plan.width * 0.75)), height: Math.max(1, Math.round(plan.height * 0.75)) };
+    }
+    return file;
+  } catch {
+    return file;
+  } finally {
+    bitmap?.close();
+  }
+}
+
 /** The composer's files: add (checked against the hub's limits and the agent's kinds), remove, clear. */
 export function useHeld(onError: (why: string | undefined) => void, support?: AttachmentSupport | null, driver?: string | null) {
   const [held, setHeld] = useState<Held[]>([]);
@@ -36,8 +84,9 @@ export function useHeld(onError: (why: string | undefined) => void, support?: At
   const canAttach = !support || support.image || support.pdf || support.text;
   const note = supportNote(support, driver);
 
-  async function add(files: File[]) {
-    if (!files.length) return;
+  async function add(picked: File[]) {
+    if (!picked.length) return;
+    const files = await Promise.all(picked.map(shrink));
     const why = refusal(
       held,
       files.map((f) => ({ name: f.name, mime: mimeOf(f.name, f.type), size: f.size })),

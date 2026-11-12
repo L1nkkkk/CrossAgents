@@ -38,7 +38,7 @@ import { onHubEvent, useHubData } from "./hub";
 
 /**
  * Whether the tool column floats over the page as a drawer: when docking it would leave the
- * conversation narrower than MIN_MAIN, which depends on the sidebar and the dragged widths.
+ * conversation narrower than FLOAT_MAIN, which depends on the sidebar and the dragged widths.
  */
 export function useToolsFloat() {
   const { docked } = useSidebar();

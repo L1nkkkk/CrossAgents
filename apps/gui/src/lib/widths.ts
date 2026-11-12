@@ -1,15 +1,18 @@
 // The widths of the docked sidebar and tool column, and the height of the bottom dock, dragged
-// by the user and remembered per browser. The conversation between them keeps at least MIN_MAIN;
-// whatever does not fit is taken from the tool column first, and when even its minimum does not
-// fit it floats. The bottom dock leaves the conversation at least MIN_MAIN_HEIGHT.
+// by the user and remembered per browser. A drag leaves the conversation between them at least
+// MIN_MAIN; whatever does not fit is taken from the tool column first, and when the window leaves
+// the conversation less than FLOAT_MAIN beside the column's minimum, the column floats. The bottom
+// dock leaves the conversation at least MIN_MAIN_HEIGHT.
 
 import { useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 
 const KEY = "crossagents.widths";
 export const SIDEBAR = { min: 200, max: 420, initial: 226 };
-export const TOOLS = { min: 300, max: 960, initial: 420 };
-/** The narrowest the conversation gets beside docked columns, gaps between panels included. */
-export const MIN_MAIN = 500;
+export const TOOLS = { min: 300, max: 2400, initial: 420 };
+/** The narrowest a drag leaves the conversation beside docked columns, gaps between panels included. */
+export const MIN_MAIN = 340;
+/** Below this much room for the conversation, the tool column floats instead of docking. */
+export const FLOAT_MAIN = 500;
 export const BOTTOM = { min: 120, initial: 280 };
 export const MIN_MAIN_HEIGHT = 240;
 
@@ -61,12 +64,14 @@ const subscribe = (l: () => void) => {
 
 /**
  * The widths to lay out with in a window `innerWidth` wide. `sidebar`: whether the sidebar is
- * docked. `float`: the tool column cannot dock beside a MIN_MAIN conversation. `tools` is the
+ * docked. `float`: the tool column at its minimum would leave the conversation less than
+ * FLOAT_MAIN. `tools` is the
  * docked width, shrunk to what fits; `bottom` the bottom dock's height, likewise.
  */
 export function layoutWidths(innerWidth: number, sidebar: boolean, innerHeight: number) {
   const fits = room(innerWidth, sidebar);
-  return { sidebar: widths.sidebar, tools: clamp(Math.min(widths.tools, fits), TOOLS.min, TOOLS.max), float: fits < TOOLS.min, bottom: bottomFits(widths.bottom, innerHeight) };
+  const float = fits - (FLOAT_MAIN - MIN_MAIN) < TOOLS.min;
+  return { sidebar: widths.sidebar, tools: clamp(Math.min(widths.tools, fits), TOOLS.min, TOOLS.max), float, bottom: bottomFits(widths.bottom, innerHeight) };
 }
 
 export function useWidths(sidebar: boolean) {

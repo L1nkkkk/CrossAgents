@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AttachmentSupport } from "@bindings/AttachmentSupport";
-import { MAX_FILE_BYTES, MAX_FILES, acceptFor, bytes, kindOf, mimeOf, refusal, supportNote } from "./attachments.ts";
+import { MAX_FILE_BYTES, MAX_FILES, IMAGE_MAX_SIDE, acceptFor, bytes, kindOf, mimeOf, refusal, shrinkPlan, shrunkName, supportNote } from "./attachments.ts";
 
 const ALL: AttachmentSupport = { image: true, pdf: true, text: true };
 const CODEX: AttachmentSupport = { image: true, pdf: false, text: true };
@@ -45,6 +45,16 @@ test("the agent's kinds are checked after the hub's limits", () => {
   assert.equal(refusal([], [f("a.pdf", "application/pdf")]), undefined);
   assert.equal(refusal([], [f("a.png", "image/png")], CODEX, "codex-native"), undefined);
   assert.equal(refusal([], [f("a.txt", "text/plain")], CODEX, "codex-native"), undefined);
+});
+
+test("a big picture is shrunk, a small one and a GIF are not", () => {
+  assert.equal(shrinkPlan("image/png", 500_000, 1920, 1080), undefined);
+  assert.equal(shrinkPlan("image/gif", 9_000_000, 6000, 4000), undefined);
+  assert.deepEqual(shrinkPlan("image/png", 500_000, 5120, 2880), { width: IMAGE_MAX_SIDE, height: 1440 });
+  assert.deepEqual(shrinkPlan("image/jpeg", 8_000_000, 2000, 1500), { width: 2000, height: 1500 });
+  assert.deepEqual(shrinkPlan("image/webp", 100, 1000, 9000), { width: 284, height: IMAGE_MAX_SIDE });
+  assert.equal(shrunkName("截图.png", "image/jpeg"), "截图.jpg");
+  assert.equal(shrunkName("shot", "image/webp"), "shot.webp");
 });
 
 test("the picker offers only the kinds the agent takes", () => {
