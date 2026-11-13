@@ -6,10 +6,99 @@
 // (`chrome:<tabId>`), inheriting all existing cookies, extensions, and Google Account sync
 // without touching Chrome's encrypted SQLite files on disk.
 
+import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { axSnapshot, backendNodeFor, consoleEntry, keyDefinition, quadCenter, type AxNode, type ConsoleEntry } from "./browserCdp.cjs";
+
+export type CdpCookie = {
+  name: string;
+  value: string;
+  domain: string;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: string;
+  expires?: number;
+  session?: boolean;
+};
+
+/** Converts a decrypted CDP cookie from Chrome into an Electron `CookiesSetDetails` payload. */
+export function toElectronCookie(c: CdpCookie): {
+  url: string;
+  name: string;
+  value: string;
+  domain?: string;
+  path: string;
+  secure: boolean;
+  httpOnly: boolean;
+  sameSite: "unspecified" | "no_restriction" | "lax" | "strict";
+  expirationDate?: number;
+} | null {
+  if (!c || typeof c.name !== "string" || !c.name || typeof c.value !== "string" || typeof c.domain !== "string" || !c.domain) {
+    return null;
+  }
+  const cleanHost = c.domain.replace(/^\.+/, "");
+  if (!cleanHost) return null;
+  const hostPrefix = c.name.startsWith("__Host-");
+  const securePrefix = hostPrefix || c.name.startsWith("__Secure-");
+  const secure = securePrefix ? true : c.secure === true || c.sameSite === "None";
+  const path = hostPrefix ? "/" : c.path || "/";
+  const url = `${secure ? "https" : "http"}://${cleanHost}${path.startsWith("/") ? path : `/${path}`}`;
+  const sameSite =
+    c.sameSite === "Strict"
+      ? "strict"
+      : c.sameSite === "Lax"
+        ? "lax"
+        : c.sameSite === "None"
+          ? "no_restriction"
+          : "unspecified";
+  const out: {
+    url: string;
+    name: string;
+    value: string;
+    domain?: string;
+    path: string;
+    secure: boolean;
+    httpOnly: boolean;
+    sameSite: "unspecified" | "no_restriction" | "lax" | "strict";
+    expirationDate?: number;
+  } = {
+    url,
+    name: c.name,
+    value: c.value,
+    path,
+    secure,
+    httpOnly: c.httpOnly === true,
+    sameSite,
+  };
+  if (!hostPrefix && c.domain.startsWith(".")) {
+    out.domain = c.domain;
+  }
+  if (!c.session && typeof c.expires === "number" && Number.isFinite(c.expires) && c.expires > 0) {
+    out.expirationDate = c.expires;
+  }
+  return out;
+}
+
+/**
+ * On Windows, a background process (`chrome.exe`) is blocked by `LockSetForegroundWindow` from
+ * raising its window over the active Electron window. Calling `AppActivate` from the foreground
+ * process group hands focus to Chrome so clicking「跳到外部 Chrome」visibly brings Chrome up.
+ */
+function focusChromeWindowOnHost(): void {
+  if (process.platform === "win32") {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", "(New-Object -ComObject WScript.Shell).AppActivate('Chrome') | Out-Null"],
+      { timeout: 3000, windowsHide: true },
+      () => {},
+    );
+  } else if (process.platform === "darwin") {
+    execFile("osascript", ["-e", 'tell application "Google Chrome" to activate'], { timeout: 3000 }, () => {});
+  }
+}
 
 export const CHROME_BRIDGE_PORT = 7421;
 const STALE_AFTER_MS = 15_000;
@@ -237,7 +326,35 @@ export class ChromeBridgeCore {
   async activate(tab: string): Promise<{ ok: true }> {
     const tabId = this.mustTabId(tab);
     await this.sendCommand({ kind: "activate", tabId });
+    focusChromeWindowOnHost();
     return { ok: true };
+  }
+
+  /**
+   * Reads decrypted cookies from the person's running Chrome via the already-attached CDP
+   * channel (`Storage.getCookies` or `Network.getCookies`). Works immediately without reloading
+   * the unpacked extension because `cmd.kind === "cdp"` is already handled by `background.js`.
+   */
+  async fetchCookies(tab?: string, urls?: string[]): Promise<CdpCookie[]> {
+    const targetId =
+      (tab ? parseChromeTabId(tab) : null) ??
+      this.tabs.find((t) => t.active)?.rawId ??
+      this.tabs[0]?.rawId;
+    if (!targetId) throw new Error("Chrome 中没有可读取 Cookie 的打开标签页");
+    const wantedUrls = Array.isArray(urls) && urls.length > 0 ? urls : this.tabs.map((t) => t.url).filter(Boolean);
+    try {
+      const all = await this.cdp<{ cookies?: CdpCookie[] }>(targetId, "Storage.getCookies");
+      if (Array.isArray(all?.cookies) && all.cookies.length > 0) return all.cookies;
+    } catch {
+      // Fall back to Network.getCookies on the page target.
+    }
+    await this.cdp(targetId, "Network.enable").catch(() => undefined);
+    const res = await this.cdp<{ cookies?: CdpCookie[] }>(
+      targetId,
+      "Network.getCookies",
+      wantedUrls.length > 0 ? { urls: wantedUrls } : undefined,
+    );
+    return Array.isArray(res?.cookies) ? res.cookies : [];
   }
 
   async runAction(input: Record<string, unknown>): Promise<unknown> {

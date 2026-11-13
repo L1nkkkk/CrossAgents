@@ -3,7 +3,40 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ChromeBridgeCore, ensureChromeExtensionFiles, parseChromeTabId } from "./chromeBridge.cjs";
+import { ChromeBridgeCore, ensureChromeExtensionFiles, parseChromeTabId, toElectronCookie } from "./chromeBridge.cjs";
+
+test("toElectronCookie converts CDP cookies to Electron CookiesSetDetails", () => {
+  const detail = toElectronCookie({
+    name: "sid",
+    value: "abc",
+    domain: ".github.com",
+    path: "/",
+    secure: true,
+    httpOnly: true,
+    sameSite: "Lax",
+    expires: 1800000000,
+  });
+  assert.deepEqual(detail, {
+    url: "https://github.com/",
+    name: "sid",
+    value: "abc",
+    domain: ".github.com",
+    path: "/",
+    secure: true,
+    httpOnly: true,
+    sameSite: "lax",
+    expirationDate: 1800000000,
+  });
+  const hostOnly = toElectronCookie({
+    name: "__Host-token",
+    value: "xyz",
+    domain: "token.woa.com",
+    path: "/sub",
+    secure: false,
+  });
+  assert.equal(hostOnly?.url, "https://token.woa.com/");
+  assert.equal(hostOnly?.domain, undefined);
+});
 
 test("parseChromeTabId recognizes chrome:<id> and rejects other tab ids", () => {
   assert.equal(parseChromeTabId("chrome:42"), 42);

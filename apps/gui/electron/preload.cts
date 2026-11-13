@@ -47,6 +47,7 @@ export type BrowserBridge = {
   chromeStatus(): Promise<ChromeBridgeStatus>;
   chromeAction(payload: Record<string, unknown>): Promise<unknown>;
   chromeActivate(tab: string): Promise<{ ok: true }>;
+  chromeSyncCookies(opts?: { tab?: string; urls?: string[] }): Promise<{ count: number }>;
   openExtensionFolder(): Promise<{ dir: string }>;
 };
 
@@ -77,6 +78,7 @@ const browser: BrowserBridge = {
   chromeStatus: () => browserCall("browser:chrome-status"),
   chromeAction: (payload) => browserCall("browser:chrome-action", payload),
   chromeActivate: (tab) => browserCall("browser:chrome-activate", tab),
+  chromeSyncCookies: (opts) => browserCall("browser:chrome-sync-cookies", opts),
   openExtensionFolder: () => browserCall("browser:chrome-open-ext-dir"),
 };
 

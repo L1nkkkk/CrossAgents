@@ -23,7 +23,7 @@ import {
   navigationAllowed,
   webviewAllowed,
 } from "./browserPolicy.cjs";
-import { CHROME_BRIDGE_PORT, ChromeBridgeCore, ensureChromeExtensionFiles, startChromeBridgeServer } from "./chromeBridge.cjs";
+import { CHROME_BRIDGE_PORT, ChromeBridgeCore, ensureChromeExtensionFiles, startChromeBridgeServer, toElectronCookie } from "./chromeBridge.cjs";
 
 /** Channel for a window.open / target=_blank from a tab: the page opens a new web tab. */
 export const OPEN_TAB_CHANNEL = "browser:open-tab";
@@ -277,6 +277,26 @@ export function registerBrowserIpc(fromApp: (event: IpcMainInvokeEvent) => boole
     return getChromeBridge().runAction(payload as Record<string, unknown>);
   });
   handle("browser:chrome-activate", (_event, tab) => getChromeBridge().activate(text(tab)));
+  handle("browser:chrome-sync-cookies", async (_event, opts) => {
+    const p = (opts && typeof opts === "object" ? opts : {}) as { tab?: unknown; urls?: unknown };
+    const tab = typeof p.tab === "string" ? p.tab : undefined;
+    const urls = Array.isArray(p.urls) ? p.urls.filter((u): u is string => typeof u === "string" && /^https?:/i.test(u)) : undefined;
+    const cookies = await getChromeBridge().fetchCookies(tab, urls);
+    const ses = browserSession();
+    let count = 0;
+    for (const raw of cookies) {
+      const details = toElectronCookie(raw);
+      if (!details) continue;
+      try {
+        await ses.cookies.set(details);
+        count++;
+      } catch {
+        // Ignore cookies with incompatible flags or expired timestamps.
+      }
+    }
+    await ses.cookies.flushStore().catch(() => undefined);
+    return { count };
+  });
   handle("browser:chrome-open-ext-dir", async () => {
     const bridge = getChromeBridge();
     ensureChromeExtensionFiles(bridge.extensionDir, bridge.port);

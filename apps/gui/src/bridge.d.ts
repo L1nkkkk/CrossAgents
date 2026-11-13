@@ -118,6 +118,8 @@ export type BrowserBridge = {
   chromeAction?(payload: Record<string, unknown>): Promise<unknown>;
   /** Brings a `chrome:<id>` tab to the front in the person's real Chrome. */
   chromeActivate?(tab: string): Promise<{ ok: true }>;
+  /** Pulls decrypted cookies from the person's running Chrome into `persist:browser`. */
+  chromeSyncCookies?(opts?: { tab?: string; urls?: string[] }): Promise<{ count: number }>;
   /** Opens the unpacked Chrome extension directory in the system file manager. */
   openExtensionFolder?(): Promise<{ dir: string }>;
 };

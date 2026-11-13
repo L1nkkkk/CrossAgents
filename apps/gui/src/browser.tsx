@@ -782,6 +782,14 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
   );
 }
 
+function hostLabel(url: string): string {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
+  }
+}
+
 function BrowserBar({ page }: { page: Page }) {
   const [draft, setDraft] = useState(page.url === "about:blank" ? "" : page.url);
   const [typing, setTyping] = useState(false);
@@ -790,6 +798,8 @@ function BrowserBar({ page }: { page: Page }) {
   const [chromeOpen, setChromeOpen] = useState(false);
   const [chromeState, setChromeState] = useState<ChromeBridgeStatus | null>(null);
   const [copiedExtUrl, setCopiedExtUrl] = useState(false);
+  const [cookieNote, setCookieNote] = useState<string | null>(null);
+  const [syncingCookies, setSyncingCookies] = useState(false);
 
   useEffect(() => {
     if (!typing) setDraft(page.url === "about:blank" ? "" : page.url);
@@ -820,6 +830,38 @@ function BrowserBar({ page }: { page: Page }) {
   const canExternal = /^https?:/i.test(page.url);
   const openExternal = () => {
     if (canExternal) void getBridge()?.browser?.openExternal?.(page.url);
+  };
+
+  /** Opens `url` in this built-in tab, syncing cookies from the connected Chrome first if available. */
+  const openWithChromeCookies = async (url: string, tab?: string) => {
+    setChromeOpen(false);
+    setOpenFolder(null);
+    const browser = getBridge()?.browser;
+    if (chromeState?.connected && browser?.chromeSyncCookies) {
+      await browser.chromeSyncCookies({ tab, urls: [url] }).catch(() => undefined);
+    }
+    navigate(page, url);
+  };
+
+  const syncAllCookies = async () => {
+    const browser = getBridge()?.browser;
+    if (!browser?.chromeSyncCookies || syncingCookies) return;
+    setSyncingCookies(true);
+    setCookieNote(null);
+    try {
+      const res = await browser.chromeSyncCookies();
+      setCookieNote(`已同步 ${res.count} 条 Cookie`);
+      if (page.url && page.url !== "about:blank") step(page, "reload");
+    } catch (err) {
+      setCookieNote(`同步失败：${errorText(err)}`);
+    } finally {
+      setSyncingCookies(false);
+    }
+  };
+
+  const activateExternalChrome = async (tab: string) => {
+    setChromeOpen(false);
+    await getBridge()?.browser?.chromeActivate?.(tab).catch(() => undefined);
   };
 
   const copyExtensionsUrl = async () => {
@@ -867,7 +909,7 @@ function BrowserBar({ page }: { page: Page }) {
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               setTyping(false);
-              navigate(page, draft);
+              void openWithChromeCookies(draft);
             } else if (e.key === "Escape") {
               setTyping(false);
               setDraft(page.url === "about:blank" ? "" : page.url);
@@ -903,42 +945,62 @@ function BrowserBar({ page }: { page: Page }) {
             <div className="web-chrome-popover" role="dialog" aria-label="本机 Chrome 桥接">
               <div className="web-chrome-head">
                 <strong>{chromeState?.connected ? "本机 Chrome 已连接" : "连接本机真 Chrome"}</strong>
-                <button type="button" className="ghost icon" onClick={() => setChromeOpen(false)} aria-label="关闭">
-                  <Icon name="close" size={12} />
-                </button>
+                <div className="web-chrome-head-actions">
+                  {chromeState?.connected && (
+                    <button
+                      type="button"
+                      className="ghost small"
+                      disabled={syncingCookies}
+                      title="把本机 Chrome 的登录 Cookie 同步到当前内置浏览器"
+                      onClick={() => void syncAllCookies()}
+                    >
+                      {syncingCookies ? "同步中…" : "同步 Cookie"}
+                    </button>
+                  )}
+                  <button type="button" className="ghost icon" onClick={() => setChromeOpen(false)} aria-label="关闭">
+                    <Icon name="close" size={12} />
+                  </button>
+                </div>
               </div>
+              {cookieNote && <p className="small muted web-chrome-cookie-note">{cookieNote}</p>}
               {chromeState?.connected ? (
                 <>
                   <p className="small muted web-chrome-note">
-                    Agent 可通过 <code>chrome:&lt;id&gt;</code> 直接操作以下标签页（共享你的 Google 账号、Cookie 与全部 Chrome 插件）：
+                    点标题或「内置打开」会自动带上 Chrome 登录态在当前面板打开；Agent 也可通过 <code>chrome:&lt;id&gt;</code> 直接控制真 Chrome：
                   </p>
                   <ul className="web-chrome-tabs">
                     {chromeState.tabs.map((t) => (
                       <li key={t.tab} className="web-chrome-tab">
-                        <div className="web-chrome-tab-main">
-                          <code className="small">{t.tab}</code>
-                          <span className="web-chrome-tab-title" title={t.url}>
-                            {t.title}
+                        <button
+                          type="button"
+                          className="web-chrome-tab-title-btn"
+                          title={`${t.title}\n${t.url}\n点击在内置浏览器打开并同步该站点 Cookie`}
+                          onClick={() => void openWithChromeCookies(t.url, t.tab)}
+                        >
+                          <span className="web-chrome-tab-title">{t.title}</span>
+                          {t.active && <span className="web-chrome-active-tag">当前</span>}
+                        </button>
+                        <div className="web-chrome-tab-sub">
+                          <span className="web-chrome-tab-meta muted small" title={t.url}>
+                            {hostLabel(t.url)} · <code>{t.tab}</code>
                           </span>
-                        </div>
-                        <div className="web-chrome-tab-actions">
-                          <button
-                            type="button"
-                            className="link small"
-                            onClick={() => {
-                              navigate(page, t.url);
-                              setChromeOpen(false);
-                            }}
-                          >
-                            内置打开
-                          </button>
-                          <button
-                            type="button"
-                            className="link small"
-                            onClick={() => void getBridge()?.browser?.chromeActivate?.(t.tab)}
-                          >
-                            切到 Chrome
-                          </button>
+                          <div className="web-chrome-tab-actions">
+                            <button
+                              type="button"
+                              className="link small"
+                              onClick={() => void openWithChromeCookies(t.url, t.tab)}
+                            >
+                              内置打开
+                            </button>
+                            <button
+                              type="button"
+                              className="link small"
+                              title="激活外部 Chrome 窗口并切换到该标签页"
+                              onClick={() => void activateExternalChrome(t.tab)}
+                            >
+                              唤起 Chrome
+                            </button>
+                          </div>
                         </div>
                       </li>
                     ))}
@@ -985,10 +1047,7 @@ function BrowserBar({ page }: { page: Page }) {
                 type="button"
                 className="web-bm-item"
                 title={`${item.name}\n${item.url}`}
-                onClick={() => {
-                  setOpenFolder(null);
-                  navigate(page, item.url);
-                }}
+                onClick={() => void openWithChromeCookies(item.url)}
               >
                 {item.name}
               </button>
@@ -1012,10 +1071,7 @@ function BrowserBar({ page }: { page: Page }) {
                         role="menuitem"
                         className="web-bm-menu-item"
                         title={child.url}
-                        onClick={() => {
-                          setOpenFolder(null);
-                          navigate(page, child.url);
-                        }}
+                        onClick={() => void openWithChromeCookies(child.url)}
                       >
                         <span className="web-bm-menu-name">{child.name}</span>
                         <span className="web-bm-menu-url muted small">{child.url}</span>

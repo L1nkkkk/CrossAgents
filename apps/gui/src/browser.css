@@ -18,20 +18,33 @@
 .web-chrome-btn.connected { color: var(--ok-text); background: var(--ok-bg); }
 .web-chrome-wrap { position: relative; flex: none; }
 .web-chrome-popover {
-  position: absolute; right: 0; top: calc(100% + 6px); width: 340px; max-width: 88vw; z-index: 50;
+  position: absolute; right: 0; top: calc(100% + 6px); width: 400px; max-width: 90vw; z-index: 50;
   padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
   background: var(--surface); box-shadow: var(--shadow-float); display: flex; flex-direction: column; gap: 8px;
 }
-.web-chrome-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
+.web-chrome-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.web-chrome-head-actions { display: flex; align-items: center; gap: 4px; }
+.web-chrome-cookie-note { margin: 0; color: var(--ok-text); }
 .web-chrome-note { margin: 0; line-height: 1.5; }
-.web-chrome-tabs { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
+.web-chrome-tabs { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; display: flex; flex-direction: column; gap: 5px; }
 .web-chrome-tab {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 5px 8px; border-radius: var(--radius); background: var(--surface-sunk); font-size: 12px;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 6px 9px; border-radius: var(--radius); background: var(--surface-sunk); font-size: 12px;
 }
-.web-chrome-tab-main { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
-.web-chrome-tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.web-chrome-tab-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.web-chrome-tab-title-btn {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%;
+  padding: 0; border: none; background: transparent; color: var(--text); font: inherit; font-weight: 500;
+  text-align: left; cursor: pointer;
+}
+.web-chrome-tab-title-btn:hover .web-chrome-tab-title { text-decoration: underline; }
+.web-chrome-tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.web-chrome-active-tag {
+  flex: none; padding: 1px 5px; border-radius: 999px; font-size: 10.5px; font-weight: 500;
+  color: var(--ok-text); background: var(--ok-bg);
+}
+.web-chrome-tab-sub { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.web-chrome-tab-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.web-chrome-tab-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .web-chrome-guide p { margin: 0 0 6px; line-height: 1.55; }
 .web-chrome-steps { margin: 0 0 10px; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; line-height: 1.5; color: var(--text-2); }
 .web-chrome-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

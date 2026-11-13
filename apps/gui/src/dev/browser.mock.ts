@@ -170,6 +170,9 @@ export function createMockBrowser(opts: { delay?: number } = {}): MockBrowser {
     async chromeActivate() {
       return { ok: true };
     },
+    async chromeSyncCookies() {
+      return { count: 12 };
+    },
     async openExtensionFolder() {
       return { dir: "C:/Users/me/AppData/Roaming/CrossAgents/chrome-extension" };
     },

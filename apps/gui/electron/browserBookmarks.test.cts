@@ -67,10 +67,11 @@ test("only http and https bookmark URLs are allowed", () => {
   assert.equal(bookmarkUrlAllowed("javascript:void(0)"), false);
 });
 
-test("candidateBookmarkPaths lists Chrome before Edge on Windows and macOS", () => {
+test("candidateBookmarkPaths lists Chrome AccountBookmarks and Bookmarks before Edge on Windows and macOS", () => {
   const win = candidateBookmarkPaths("win32", { LOCALAPPDATA: "C:/Users/me/AppData/Local" }, "C:/Users/me");
-  assert.ok(win[0].includes("Google") && win[0].endsWith("Bookmarks"));
+  assert.ok(win[0].includes("Google") && win[0].endsWith("AccountBookmarks"));
+  assert.ok(win[1].includes("Google") && win[1].endsWith("Bookmarks"));
   assert.ok(win.some((p) => p.includes("Edge")));
   const mac = candidateBookmarkPaths("darwin", {}, "/Users/me");
-  assert.ok(mac[0].replace(/\\/g, "/").includes("Google/Chrome/Default/Bookmarks"));
+  assert.ok(mac[0].replace(/\\/g, "/").includes("Google/Chrome/Default/AccountBookmarks"));
 });

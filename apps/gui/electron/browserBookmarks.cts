@@ -1,6 +1,7 @@
-// Reads local Chrome / Edge plaintext Bookmarks files so the built-in browser can show the
-// person's usual bookmark bar without requiring Google Account sync. Pure parsing and candidate
-// path discovery are kept apart from fs so unit tests can verify them directly.
+// Reads local Chrome / Edge plaintext Bookmarks and AccountBookmarks files so the built-in
+// browser can show the person's Google-Account-synced bookmark bar without requiring private
+// Google API keys. Pure parsing and candidate path discovery are kept apart from fs so unit
+// tests can verify them directly.
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -31,7 +32,7 @@ type RawNode = {
 };
 
 const MAX_BAR_ITEMS = 40;
-const MAX_FOLDER_ITEMS = 60;
+const MAX_FOLDER_ITEMS = 80;
 
 /** Only http(s) links belong on the bookmark bar; javascript: and file: are ignored. */
 export function bookmarkUrlAllowed(url: unknown): url is string {
@@ -79,8 +80,9 @@ function collectLinks(nodes: readonly unknown[], prefix: string): BookmarkLink[]
 }
 
 /**
- * Parses a Chromium `Bookmarks` JSON string into top-level bookmark-bar links and folders.
- * If `bookmark_bar` has nothing, falls back to `other`.
+ * Parses a Chromium `Bookmarks` or `AccountBookmarks` JSON string into top-level bookmark-bar
+ * links and folders. When both `bookmark_bar` and `other` have bookmarks, `other` is appended as
+ * an「其他书签」folder at the end; when `bookmark_bar` is empty, `other` is used directly.
  */
 export function parseChromeBookmarks(rawJson: string): BookmarkEntry[] {
   let parsed: { roots?: Record<string, { children?: unknown }> };
@@ -111,44 +113,47 @@ export function parseChromeBookmarks(rawJson: string): BookmarkEntry[] {
       entries.push({ kind: "folder", id, name, children });
     }
   }
+
+  if (barChildren.length > 0 && otherChildren.length > 0) {
+    const otherLinks = collectLinks(otherChildren, "other");
+    if (otherLinks.length > 0) {
+      entries.push({ kind: "folder", id: "other-bookmarks", name: "其他书签", children: otherLinks });
+    }
+  }
   return entries;
 }
 
-/** Candidate Chromium `Bookmarks` files on the current platform, Chrome first, then Edge. */
+/**
+ * Candidate Chromium bookmark files on the current platform. Modern Chrome signed into a Google
+ * Account stores synced bookmarks in `AccountBookmarks` alongside or instead of `Bookmarks`.
+ */
 export function candidateBookmarkPaths(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
 ): string[] {
   const profiles = ["Default", "Profile 1", "Profile 2", "Profile 3"];
+  const files = ["AccountBookmarks", "Bookmarks"];
+  const expand = (root: string) => profiles.flatMap((p) => files.map((f) => join(root, p, f)));
   if (platform === "win32") {
     const local = env.LOCALAPPDATA || join(home, "AppData", "Local");
     const chromeRoot = join(local, "Google", "Chrome", "User Data");
     const edgeRoot = join(local, "Microsoft", "Edge", "User Data");
-    return [
-      ...profiles.map((p) => join(chromeRoot, p, "Bookmarks")),
-      ...profiles.map((p) => join(edgeRoot, p, "Bookmarks")),
-    ];
+    return [...expand(chromeRoot), ...expand(edgeRoot)];
   }
   if (platform === "darwin") {
     const support = join(home, "Library", "Application Support");
     const chromeRoot = join(support, "Google", "Chrome");
     const edgeRoot = join(support, "Microsoft Edge");
-    return [
-      ...profiles.map((p) => join(chromeRoot, p, "Bookmarks")),
-      ...profiles.map((p) => join(edgeRoot, p, "Bookmarks")),
-    ];
+    return [...expand(chromeRoot), ...expand(edgeRoot)];
   }
   const cfg = env.XDG_CONFIG_HOME || join(home, ".config");
   const chromeRoot = join(cfg, "google-chrome");
   const chromiumRoot = join(cfg, "chromium");
-  return [
-    ...profiles.map((p) => join(chromeRoot, p, "Bookmarks")),
-    ...profiles.map((p) => join(chromiumRoot, p, "Bookmarks")),
-  ];
+  return [...expand(chromeRoot), ...expand(chromiumRoot)];
 }
 
-/** Reads the first local Chrome / Edge Bookmarks file that has at least one bookmark. */
+/** Reads the first local Chrome / Edge bookmark file (`AccountBookmarks` or `Bookmarks`) with entries. */
 export function readLocalBookmarks(): { source: string | null; entries: BookmarkEntry[] } {
   for (const file of candidateBookmarkPaths()) {
     try {
