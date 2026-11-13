@@ -765,7 +765,10 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
     // which `dom-ready` reports, so the id of the old one is dropped here and never used again.
     return () => {
       page.wcId = null;
-      vault().appendChild(el);
+      // A closing tab's page is already disposed (element removed, page dropped) before this
+      // cleanup runs; putting the element back in the vault would attach it again and start the
+      // page over — a video that was playing would go on sounding from a tab that is gone.
+      if (pages.get(page.id) === page) vault().appendChild(el);
     };
   }, [tab, page?.el]);
 
