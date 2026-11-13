@@ -60,6 +60,7 @@ const zhCN = {
   "sidebar.pinned": "置顶",
   "sidebar.works": "工作组",
   "sidebar.workTitle": "{title} · {n} 轮",
+  "sidebar.roundsCount": "{n} 轮",
   "sidebar.roundN": "第 {n} 轮",
   "sidebar.expandRounds": "展开 {name} 的各轮",
   "sidebar.collapseRounds": "收起 {name} 的各轮",

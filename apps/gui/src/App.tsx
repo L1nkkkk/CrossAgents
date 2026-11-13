@@ -295,6 +295,7 @@ export function App() {
     // 一个工作组：主导的对话连续不断，各轮是其中的分隔（docs/tasks/G1.md §3.5）。
     case "work":
       main = orOff(work, FEATURE_LABELS.work, a ? <WorkView key={a} workId={a} roundId={b} /> : <HomeView />);
+      if (a) tools = { run: b, onClose: closeTools };
       break;
     case "agents":
       // The old 队友 page lives on as 设置 → 智能体.

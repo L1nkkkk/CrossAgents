@@ -96,6 +96,10 @@ function Overview({ ws }: { ws: Workspace }) {
           {ws.path}
         </span>
         <div className="spacer" />
+        <a className="button ghost small" href={`#/git/${encodeURIComponent(ws.path)}`} title="查看这个项目的分支、提交与未提交改动">
+          <Icon name="branch" size={14} />
+          Git
+        </a>
         <a className="button primary" href="#/" onClick={() => selectWorkspace(ws.key)} title="在这个工作区里发起 run">
           <Icon name="plus" size={14} />
           新建 run

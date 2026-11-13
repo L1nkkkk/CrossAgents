@@ -224,6 +224,8 @@
 .flat-sidebar .group:not(.needs-you-group):not(.archived-group) > .project-works {
   position: relative;
   margin-left: 10px;
+  margin-top: 4px;
+  padding-top: 2px;
 }
 .flat-sidebar .group:not(.needs-you-group):not(.archived-group) > .project-works::before {
   content: "";
@@ -233,6 +235,18 @@
   bottom: 0;
   width: 1px;
   background: var(--border);
+}
+.project-works-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 1px 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.project-works-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
 }
 /* The hub refused the work page: say so where the groups would be. */
 .sidebar .works-refused {
@@ -249,9 +263,27 @@
 .work-row .row-link {
   padding-left: 4px;
 }
+.work-lead-face {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  margin-right: 3px;
+}
 .work-row .row-mode {
   flex: none;
   margin-left: 4px;
+}
+.work-round-badge {
+  flex: none;
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.app.sidebar-tight .work-lead-face,
+.app.sidebar-tight .work-round-badge {
+  display: none;
 }
 .work-round-list {
   list-style: none;

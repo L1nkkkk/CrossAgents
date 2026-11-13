@@ -169,6 +169,11 @@ export function RunView({
       <span className="title">{run.title}</span>
       <StatusChip status={run.status} tone={runTone(run.status)} />
       <RunModeTag run={run} />
+      {run.work_id && (
+        <a className="chip" href={`#/work/${encodeURIComponent(run.work_id)}/${encodeURIComponent(run.id)}`} title="查看所属工作组的全部轮次">
+          所属工作组
+        </a>
+      )}
       {/* Narrow, the header's panel button already carries the progress: one copy. */}
       <ProgressChip tasks={tasks} />
       <div className="spacer" />
@@ -334,7 +339,7 @@ function TaskBoard({ run, tasks, agents, selectedTask }: { run: Run; tasks: Task
 }
 
 /** "已合并 2/4", while the rail beside the conversation shows the tasks anyway. */
-function ProgressChip({ tasks }: { tasks: Task[] }) {
+export function ProgressChip({ tasks }: { tasks: Task[] }) {
   const { narrow } = useSideSlot();
   if (narrow || !tasks.length) return null;
   const done = tasks.filter((t) => t.status === "merged").length;
@@ -381,7 +386,7 @@ function SidePanelToggle({ tasks }: { tasks: Task[] }) {
  * and on what policy, who took part, what the agents noted, and the trace. Each section is a
  * panel that folds by its heading; the trace and the participants start folded.
  */
-function RunRail({
+export function RunRail({
   run,
   tasks,
   agents,
@@ -618,7 +623,7 @@ function ContinuationMeta({ run, agents, onDone }: { run: Run; agents?: Agent[];
  * how it went and carries the buttons the person has to press — land it, close it; the summary,
  * where the result landed and the whole diff open under it.
  */
-function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: () => void }) {
+export function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   async function act(action: () => Promise<unknown>) {

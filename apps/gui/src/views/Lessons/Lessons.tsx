@@ -177,7 +177,15 @@ export function LessonsView() {
   return (
     <>
       <div className="topbar">
-        <span className="title">排障记录</span>
+        <span className="title">专长与排障</span>
+        <div className="segmented small" role="tablist" aria-label="经验库切换">
+          <a className="button small ghost" role="tab" aria-selected="false" href="#/expertise">
+            专长
+          </a>
+          <a className="button small active" role="tab" aria-selected="true" href="#/lessons">
+            排障记录
+          </a>
+        </div>
       </div>
       <div className="page">
         <div className="page-inner settings exp-page lessons-page">

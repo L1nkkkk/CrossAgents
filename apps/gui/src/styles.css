@@ -328,11 +328,13 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 .icon-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); text-decoration: none; }
 .icon-btn.on { color: var(--text); }
 
-.side-nav { display: flex; flex-direction: column; padding: 0 10px 4px; }
+.side-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 4px; padding: 0 10px 4px; }
+.side-nav a.nav-new { grid-column: 1 / -1; }
 .side-nav a {
-  display: flex; align-items: center; gap: 9px; padding: 5px 8px; border-radius: var(--radius);
-  color: var(--text); font-size: 13.5px;
+  display: flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: var(--radius);
+  color: var(--text); font-size: 13px; min-width: 0;
 }
+.side-nav a > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-nav a:hover { text-decoration: none; background: var(--hover); }
 .side-nav a.active { background: var(--accent-bg); }
 .side-nav a.active svg { color: var(--accent-text); }

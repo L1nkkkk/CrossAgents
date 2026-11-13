@@ -4,16 +4,24 @@
 // its separator into view. Everything that belongs to a single round (tasks, checks, landing,
 // the closing summary) stays on that run's page, one click away.
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Run } from "@bindings/Run";
 import { api } from "../api";
-import { ErrorBox, Icon, agentName, ago, sessionHref, time, useAgents } from "../components";
+import { ApplyButton } from "../apply";
+import { ErrorBox, FileScopeProvider, Icon, OneLine, agentName, ago, firstSentence, sessionHref, time, useAgents } from "../components";
+import { DeleteRunDialog } from "../deleteRun";
 import { useHubData } from "../hub";
+import { InlineNeeds } from "../inlineask";
+import { openInRun } from "../notices";
+import { openTool } from "../panes";
+import { useQuestions } from "../questions";
 import { RailCard } from "../rail";
+import { RelayBanner } from "../relay";
 import { navigate } from "../App";
 import { RunModeTag, leadsInPlace } from "../runmode";
 import { runState } from "../lib/taskState";
 import { StateWord } from "../parts";
+import { Ending, ProgressChip, RunRail, useRun } from "./Run";
 import { SessionView, useSideSlot, type RoundMark } from "./Session";
 import "../work.css";
 
@@ -148,6 +156,8 @@ export function WorkView({ workId, roundId }: { workId: string; roundId?: string
     (e) => e.type.startsWith("run.") || e.type.startsWith("work."),
   );
   const agents = useAgents();
+  const questions = useQuestions();
+  const [deleting, setDeleting] = useState(false);
   const rounds = useMemo(() => (detail.data?.runs ?? []).slice().sort((a, b) => a.created_at.localeCompare(b.created_at)), [detail.data]);
   const marks = useMemo(() => marksOf(rounds), [rounds]);
   const ids = rounds.map((r) => r.id).join(",");
@@ -162,6 +172,7 @@ export function WorkView({ workId, roundId }: { workId: string; roundId?: string
     () => false,
   );
   const selected = rounds.find((r) => r.id === roundId) ?? rounds[rounds.length - 1];
+  const runDetail = useRun(selected?.id ?? "");
 
   // Picking a round in the pane (or arriving with one in the route) brings its separator into
   // view. Without one in the route the conversation opens at its end, as a conversation does.
@@ -185,73 +196,132 @@ export function WorkView({ workId, roundId }: { workId: string; roundId?: string
     .map((h) => ({ id: h.run_id, title: h.title, at: h.ended_at ?? h.created_at }))
     .sort((a, b) => b.at.localeCompare(a.at));
   const n = selected ? rounds.findIndex((r) => r.id === selected.id) + 1 : 0;
+  const currentRun = runDetail.data?.run ?? selected;
+  const tasks = runDetail.data?.tasks ?? [];
+  const asks = currentRun ? openInRun(questions.data?.items ?? [], currentRun) : [];
+  const allEnded = tasks.length > 0 && tasks.every((t) => ["merged", "failed", "cancelled"].includes(t.status));
+  const isLastRound = !!selected && rounds[rounds.length - 1]?.id === selected.id;
+  const activeRun = !!currentRun && ["planning", "awaiting_approval", "running", "paused"].includes(currentRun.status);
+  const reloadAll = () => {
+    detail.reload();
+    runDetail.reload();
+  };
 
   const header = (
     <div className="topbar work-topbar">
       <span className="title">{work.title}</span>
-      {selected && (
+      {currentRun && (
         <span className="chip state-chip">
-          <StateWord state={runState(selected.status)} />
+          <StateWord state={runState(currentRun.status)} />
         </span>
       )}
-      {selected && <RunModeTag run={selected} />}
+      {currentRun && <RunModeTag run={currentRun} />}
       {rounds.length > 0 && (
         <span className="chip" title={`这个工作组一共 ${rounds.length} 轮`}>
           第 {n} / {rounds.length} 轮
         </span>
       )}
+      <ProgressChip tasks={tasks} />
       <div className="spacer" />
+      {currentRun && <ApplyButton run={currentRun} />}
       <RoundsToggle n={rounds.length} />
-      {selected && (
-        <a className="chip" href={`#/runs/${selected.id}`} title="这一轮的任务、检查、落地和收尾">
-          这一轮的 run
-        </a>
+      {currentRun && !currentRun.in_place && (
+        <button className="ghost small graph-toggle" onClick={() => openTool("graph")} title="在右侧工具列看这一轮的分支和提交">
+          <span className="row" style={{ gap: 5 }}>
+            <Icon name="branch" size={13} />
+            提交图
+          </span>
+        </button>
       )}
       <a className="chip" href={sessionHref(work.lead)} title="主导的会话">
         主导 · {agentName(agents.data, work.lead)}
       </a>
+      {currentRun && isLastRound && (
+        <button
+          className="danger"
+          title={activeRun ? "先取消，再删除这一轮" : "删除这一轮、它的任务和工作区"}
+          onClick={() => setDeleting(true)}
+        >
+          {activeRun ? "取消并删除" : "删除"}
+        </button>
+      )}
     </div>
   );
 
-  const top = selected ? (
-    <div className="work-round-head">
-      <div className="work-round-line">
-        <span className="work-round-n">第 {n} 轮</span>
-        <StateWord state={runState(selected.status)} />
-        <RunModeTag run={selected} compact />
-        <span className="muted small">
-          {roundFacts(selected).landed} · {roundFacts(selected).checks}
-        </span>
-        <span className="spacer" />
-        <span className="muted small" title={time(selected.created_at)}>
-          {ago(selected.created_at)}
-        </span>
+  const top = currentRun ? (
+    <div className="run-head">
+      <div className="work-round-head">
+        <div className="work-round-line">
+          <span className="work-round-n">第 {n} 轮</span>
+          <StateWord state={runState(currentRun.status)} />
+          <RunModeTag run={currentRun} compact />
+          <span className="muted small">
+            {roundFacts(currentRun).landed} · {roundFacts(currentRun).checks}
+          </span>
+          <span className="spacer" />
+          <span className="muted small" title={time(currentRun.created_at)}>
+            {ago(currentRun.created_at)}
+          </span>
+        </div>
+        <p className="work-round-request">{currentRun.request}</p>
+        {currentRun.note && <p className="work-round-note">{currentRun.note}</p>}
       </div>
-      <p className="work-round-request">{selected.request}</p>
-      {selected.note && <p className="work-round-note">{selected.note}</p>}
+      <RelayBanner run={currentRun} tasks={tasks} agents={agents.data} />
+      <InlineNeeds items={asks} agents={agents.data ?? []} />
+      {currentRun.status === "paused" && (
+        <OneLine tone="warn" icon={<span aria-hidden="true">❚❚</span>} title="已暂停" summary={firstSentence(currentRun.note ?? "等你决定")}>
+          {`${currentRun.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。`}
+        </OneLine>
+      )}
+      <ErrorBox error={runDetail.error} />
     </div>
   ) : null;
 
+  const bottom =
+    currentRun && (currentRun.status === "completed" || (currentRun.status === "running" && allEnded)) ? (
+      <Ending run={currentRun} closing={currentRun.status === "running"} onDone={reloadAll} />
+    ) : undefined;
+
   const side = (
-    <RoundsPane
-      workId={workId}
-      marks={marks}
-      runs={rounds}
-      selected={selected?.id}
-      costs={costs.data ?? {}}
-      deleted={deleted}
-    />
+    <>
+      <RoundsPane
+        workId={workId}
+        marks={marks}
+        runs={rounds}
+        selected={selected?.id}
+        costs={costs.data ?? {}}
+        deleted={deleted}
+      />
+      {currentRun && <RunRail run={currentRun} tasks={tasks} agents={agents.data} onPolicyChange={reloadAll} />}
+    </>
   );
 
-  return (
+  const page = (
     <SessionView
       key={work.lead}
       name={work.lead}
       header={header}
       top={top}
+      bottom={bottom}
       side={side}
-      sideLabel="各轮"
+      sideLabel="各轮与任务"
       rounds={marks}
     />
+  );
+
+  if (!currentRun) return page;
+  return (
+    <FileScopeProvider value={{ kind: "run", run: currentRun.id }}>
+      {page}
+      {deleting && runDetail.data && (
+        <DeleteRunDialog
+          detail={runDetail.data}
+          onClose={() => {
+            setDeleting(false);
+            reloadAll();
+          }}
+        />
+      )}
+    </FileScopeProvider>
   );
 }

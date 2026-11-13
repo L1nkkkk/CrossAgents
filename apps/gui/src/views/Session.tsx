@@ -201,8 +201,13 @@ export function SessionView({
 
   useEffect(() => (agentId ? view(agentId) : undefined), [agentId]);
 
-  // Wide enough for a rail again: the drawer has nothing left to do.
-  const rail = !railOff && width >= (side ? SIDE_ROOM : RAIL_ROOM);
+  const sidebar = useSidebar();
+  const { state: panesState } = useLayout();
+  const floatTools = useWidths(sidebar.docked).float;
+  const toolsOpen = panesState.docks.right.open && !floatTools;
+  // Wide enough for a rail again, and the outer tool column is not already docked beside us:
+  // never show two right columns at the same time.
+  const rail = !railOff && !toolsOpen && width >= (side ? SIDE_ROOM : RAIL_ROOM);
   useEffect(() => {
     if (rail) setDrawer(false);
   }, [rail]);
@@ -331,8 +336,8 @@ export function SessionView({
               own strip (`top`), scoped to that run, so the dock's list would add every other run's
               「告诉你」 (docs/tasks/SELF.md B3). */}
           {!onClose && !side && <div className="dock-asks" ref={questionArea}><QuestionCards agents={everyone} />{questionId && !questions.loading && (!questions.data || !pending(questions.data.items).some((item) => item.id === questionId && item.from === agent.id)) && <p role="alert" className="question-missing">找不到这条待办：它可能已处理、已过期或不属于此会话。{questions.error && ` ${questions.error}`}</p>}</div>}
-          {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
-          <RunStrip runs={liveRuns} agents={everyone} />
+          {!onClose && !sidebar.docked && <NeedsYouStrip agents={everyone} tree={runs} />}
+          {!side && <RunStrip runs={liveRuns} agents={everyone} />}
           <QueuePanel agent={agent} queued={queued} delivery={transcript.delivery} />
           {agent.status === "error" && transcript.error && !isModerationError(transcript.error) && (
             <div className="error-bar" role="alert" title={transcript.error}>
@@ -359,14 +364,18 @@ export function SessionView({
 type Execution = Awaited<ReturnType<typeof api.agentExecution>>["execution"];
 
 function WorkContext({ name, agent, tasks, led, agents, execution: x }: { name: string; agent: Agent; tasks: { run: Run; task: RunDetail["tasks"][number] }[]; led: RunDetail[]; agents: Agent[]; execution?: Execution }) {
+  // When an active execution is running, ExecutionBar below already shows the run, task and
+  // whether the session is fresh, so we only show the folded related-work list when idle or
+  // when there is a lead_note.
   const current = tasks.find(({ task }) => task.id === x?.task_id);
   const lead = led.find(({ run }) => run.id === x?.run_id);
-  const source = current ? executorOf(current.task, agents, current.task.reviewer === agent.id ? "reviewer" : "worker") : undefined;
-  if (!source?.fresh && !lead?.run.lead_note && !tasks.length && !led.length) return null;
+  const source = !x && current ? executorOf(current.task, agents, current.task.reviewer === agent.id ? "reviewer" : "worker") : undefined;
+  const showRelated = !x && (tasks.length > 0 || led.length > 0);
+  if (!source?.fresh && !lead?.run.lead_note && !showRelated) return null;
   return <div className="session-work-context">
     {source?.fresh && <span>{source.template ? `使用 ${displayName(source.template)} 的配置创建` : "新建的执行会话"}</span>}
     {lead?.run.lead_note && <span>{lead.run.lead_note}</span>}
-    {(tasks.length > 0 || led.length > 0) && <details><summary>关联工作</summary><div className="session-work-list">
+    {showRelated && <details><summary>关联工作</summary><div className="session-work-list">
       {led.map(({ run }) => <button key={run.id} onClick={() => { focusSession(name); openTool("task", { agent: name, run: run.id }); }}>{run.title} · 计划</button>)}
       {tasks.map(({ run, task }) => <button key={task.id} onClick={() => { focusSession(name); openTool("task", { agent: name, run: run.id, task: task.id }); }}>{task.key} {task.title} · {run.title}</button>)}
     </div></details>}

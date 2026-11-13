@@ -160,7 +160,7 @@ const workProject = (work: Work) => wsKey(work.repo);
  * One work group: its title, the latest loaded round's state and mode; its rounds fold out
  * below. The rounds behind the fold are read on opening it, not for every row on the list.
  */
-function WorkRow({ work, runs, active, selected }: { work: Work; runs: Run[]; active: boolean; selected?: string }) {
+function WorkRow({ work, runs, lead, active, selected }: { work: Work; runs: Run[]; lead?: Agent; active: boolean; selected?: string }) {
   const [open, setOpen] = useState(false);
   const detail = useWorkDetail(work.id, open);
   // What the sidebar already has: the recent runs. A group with none of them loaded is just its
@@ -172,11 +172,13 @@ function WorkRow({ work, runs, active, selected }: { work: Work; runs: Run[]; ac
   // Its rounds are read when the fold opens; until they arrive the fold shows nothing, so a
   // partial set of loaded rounds is never numbered as if it were all of them.
   const rounds = detail ? detail.runs.slice().sort((a, b) => a.created_at.localeCompare(b.created_at)) : [];
+  const count = detail?.runs.length ?? loaded.length;
   const href = `#/work/${encodeURIComponent(work.id)}`;
   // Where it works is only worth a tag when it is the surprising case (原地); a worktree run is
   // the usual one, and its word stays in the tooltip so a narrow row keeps the title readable.
   const mode = current ? modeWords(current) : undefined;
-  const label = current ? t("sidebar.workTitle", { title: work.title, n: detail?.runs.length ?? loaded.length }) : work.title;
+  const label = current ? t("sidebar.workTitle", { title: work.title, n: count }) : work.title;
+  const who = lead ? displayName(lead) : undefined;
   return (
     <div className="work-row-wrap">
       <div className={`nav-row work-row ${active ? "active" : ""}`}>
@@ -188,11 +190,22 @@ function WorkRow({ work, runs, active, selected }: { work: Work; runs: Run[]; ac
         >
           <Icon name={open ? "chevron" : "chevronRight"} size={12} />
         </button>
-        <a className="row-link" href={href} title={label + (mode ? " · " + mode.label : "")} aria-current={active ? "page" : undefined}>
+        <a
+          className="row-link"
+          href={href}
+          title={label + (who ? " · " + who : "") + (mode ? " · " + mode.label : "")}
+          aria-current={active ? "page" : undefined}
+        >
+          {lead && (
+            <span className="work-lead-face" aria-hidden="true">
+              <Avatar agent={lead} size={16} />
+            </span>
+          )}
           <span className="row-main">
             <span className="row-label">{work.title}</span>
           </span>
           {current && leadsInPlace(current) && <RunModeTag run={current} compact className="row-mode" />}
+          {count > 0 && <span className="work-round-badge">{t("sidebar.roundsCount", { n: count })}</span>}
         </a>
         {dot && <span className={`row-dot ${dot}`} aria-hidden="true" />}
       </div>
@@ -225,17 +238,24 @@ function WorkRow({ work, runs, active, selected }: { work: Work; runs: Run[]; ac
 }
 
 /** A project's work groups, newest first: its three newest, and 「更多」 for the rest. */
-function WorkList({ works, runs, route }: { works: Work[]; runs: RunDetail[]; route: string[] }) {
+function WorkList({ works, runs, agents, route, headed = true }: { works: Work[]; runs: RunDetail[]; agents: Agent[]; route: string[]; headed?: boolean }) {
   const [all, setAll] = useState(false);
   if (!works.length) return null;
   const shown = all ? works : works.slice(0, WORKS_PER_PROJECT);
   const hidden = works.length - WORKS_PER_PROJECT;
   return (
     <div className="project-works">
+      {headed && (
+        <div className="project-works-head">
+          <span className="project-works-label">{t("sidebar.works")}</span>
+          <span className="project-works-count">{works.length}</span>
+        </div>
+      )}
       {shown.map((work) => (
         <WorkRow
           key={work.id}
           work={work}
+          lead={agents.find((a) => a.id === work.lead)}
           // What the sidebar has already loaded for this group; a row opens its own fold for the rest.
           runs={runs.filter((d) => d.run.work_id === work.id).map((d) => d.run)}
           active={route[0] === "work" && route[1] === work.id}
@@ -253,7 +273,7 @@ function WorkList({ works, runs, route }: { works: Work[]; runs: RunDetail[]; ro
 }
 
 /** The work groups no project claims — folded at the end, so they are never dropped. */
-function OtherWorks({ works, runs, route }: { works: Work[]; runs: RunDetail[]; route: string[] }) {
+function OtherWorks({ works, runs, agents, route }: { works: Work[]; runs: RunDetail[]; agents: Agent[]; route: string[] }) {
   const collapsed = useCollapsed();
   const closed = collapsed.has(OTHER_WORKS);
   if (!works.length) return null;
@@ -270,7 +290,7 @@ function OtherWorks({ works, runs, route }: { works: Work[]; runs: RunDetail[]; 
           {t("sidebar.other")}
         </button>
       </div>
-      {!closed && <WorkList works={works} runs={runs} route={route} />}
+      {!closed && <WorkList works={works} runs={runs} agents={agents} route={route} headed={false} />}
     </section>
   );
 }
@@ -454,7 +474,13 @@ export function Sidebar({ route }: { route: string[] }) {
             )}
             {machineGroups(shown).map((machine) => (
               <Machine key={machine.key} machine={machine} searching={searching}>
-            {machine.groups.map((g) => (
+            {machine.groups.map((g) => {
+              const groupWorks = workList.filter((w) => workProject(w) === g.key);
+              const workLeads = new Set(groupWorks.map((w) => w.lead));
+              const sessionMembers = searching
+                ? g.members
+                : g.members.filter((m) => !workLeads.has(m.agent.id) || isSession(m.agent) || pinned.has(sessionKey(m.agent)));
+              return (
               <Group
                 key={g.key}
                 group={g}
@@ -472,16 +498,17 @@ export function Sidebar({ route }: { route: string[] }) {
                 }
               >
                 <Capped
-                  items={g.members}
+                  items={sessionMembers}
                   keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
                   searching={searching}
                 >
                   {row}
                 </Capped>
-                {!searching && <WorkList works={workList.filter((w) => workProject(w) === g.key)} runs={runs} route={route} />}
+                {!searching && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
               </Group>
-            ))}
-            {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} route={route} />}
+              );
+            })}
+            {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} agents={everyone} route={route} />}
               </Machine>
             ))}
             {archived.length > 0 && <div hidden={searching}><Archived agents={archived} isSession={isSession} /></div>}
