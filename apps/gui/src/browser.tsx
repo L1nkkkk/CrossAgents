@@ -11,7 +11,7 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api, errorText, getBridge, scopeKey, type FileScope } from "./api";
-import type { BrowserBridge } from "./bridge";
+import type { BookmarkEntry, BrowserBridge, ChromeBridgeStatus } from "./bridge";
 import { Icon } from "./components";
 import { resolvePath } from "./fileResolve";
 import { onHubEvent } from "./hub";
@@ -561,11 +561,37 @@ function refOf(value: unknown): number {
   return ref;
 }
 
+const isChromeTab = (value: unknown): value is string =>
+  typeof value === "string" && (value === "chrome" || value === "chrome:new" || /^chrome:\d+$/.test(value.trim()));
+
 /** Runs one agent tool against a tab; `control` puts the「正在操作」bar on a tab it opens. */
 async function runTool(tool: string, input: Record<string, unknown>, control: (page: Page) => void): Promise<unknown> {
   const browser = getBridge()?.browser;
   if (!browser) throw new Error("这个窗口没有内置浏览器");
-  if (tool === "browser_tabs") return [...pages.values()].map(tabInfo);
+  if (tool === "browser_tabs") {
+    const localTabs = [...pages.values()].map(tabInfo);
+    const chromeStatus = await browser.chromeStatus?.().catch(() => null);
+    const extTabs = (chromeStatus?.tabs ?? []).map((t) => ({
+      tab: t.tab,
+      url: t.url,
+      title: `${t.title} · Chrome`,
+      controlled_by_human: false,
+    }));
+    return [...localTabs, ...extTabs];
+  }
+  if (isChromeTab(input.tab) && browser.chromeAction) {
+    if (tool === "browser_open") {
+      const wanted =
+        typeof input.url === "string" && input.url
+          ? browserUrl(input.url) ?? input.url
+          : typeof input.path === "string" && input.path
+            ? await browser.fileUrl(input.path)
+            : "";
+      if (!wanted) throw new Error("browser_open 要给 url 或 path");
+      return browser.chromeAction({ ...input, tool, url: wanted });
+    }
+    return browser.chromeAction({ ...input, tool });
+  }
   if (tool === "browser_open") {
     const wanted =
       typeof input.url === "string" && input.url
@@ -759,54 +785,250 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
 function BrowserBar({ page }: { page: Page }) {
   const [draft, setDraft] = useState(page.url === "about:blank" ? "" : page.url);
   const [typing, setTyping] = useState(false);
+  const [bookmarks, setBookmarks] = useState<BookmarkEntry[]>([]);
+  const [openFolder, setOpenFolder] = useState<string | null>(null);
+  const [chromeOpen, setChromeOpen] = useState(false);
+  const [chromeState, setChromeState] = useState<ChromeBridgeStatus | null>(null);
+  const [copiedExtUrl, setCopiedExtUrl] = useState(false);
+
   useEffect(() => {
     if (!typing) setDraft(page.url === "about:blank" ? "" : page.url);
   }, [page.url, typing]);
+
+  useEffect(() => {
+    const browser = getBridge()?.browser;
+    browser?.bookmarks?.().then((res) => setBookmarks(res.entries ?? []), () => {});
+  }, []);
+
+  useEffect(() => {
+    const browser = getBridge()?.browser;
+    if (!browser?.chromeStatus) return;
+    let alive = true;
+    const poll = () => {
+      browser.chromeStatus!().then((st) => {
+        if (alive) setChromeState(st);
+      }, () => {});
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const canExternal = /^https?:/i.test(page.url);
+  const openExternal = () => {
+    if (canExternal) void getBridge()?.browser?.openExternal?.(page.url);
+  };
+
+  const copyExtensionsUrl = async () => {
+    try {
+      await navigator.clipboard.writeText("chrome://extensions");
+      setCopiedExtUrl(true);
+      setTimeout(() => setCopiedExtUrl(false), 1500);
+    } catch {}
+  };
+
   return (
-    <div className="web-bar">
-      <button type="button" className="ghost icon" disabled={!page.back} title={page.back ? "后退" : "没有上一页"} aria-label="后退" onClick={() => step(page, "back")}>
-        <Icon name="back" size={14} />
-      </button>
-      <button type="button" className="ghost icon" disabled={!page.forward} title={page.forward ? "前进" : "没有下一页"} aria-label="前进" onClick={() => step(page, "forward")}>
-        <Icon name="forward" size={14} />
-      </button>
-      {page.loading ? (
-        <button type="button" className="ghost icon" title="停止加载" aria-label="停止加载" onClick={() => stop(page)}>
-          <Icon name="close" size={13} />
+    <>
+      <div className="web-bar">
+        <button type="button" className="ghost icon" disabled={!page.back} title={page.back ? "后退" : "没有上一页"} aria-label="后退" onClick={() => step(page, "back")}>
+          <Icon name="back" size={14} />
         </button>
-      ) : (
-        <button type="button" className="ghost icon" title="刷新" aria-label="刷新" onClick={() => step(page, "reload")}>
-          <Icon name="reload" size={14} />
+        <button type="button" className="ghost icon" disabled={!page.forward} title={page.forward ? "前进" : "没有下一页"} aria-label="前进" onClick={() => step(page, "forward")}>
+          <Icon name="forward" size={14} />
         </button>
+        {page.loading ? (
+          <button type="button" className="ghost icon" title="停止加载" aria-label="停止加载" onClick={() => stop(page)}>
+            <Icon name="close" size={13} />
+          </button>
+        ) : (
+          <button type="button" className="ghost icon" title="刷新" aria-label="刷新" onClick={() => step(page, "reload")}>
+            <Icon name="reload" size={14} />
+          </button>
+        )}
+        <Icon name="globe" size={13} />
+        <input
+          className="web-url"
+          value={draft}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoComplete="off"
+          placeholder="输入网址，回车打开"
+          aria-label="地址栏"
+          autoFocus={page.focusBar}
+          onFocus={() => {
+            page.focusBar = false;
+            setTyping(true);
+          }}
+          onBlur={() => setTyping(false)}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              setTyping(false);
+              navigate(page, draft);
+            } else if (e.key === "Escape") {
+              setTyping(false);
+              setDraft(page.url === "about:blank" ? "" : page.url);
+            }
+          }}
+        />
+        {page.loading && <span className="web-loading small muted">加载中…</span>}
+        {canExternal && (
+          <button
+            type="button"
+            className="ghost small web-ext-btn"
+            title="在系统默认浏览器（Chrome）中打开当前网址"
+            onClick={openExternal}
+          >
+            外部打开
+          </button>
+        )}
+        <div className="web-chrome-wrap">
+          <button
+            type="button"
+            className={`ghost small web-chrome-btn ${chromeState?.connected ? "connected" : ""} ${chromeOpen ? "on" : ""}`}
+            title={
+              chromeState?.connected
+                ? `已连接本机 Chrome（${chromeState.tabs.length} 个标签页，复用完整 Cookie 与插件）`
+                : "连接本机真 Chrome（复用已登录 Cookie、扩展插件与标签页）"
+            }
+            onClick={() => setChromeOpen(!chromeOpen)}
+          >
+            <span className={`dot ${chromeState?.connected ? "ok" : "off"}`} />
+            <span>{chromeState?.connected ? `Chrome · ${chromeState.tabs.length}` : "Chrome"}</span>
+          </button>
+          {chromeOpen && (
+            <div className="web-chrome-popover" role="dialog" aria-label="本机 Chrome 桥接">
+              <div className="web-chrome-head">
+                <strong>{chromeState?.connected ? "本机 Chrome 已连接" : "连接本机真 Chrome"}</strong>
+                <button type="button" className="ghost icon" onClick={() => setChromeOpen(false)} aria-label="关闭">
+                  <Icon name="close" size={12} />
+                </button>
+              </div>
+              {chromeState?.connected ? (
+                <>
+                  <p className="small muted web-chrome-note">
+                    Agent 可通过 <code>chrome:&lt;id&gt;</code> 直接操作以下标签页（共享你的 Google 账号、Cookie 与全部 Chrome 插件）：
+                  </p>
+                  <ul className="web-chrome-tabs">
+                    {chromeState.tabs.map((t) => (
+                      <li key={t.tab} className="web-chrome-tab">
+                        <div className="web-chrome-tab-main">
+                          <code className="small">{t.tab}</code>
+                          <span className="web-chrome-tab-title" title={t.url}>
+                            {t.title}
+                          </span>
+                        </div>
+                        <div className="web-chrome-tab-actions">
+                          <button
+                            type="button"
+                            className="link small"
+                            onClick={() => {
+                              navigate(page, t.url);
+                              setChromeOpen(false);
+                            }}
+                          >
+                            内置打开
+                          </button>
+                          <button
+                            type="button"
+                            className="link small"
+                            onClick={() => void getBridge()?.browser?.chromeActivate?.(t.tab)}
+                          >
+                            切到 Chrome
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                    {!chromeState.tabs.length && <li className="small muted">当前没有打开的普通网页标签。</li>}
+                  </ul>
+                </>
+              ) : (
+                <div className="web-chrome-guide small">
+                  <p className="muted">
+                    像 Codex 一样，通过伴生扩展桥接你正在运行的真 Chrome，无需重启浏览器即可复用全部 Cookie、插件与已打开标签：
+                  </p>
+                  <ol className="web-chrome-steps">
+                    <li>
+                      点下方「打开扩展目录」，复制或记住该文件夹路径。
+                    </li>
+                    <li>
+                      在 Chrome 地址栏打开 <code>chrome://extensions</code>，开启右上角「开发者模式」，点「加载已解压的扩展程序」选中该目录即可。
+                    </li>
+                  </ol>
+                  <div className="web-chrome-actions">
+                    <button
+                      type="button"
+                      className="primary small"
+                      onClick={() => void getBridge()?.browser?.openExtensionFolder?.()}
+                    >
+                      打开扩展目录
+                    </button>
+                    <button type="button" className="ghost small" onClick={() => void copyExtensionsUrl()}>
+                      {copiedExtUrl ? "已复制地址" : "复制 chrome://extensions"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      {bookmarks.length > 0 && (
+        <div className="web-bookmarks" role="toolbar" aria-label="本机 Chrome 收藏夹">
+          {bookmarks.map((item) =>
+            item.kind === "url" ? (
+              <button
+                key={item.id}
+                type="button"
+                className="web-bm-item"
+                title={`${item.name}\n${item.url}`}
+                onClick={() => {
+                  setOpenFolder(null);
+                  navigate(page, item.url);
+                }}
+              >
+                {item.name}
+              </button>
+            ) : (
+              <div key={item.id} className="web-bm-folder-wrap">
+                <button
+                  type="button"
+                  className={`web-bm-item folder ${openFolder === item.id ? "on" : ""}`}
+                  title={`文件夹：${item.name}`}
+                  onClick={() => setOpenFolder(openFolder === item.id ? null : item.id)}
+                >
+                  <Icon name="folder" size={12} />
+                  <span>{item.name}</span>
+                </button>
+                {openFolder === item.id && (
+                  <div className="web-bm-menu" role="menu">
+                    {item.children.map((child) => (
+                      <button
+                        key={child.id}
+                        type="button"
+                        role="menuitem"
+                        className="web-bm-menu-item"
+                        title={child.url}
+                        onClick={() => {
+                          setOpenFolder(null);
+                          navigate(page, child.url);
+                        }}
+                      >
+                        <span className="web-bm-menu-name">{child.name}</span>
+                        <span className="web-bm-menu-url muted small">{child.url}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ),
+          )}
+        </div>
       )}
-      <Icon name="globe" size={13} />
-      <input
-        className="web-url"
-        value={draft}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoComplete="off"
-        placeholder="输入网址，回车打开"
-        aria-label="地址栏"
-        autoFocus={page.focusBar}
-        onFocus={() => {
-          page.focusBar = false;
-          setTyping(true);
-        }}
-        onBlur={() => setTyping(false)}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            setTyping(false);
-            navigate(page, draft);
-          } else if (e.key === "Escape") {
-            setTyping(false);
-            setDraft(page.url === "about:blank" ? "" : page.url);
-          }
-        }}
-      />
-      {page.loading && <span className="web-loading small muted">加载中…</span>}
-    </div>
+    </>
   );
 }
 

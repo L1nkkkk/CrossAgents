@@ -10,7 +10,8 @@ import { copyFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, net, session, webContents, type DownloadItem, type IpcMainInvokeEvent, type Session, type WebContents, type WebPreferences } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, session, shell, webContents, type DownloadItem, type IpcMainInvokeEvent, type Session, type WebContents, type WebPreferences } from "electron";
+import { bookmarkUrlAllowed, readLocalBookmarks } from "./browserBookmarks.cjs";
 import { BrowserTab } from "./browserDriver.cjs";
 import { createFileRegistry, decodeRoots, encodeRoots, isWithin, mimeFor, type FileRegistry } from "./browserFiles.cjs";
 import {
@@ -22,11 +23,21 @@ import {
   navigationAllowed,
   webviewAllowed,
 } from "./browserPolicy.cjs";
+import { CHROME_BRIDGE_PORT, ChromeBridgeCore, ensureChromeExtensionFiles, startChromeBridgeServer } from "./chromeBridge.cjs";
 
 /** Channel for a window.open / target=_blank from a tab: the page opens a new web tab. */
 export const OPEN_TAB_CHANNEL = "browser:open-tab";
 
 const browserSession = (): Session => session.fromPartition(BROWSER_PARTITION);
+let chromeBridge: ChromeBridgeCore | null = null;
+
+function getChromeBridge(): ChromeBridgeCore {
+  if (!chromeBridge) {
+    const extDir = join(app.getPath("userData"), "chrome-extension");
+    chromeBridge = new ChromeBridgeCore(extDir, CHROME_BRIDGE_PORT);
+  }
+  return chromeBridge;
+}
 /** Where the registered local-file folders are saved, so a restored file tab still reads them. */
 const ROOTS_FILE = "browser-file-roots.json";
 let rootsLog: (line: string) => void = () => undefined;
@@ -189,6 +200,13 @@ export function setupBrowserSession(log: (line: string) => void): void {
   ses.setPermissionCheckHandler((_contents, permission) => browserPermissionAllowed(permission));
   ses.on("will-download", (_event, item, contents) => handleDownload(item, contents, log));
   ses.protocol.handle(FILE_SCHEME, (request) => serveFile(request, log));
+  try {
+    const bridge = getChromeBridge();
+    ensureChromeExtensionFiles(bridge.extensionDir, bridge.port);
+    startChromeBridgeServer(bridge, log);
+  } catch (err) {
+    log(`chrome bridge setup: ${errorText(err)}`);
+  }
 }
 
 /**
@@ -246,5 +264,23 @@ export function registerBrowserIpc(fromApp: (event: IpcMainInvokeEvent) => boole
     if (typeof absPath !== "string" || !absPath) throw new Error("没有文件路径");
     if (!(await stat(absPath)).isFile()) throw new Error("不是一个文件");
     return fileRoots().register(absPath);
+  });
+  handle("browser:bookmarks", () => readLocalBookmarks());
+  handle("browser:open-external", async (_event, url) => {
+    if (!bookmarkUrlAllowed(url)) throw new Error("只允许在外部浏览器打开 http 或 https 链接");
+    await shell.openExternal(url);
+    return { ok: true };
+  });
+  handle("browser:chrome-status", () => getChromeBridge().status());
+  handle("browser:chrome-action", (_event, payload) => {
+    if (!payload || typeof payload !== "object") throw new Error("无效的 Chrome 请求");
+    return getChromeBridge().runAction(payload as Record<string, unknown>);
+  });
+  handle("browser:chrome-activate", (_event, tab) => getChromeBridge().activate(text(tab)));
+  handle("browser:chrome-open-ext-dir", async () => {
+    const bridge = getChromeBridge();
+    ensureChromeExtensionFiles(bridge.extensionDir, bridge.port);
+    await shell.openPath(bridge.extensionDir);
+    return { dir: bridge.extensionDir };
   });
 }

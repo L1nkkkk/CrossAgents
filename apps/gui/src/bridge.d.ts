@@ -71,6 +71,25 @@ export type TailscaleStatus = {
 /** A console entry a browser tab logged (electron/browserCdp.cts). */
 export type BrowserConsoleEntry = { level: string; text: string; ts: number };
 
+export type BookmarkLink = { kind: "url"; id: string; name: string; url: string };
+export type BookmarkFolder = { kind: "folder"; id: string; name: string; children: BookmarkLink[] };
+export type BookmarkEntry = BookmarkLink | BookmarkFolder;
+
+export type ChromeTabInfo = {
+  tab: string;
+  rawId: number;
+  url: string;
+  title: string;
+  active: boolean;
+};
+
+export type ChromeBridgeStatus = {
+  connected: boolean;
+  port: number;
+  extensionDir: string;
+  tabs: ChromeTabInfo[];
+};
+
 /**
  * The built-in browser's tabs (run note browser/contract §3), as `window.crossagents.browser`
  * exposes them (electron/preload.cts). Every call names the tab by its webContents id
@@ -89,6 +108,18 @@ export type BrowserBridge = {
   fileUrl(absPath: string): Promise<string>;
   /** The url of a new tab the page asked for (a `window.open` or `target=_blank` in a tab). */
   onOpenTab(listener: (url: string) => void): () => void;
+  /** Reads the person's local Chrome / Edge bookmark bar. */
+  bookmarks?(): Promise<{ source: string | null; entries: BookmarkEntry[] }>;
+  /** Opens an http(s) URL in the person's external browser (Chrome). */
+  openExternal?(url: string): Promise<{ ok: true }>;
+  /** Status and open tabs of the companion Chrome extension bridge. */
+  chromeStatus?(): Promise<ChromeBridgeStatus>;
+  /** Runs a `browser_*` tool against a `chrome:<id>` tab in the person's real Chrome. */
+  chromeAction?(payload: Record<string, unknown>): Promise<unknown>;
+  /** Brings a `chrome:<id>` tab to the front in the person's real Chrome. */
+  chromeActivate?(tab: string): Promise<{ ok: true }>;
+  /** Opens the unpacked Chrome extension directory in the system file manager. */
+  openExtensionFolder?(): Promise<{ dir: string }>;
 };
 
 export interface CrossAgentsBridge {

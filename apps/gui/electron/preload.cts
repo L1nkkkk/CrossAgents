@@ -2,7 +2,7 @@
 // `CrossAgentsBridge`; no Electron or Node API reaches the page.
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
-import type { ConnectionState, CrossAgentsBridge, HubResponse, PairStep, TailscaleStatus, UpdateState } from "../src/bridge";
+import type { BookmarkEntry, ChromeBridgeStatus, ConnectionState, CrossAgentsBridge, HubResponse, PairStep, TailscaleStatus, UpdateState } from "../src/bridge";
 
 type Reply = { ok: true; response: HubResponse } | { ok: false; error: string };
 
@@ -42,6 +42,12 @@ export type BrowserBridge = {
   console(wcId: number): Promise<{ level: string; text: string; ts: number }[]>;
   fileUrl(absPath: string): Promise<string>;
   onOpenTab(listener: (url: string) => void): () => void;
+  bookmarks(): Promise<{ source: string | null; entries: BookmarkEntry[] }>;
+  openExternal(url: string): Promise<{ ok: true }>;
+  chromeStatus(): Promise<ChromeBridgeStatus>;
+  chromeAction(payload: Record<string, unknown>): Promise<unknown>;
+  chromeActivate(tab: string): Promise<{ ok: true }>;
+  openExtensionFolder(): Promise<{ dir: string }>;
 };
 
 const browser: BrowserBridge = {
@@ -66,6 +72,12 @@ const browser: BrowserBridge = {
   console: (wcId) => browserCall("browser:console", wcId),
   fileUrl: (absPath) => browserCall("browser:file-url", absPath),
   onOpenTab: (listener) => subscribe("browser:open-tab", listener),
+  bookmarks: () => browserCall("browser:bookmarks"),
+  openExternal: (url) => browserCall("browser:open-external", url),
+  chromeStatus: () => browserCall("browser:chrome-status"),
+  chromeAction: (payload) => browserCall("browser:chrome-action", payload),
+  chromeActivate: (tab) => browserCall("browser:chrome-activate", tab),
+  openExtensionFolder: () => browserCall("browser:chrome-open-ext-dir"),
 };
 
 const bridge: CrossAgentsBridge & { browser: BrowserBridge } = {

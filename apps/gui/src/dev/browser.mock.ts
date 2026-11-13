@@ -135,5 +135,43 @@ export function createMockBrowser(opts: { delay?: number } = {}): MockBrowser {
       const name = absPath.split(/[\\/]/).filter(Boolean).pop() || "index.html";
       return `crossagents-file://mock/${encodeURIComponent(name)}`;
     },
+    async bookmarks() {
+      return {
+        source: "C:/Users/me/AppData/Local/Google/Chrome/User Data/Default/Bookmarks",
+        entries: [
+          { kind: "url", id: "1", name: "GitHub", url: "https://github.com/" },
+          { kind: "url", id: "2", name: "MDN HTML", url: "https://developer.mozilla.org/zh-CN/docs/Web/HTML" },
+          {
+            kind: "folder",
+            id: "3",
+            name: "内网工作台",
+            children: [
+              { kind: "url", id: "4", name: "Acme 价格", url: "https://example.com/pricing" },
+              { kind: "url", id: "5", name: "iWiki", url: "https://iwiki.woa.com/" },
+            ],
+          },
+        ],
+      };
+    },
+    async openExternal() {
+      return { ok: true };
+    },
+    async chromeStatus() {
+      return {
+        connected: false,
+        port: 7421,
+        extensionDir: "C:/Users/me/AppData/Roaming/CrossAgents/chrome-extension",
+        tabs: [],
+      };
+    },
+    async chromeAction() {
+      return { ok: true };
+    },
+    async chromeActivate() {
+      return { ok: true };
+    },
+    async openExtensionFolder() {
+      return { dir: "C:/Users/me/AppData/Roaming/CrossAgents/chrome-extension" };
+    },
   };
 }
