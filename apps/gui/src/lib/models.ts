@@ -28,6 +28,26 @@ export function vendorLabel(plugin: string): string {
   return VENDOR_LABELS[plugin] ?? (plugin ? plugin[0].toUpperCase() + plugin.slice(1) : plugin);
 }
 
+/** Gateway words as account metadata writes them: "Tokenhub Deepseek V4.1 Flash", "Ext Glm 5.3". */
+const GATEWAY_WORD = /^(tokenhub|ext|azure|bedrock|vertex|openrouter)\s+/i;
+
+/**
+ * A model label short enough for a chip (src/views/Home.tsx): a gateway's own word says nothing
+ * about the model — the chip's mark already names the vendor — so it goes, and the family's
+ * spelling wins over the metadata's. "Tokenhub Deepseek V4.1 Flash" → "DeepSeek V4.1 Flash".
+ * A label that is only a gateway word is left as it is. The full label stays in the tooltip.
+ */
+export function shortModelLabel(label: string): string {
+  let text = label.trim();
+  for (let m = GATEWAY_WORD.exec(text); m; m = GATEWAY_WORD.exec(text)) text = text.slice(m[0].length).trim();
+  if (!text) return label.trim();
+  text = text.replace(/\s+/g, " ");
+  const family = modelFamily(text);
+  const [first, ...rest] = text.split(" ");
+  // "Deepseek V4.1 Flash" keeps the family's own capitalisation: "DeepSeek V4.1 Flash".
+  return family.key !== "other" && first.toLowerCase() === family.label.toLowerCase() ? [family.label, ...rest].join(" ") : text;
+}
+
 /** The login an agent runs on (its config `account`); absent: the vendor's default one. */
 export function accountOf(agent: { config: unknown }): string | undefined {
   const v = agent.config && typeof agent.config === "object" ? (agent.config as Record<string, unknown>).account : undefined;

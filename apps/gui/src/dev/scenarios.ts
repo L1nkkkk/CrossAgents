@@ -427,25 +427,28 @@ export const SCENARIOS: Scenario[] = [
       ],
     };
   } },
-  { key: "home-chat-permission", label: "新 Chat 的权限", hint: "首页新 Chat：输入框旁选「自动执行」，发送时写进新 agent 的 config.permission；这台 Windows 上的 Cursor 不能选「要我确认」", build: () => {
+  { key: "home-chat-permission", label: "新 Chat 的权限", hint: "首页新 Chat：⚙ 里选「自动执行」，发送时写进新 agent 的 config.permission；这台 Windows 上的 Cursor 不能选「要我确认」", build: () => {
     const state = emptyHub();
     localStorage.setItem("crossagents.mode", JSON.stringify("chat"));
-    const control = () => document.querySelector<HTMLSelectElement>(".home-composer .permission-compact select");
+    // The pick is a radio list in the options panel, as in the agent editor.
+    const control = (text: string) =>
+      [...document.querySelectorAll<HTMLInputElement>('.home-options input[type="radio"]')].find((i) => i.closest("label")?.textContent?.includes(text));
     const verify = () => {
       const made = state.agents[0];
       if (!made) throw new Error("the chat did not create an agent");
       if ((made.config as Record<string, unknown> | null)?.permission !== "bypass") throw new Error("the chosen permission did not reach the new agent");
-      if (control()?.value !== "bypass") throw new Error("the pick does not show the choice");
+      if (!control("自动执行")?.checked) throw new Error("the pick does not show the choice");
       console.info("new chat: bypass written into config.permission");
     };
     return {
       state,
       route: "#/",
       script: [
-        { at: 400, act: () => setSelect(control(), "bypass") },
-        { at: 600, act: () => typeText(".home-composer textarea", "给登录页加一个错误提示") },
-        { at: 800, act: () => document.querySelector<HTMLButtonElement>(".home-composer .send")?.click() },
-        { at: 1900, act: verify },
+        { at: 300, act: () => document.querySelector<HTMLButtonElement>(".home-composer .options-btn")?.click() },
+        { at: 500, act: () => control("自动执行")?.click() },
+        { at: 700, act: () => typeText(".home-composer textarea", "给登录页加一个错误提示") },
+        { at: 900, act: () => document.querySelector<HTMLButtonElement>(".home-composer .send")?.click() },
+        { at: 2000, act: verify },
       ],
     };
   } },
@@ -470,6 +473,39 @@ export const SCENARIOS: Scenario[] = [
         { at: 1100, act: () => typeText(".home-composer textarea", "把登录页的错误提示改成人话") },
         { at: 1300, act: () => document.querySelector<HTMLButtonElement>(".home-composer .send")?.click() },
         { at: 2300, act: verify },
+      ],
+    };
+  } },
+  { key: "home-long-model", label: "首页 · 长模型名", hint: "选中「tokenhub_deepseek-v4.1-flash」这类长名字：chip 只写 DeepSeek V4.1 Flash（全名在 tooltip），Chat 与 Work 的底栏保持同样的一行高", build: () => {
+    const state = emptyHub();
+    // A gateway's model as an account reports it: 32 characters of name for a 700px composer.
+    state.plugins = state.plugins.map((p) => (p.name === "with" ? { ...p, models: ["tokenhub_deepseek-v4.1-flash", ...p.models] } : p));
+    localStorage.setItem("crossagents.mode", JSON.stringify("chat"));
+    localStorage.setItem("crossagents.chatModel", JSON.stringify({ plugin: "with", model: "tokenhub_deepseek-v4.1-flash" }));
+    const bar = () => document.querySelector<HTMLElement>(".home-composer .bar");
+    let chatHeight = 0;
+    const verifyChat = () => {
+      const chip = document.querySelector<HTMLElement>(".home-composer .bar-chips .chip-pick");
+      if (!chip) throw new Error("the model chip is missing");
+      const text = chip.textContent?.trim() ?? "";
+      // A narrow window cuts the name to an ellipsis; what must never be there is the vendor
+      // and the gateway's word.
+      if (!text.startsWith("DeepSeek")) throw new Error(`the chip does not name the model first: ${text}`);
+      if (/tokenhub|^with/i.test(text)) throw new Error(`the chip still writes the gateway's name: ${text}`);
+      chatHeight = bar()!.getBoundingClientRect().height;
+    };
+    const verifyWork = () => {
+      const workHeight = bar()!.getBoundingClientRect().height;
+      if (Math.abs(workHeight - chatHeight) > 1) throw new Error(`the bar is ${chatHeight}px in Chat and ${workHeight}px in Work`);
+      console.info("home: a long model name keeps the same bar in both modes");
+    };
+    return {
+      state,
+      route: "#/",
+      script: [
+        { at: 400, act: verifyChat },
+        { at: 700, act: () => document.querySelectorAll<HTMLButtonElement>(".mode-pick button")[1]?.click() },
+        { at: 1000, act: verifyWork },
       ],
     };
   } },

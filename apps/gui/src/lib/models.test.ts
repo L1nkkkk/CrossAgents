@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentNameFor, chatNameFor, chatTitle, effortLabel, effortLevels, effortOf, groupModels, modelFamily, onlyModels, prettyModel, switchModels, vendorLabel, workerModelFor } from "./models.ts";
+import { agentNameFor, chatNameFor, chatTitle, effortLabel, effortLevels, effortOf, groupModels, modelFamily, onlyModels, prettyModel, shortModelLabel, switchModels, vendorLabel, workerModelFor } from "./models.ts";
 
 test("models fall into their family, whatever gateway prefix they carry", () => {
   const family = (m: string) => modelFamily(m).key;
@@ -56,6 +56,15 @@ test("model ids read like names", () => {
 test("workers get the cheap sibling when there is one", () => {
   assert.equal(workerModelFor(["claude-opus-4-1", "claude-sonnet-4-5", "claude-haiku-4-5"], "claude-opus-4-1"), "claude-haiku-4-5");
   assert.equal(workerModelFor(["gpt-5-codex", "gpt-5"], "gpt-5-codex"), "gpt-5-codex");
+});
+
+test("a chip writes the model's own name, not the gateway's", () => {
+  // Account metadata spells a gateway's model out to its full width; a chip has no room for that.
+  assert.equal(shortModelLabel("Tokenhub Deepseek V4.1 Flash"), "DeepSeek V4.1 Flash");
+  assert.equal(shortModelLabel("Ext Glm 5.3 Flash"), "GLM 5.3 Flash");
+  assert.equal(shortModelLabel("Claude Opus 5.5"), "Claude Opus 5.5");
+  assert.equal(shortModelLabel("Tokenhub"), "Tokenhub");
+  assert.equal(shortModelLabel("  Tokenhub   Deepseek V4 Pro "), "DeepSeek V4 Pro");
 });
 
 test("agent names are valid and free", () => {

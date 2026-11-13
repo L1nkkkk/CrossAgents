@@ -14,7 +14,7 @@ import { modelDisplay } from "../lib/modelDisplay";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { ReasoningPicks } from "../reasoningPicks";
 import { reasoningWorkerRequest, type ReasoningChoice } from "../lib/workerModels";
-import { effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
+import { effortLabel, effortLevels, effortOf, prettyModel, shortModelLabel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
 import { chatBody, newChatRequest, runSessionFields, sessionStateKey, usabilityOf } from "../lib/sessionChoice";
 import { configWithPermission, permissionOf, type PermissionChoice } from "../lib/permission";
 import { PermissionPicks, applyPermission } from "../permissionPicks";
@@ -613,6 +613,17 @@ export function HomeView() {
     const label = c.plugin === "cursor" ? prettyModel(cursorMode(c.model).base) : modelDisplay(c.plugin, c.model, quota.data?.accounts ?? [], c.account).label;
     return `${vendorLabel(c.plugin)} ${label}${login ? ` · ${login}` : ""}`;
   };
+  /**
+   * What a chip writes: only the model's own name, without the vendor and without a gateway's
+   * word (`DeepSeek V4.1 Flash`, not `With Tokenhub Deepseek V4.1 Flash`). The mark already names
+   * the vendor, and a long account name here is what pushed the other chips onto a second line.
+   * The whole name stays in the chip's tooltip.
+   */
+  const chipLabel = (c: Choice) => {
+    const login = accountsOf(c.plugin).length > 1 ? accountLabel(c.account) ?? t("home.defaultLogin") : undefined;
+    const label = c.plugin === "cursor" ? prettyModel(cursorMode(c.model).base) : modelDisplay(c.plugin, c.model, quota.data?.accounts ?? [], c.account).label;
+    return `${shortModelLabel(label)}${login ? ` · ${login}` : ""}`;
+  };
 
   const wsLabel = folder ? wsName(folder) : current?.name;
   // @ names a helper: an agent already in this project, or a model to recruit one on.
@@ -713,9 +724,10 @@ export function HomeView() {
               )}
               {mode === "chat" && !chosenSession && chatModel && (
                 <ChipMenu
+                  className="chip-model"
                   icon={<VendorMark plugin={chatModel.plugin} size={14} />}
-                  label={choiceLabel(chatModel)}
-                  title={t("home.model")}
+                  label={chipLabel(chatModel)}
+                  title={`${t("home.model")} · ${choiceLabel(chatModel)}`}
                   items={chatItems}
                   searchable
                   up
@@ -723,9 +735,10 @@ export function HomeView() {
               )}
               {mode === "run" && !chosenSession && lead && (
                 <ChipMenu
+                  className="chip-model"
                   icon={leadAgent ? <Avatar agent={leadAgent} size={16} /> : <VendorMark plugin={leadPlugin!} size={14} />}
-                  label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? choiceLabel(lead) : ""}
-                  title={t("home.lead")}
+                  label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? chipLabel(lead) : ""}
+                  title={leadAgent ? t("home.lead") : lead.kind === "model" ? `${t("home.lead")} · ${choiceLabel(lead)}` : t("home.lead")}
                   items={leadItems}
                   searchable
                   up
@@ -749,38 +762,28 @@ export function HomeView() {
               {levels.length > 0 && (
                 <ChipMenu
                   icon={<Icon name="brain" size={13} />}
-                  label={`${t("home.effortShort")} ${effortOn ? effortLabel(effortOn) : t("home.effortDefault")}`}
-                  title={t("home.effort")}
+                  label={effortOn ? `${t("home.effortShort")} ${effortLabel(effortOn)}` : t("home.effortShort")}
+                  title={effortOn ? `${t("home.effort")} · ${effortLabel(effortOn)}` : t("home.effort")}
                   items={effortItems}
                   up
                 />
               )}
             </div>
             <div className="bar-actions">
-              {/* Whose permission the chat runs with. A run's default worker has the same pick
-                  beside the worker, in the options. */}
-              {mode === "chat" && (
-                <PermissionPicks
-                  variant="compact"
-                  label={t("home.permission")}
-                  value={chatPermission}
-                  onChange={setChatPerm}
-                  plugin={chosenSession?.agent.plugin ?? chatModel?.plugin}
-                />
-              )}
               {files.picker}
-              {mode === "run" && (
-                <button
-                  type="button"
-                  className={`icon-btn options-btn ${options ? "on" : ""}`}
-                  onClick={() => setOptions(!options)}
-                  aria-expanded={options}
-                  title={t("home.options")}
-                  aria-label={t("home.options")}
-                >
-                  <Icon name="sliders" size={15} />
-                </button>
-              )}
+              {/* Both modes set their options behind this button: a chat's permission, a run's
+                  worker, budget and continuation. With the chat's permission on the bar itself,
+                  Chat carried one chip more than Work and wrapped a row earlier. */}
+              <button
+                type="button"
+                className={`icon-btn options-btn ${options ? "on" : ""}`}
+                onClick={() => setOptions(!options)}
+                aria-expanded={options}
+                title={t("home.options")}
+                aria-label={t("home.options")}
+              >
+                <Icon name="sliders" size={15} />
+              </button>
               <button
                 className="primary send"
                 disabled={!ready}
@@ -815,7 +818,20 @@ export function HomeView() {
           )}
         </div>
 
-        {mode === "run" && options && (
+        {options && (mode === "chat" ? (
+          // A chat's options: how its agent may act. The pick is the chat's own when one is
+          // chosen, else the agent a new chat would create.
+          <div className="card form home-options">
+            <Field label={t("home.permission")}>
+              <PermissionPicks
+                label={t("home.permission")}
+                value={chatPermission}
+                onChange={setChatPerm}
+                plugin={chosenSession?.agent.plugin ?? chatModel?.plugin}
+              />
+            </Field>
+          </div>
+        ) : (
           <div className="card form home-options">
             <div className="row" style={{ alignItems: "flex-start" }}>
               <Field label={t("home.preset")}>
@@ -882,7 +898,7 @@ export function HomeView() {
               </Field>
             </div>
           </div>
-        )}
+        ))}
         {(error || sessions.error) && (
           <div style={{ marginTop: 12 }}>
             <ErrorBox error={error ?? t("session.loadFailed", { error: sessions.error ?? "" })} />

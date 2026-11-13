@@ -854,13 +854,19 @@ a.who-chip:hover { text-decoration: none; background: var(--selected); }
 .ws-dot { width: 9px; height: 9px; border-radius: 3px; background: var(--hue); flex-shrink: 0; display: inline-block; }
 .options-btn { width: 30px; height: 30px; border-radius: 999px; }
 .home-composer .send { border-radius: 999px; }
-/* The composer's bottom line looks the same in Chat and Work: the chips wrap among themselves
-   on the left, the actions (permission, attach, options, send) keep to the bottom right. One
-   wrapping row with a spacer instead dropped the send button into the middle of a second row as
-   soon as the chips took one row too many, which is what made the two modes look different. */
+/* The composer's bottom line looks the same in Chat and Work, whatever is picked: the chips a
+   start is set up with share the left, the actions keep to the bottom right. As one wrapping
+   row with a spacer, the send button dropped into the middle of a second row as soon as the
+   chips needed one, so Chat and Work looked different. */
 .home-composer .bar { display: flex; align-items: flex-end; gap: 8px; flex-wrap: nowrap; }
-.home-composer .bar-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1 1 auto; min-width: 0; }
+.home-composer .bar-chips { display: flex; align-items: center; gap: 5px; flex-wrap: nowrap; flex: 1 1 auto; min-width: 0; overflow: hidden; }
 .home-composer .bar-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
+/* One row, always: a model's name can be long (a gateway writes "Tokenhub Deepseek V4.1
+   Flash"), and it is the only chip that gives way — everything else keeps its words. The
+   whole name stays in the chip's tooltip. */
+.home-composer .bar-chips > .chip-menu { flex: 0 0 auto; min-width: 0; max-width: min(190px, 45%); }
+.home-composer .bar-chips > .chip-model { flex: 0 1 auto; }
+.home-composer .bar-chips > .chip-menu > .chip-pick { height: 26px; padding: 0 8px 0 7px; font-size: 12px; min-width: 0; max-width: 100%; }
 /* The line under the box keeps its place when nothing is written on it (a chat has no branch
    note), so switching Chat / Work does not move the greeting above it. */
 .home-note { margin: 12px 0 0; min-height: 18px; text-align: center; font-size: 12.5px; color: var(--muted); }

@@ -68,6 +68,7 @@ export function ChipMenu({
   items,
   align = "left",
   up,
+  className,
   menuClassName,
   searchable,
 }: {
@@ -77,6 +78,8 @@ export function ChipMenu({
   items: MenuItem[];
   align?: "left" | "right";
   up?: boolean;
+  /** Extra class on the chip itself (the home composer lets one chip give way when room is short). */
+  className?: string;
   /** Extra class on the menu itself: it lives in <body>, so styles cannot reach it through the chip's parents. */
   menuClassName?: string;
   searchable?: boolean;
@@ -185,7 +188,7 @@ export function ChipMenu({
 
   return (
     <div
-      className="chip-menu"
+      className={`chip-menu ${className ?? ""}`.trim()}
       ref={ref}
       onKeyDown={(e) => {
         if (e.nativeEvent.isComposing) return;
