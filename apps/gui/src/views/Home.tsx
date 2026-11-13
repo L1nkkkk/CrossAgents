@@ -689,110 +689,131 @@ export function HomeView() {
               </button>
             </div>
           )}
+          {/* Two parts that keep their place in both modes: the chips a start is set up with
+              wrap among themselves on the left, the actions stay pinned to the bottom right.
+              As one wrapping row with a spacer, the send button dropped into the middle of a
+              second row as soon as the chips needed one, so Chat and Work looked different. */}
           <div className="bar">
-            <ChipMenu
-              icon={wsLabel ? <span className={`ws-dot av-${hueOf(wsKey(folder ?? current!.path))}`} /> : <Icon name={mode === "chat" ? "chat" : "folder"} size={14} />}
-              label={wsLabel ?? (remote ? "输入中心上的路径" : t(mode === "chat" ? "home.noProject" : "home.chooseWorkspace"))}
-              title={folder ?? current?.path}
-              items={wsItems}
-              up
-            />
-            {(sessionRepo || chatsOnly || chosenSession) && (
+            <div className="bar-chips">
               <ChipMenu
-                icon={chosenSession ? <Avatar agent={chosenSession.agent} size={16} /> : <Icon name="chat" size={14} />}
-                label={chosenSession ? `${displayName(chosenSession.agent)}${sessionUse?.restore ? ` · ${t("session.willRestore")}` : ""}` : t("home.newSession")}
-                title={t("home.session")}
-                items={sessionItems}
+                icon={wsLabel ? <span className={`ws-dot av-${hueOf(wsKey(folder ?? current!.path))}`} /> : <Icon name={mode === "chat" ? "chat" : "folder"} size={14} />}
+                label={wsLabel ?? (remote ? "输入中心上的路径" : t(mode === "chat" ? "home.noProject" : "home.chooseWorkspace"))}
+                title={folder ?? current?.path}
+                items={wsItems}
                 up
               />
-            )}
-            {mode === "chat" && !chosenSession && chatModel && (
-              <ChipMenu
-                icon={<VendorMark plugin={chatModel.plugin} size={14} />}
-                label={choiceLabel(chatModel)}
-                title={t("home.model")}
-                items={chatItems}
-                searchable
-                up
-              />
-            )}
-            {mode === "run" && !chosenSession && lead && (
-              <ChipMenu
-                icon={leadAgent ? <Avatar agent={leadAgent} size={16} /> : <VendorMark plugin={leadPlugin!} size={14} />}
-                label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? choiceLabel(lead) : ""}
-                title={t("home.lead")}
-                items={leadItems}
-                searchable
-                up
-              />
-            )}
-            {/* After the model it applies to: the chat's, or the run lead's. */}
-            {!chosenSession && activeChoice && activePlugin?.name === "cursor" && <ReasoningPicks plugin={activePlugin} model={activeChoice.model} onChange={(model) => {
-              if (!model) return;
-              const next = { ...activeChoice, model };
-              if (mode === "chat") { setChatPick(next); save(CHAT_MODEL_KEY, next); }
-              else choose({ kind: "model", ...next });
-            }} />}
-            {levels.length > 0 && (
-              <ChipMenu
-                icon={<Icon name="brain" size={13} />}
-                label={`${t("home.effortShort")} ${effortOn ? effortLabel(effortOn) : t("home.effortDefault")}`}
-                title={t("home.effort")}
-                items={effortItems}
-                up
-              />
-            )}
-            {mode === "chat" && (
-              <PermissionPicks
-                variant="compact"
-                label={t("home.permission")}
-                value={chatPermission}
-                onChange={setChatPerm}
-                plugin={chosenSession?.agent.plugin ?? chatModel?.plugin}
-              />
-            )}
-            <div className="spacer" />
-            {files.picker}
-            {mode === "run" && (
+              {(sessionRepo || chatsOnly || chosenSession) && (
+                <ChipMenu
+                  icon={chosenSession ? <Avatar agent={chosenSession.agent} size={16} /> : <Icon name="chat" size={14} />}
+                  label={chosenSession ? `${displayName(chosenSession.agent)}${sessionUse?.restore ? ` · ${t("session.willRestore")}` : ""}` : t("home.newSession")}
+                  title={t("home.session")}
+                  items={sessionItems}
+                  up
+                />
+              )}
+              {mode === "chat" && !chosenSession && chatModel && (
+                <ChipMenu
+                  icon={<VendorMark plugin={chatModel.plugin} size={14} />}
+                  label={choiceLabel(chatModel)}
+                  title={t("home.model")}
+                  items={chatItems}
+                  searchable
+                  up
+                />
+              )}
+              {mode === "run" && !chosenSession && lead && (
+                <ChipMenu
+                  icon={leadAgent ? <Avatar agent={leadAgent} size={16} /> : <VendorMark plugin={leadPlugin!} size={14} />}
+                  label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? choiceLabel(lead) : ""}
+                  title={t("home.lead")}
+                  items={leadItems}
+                  searchable
+                  up
+                />
+              )}
+              {/* After the model it applies to: the chat's, or the run lead's. */}
+              {!chosenSession && activeChoice && activePlugin?.name === "cursor" && (
+                <ReasoningPicks
+                  plugin={activePlugin}
+                  model={activeChoice.model}
+                  onChange={(model) => {
+                    if (!model) return;
+                    const next = { ...activeChoice, model };
+                    if (mode === "chat") {
+                      setChatPick(next);
+                      save(CHAT_MODEL_KEY, next);
+                    } else choose({ kind: "model", ...next });
+                  }}
+                />
+              )}
+              {levels.length > 0 && (
+                <ChipMenu
+                  icon={<Icon name="brain" size={13} />}
+                  label={`${t("home.effortShort")} ${effortOn ? effortLabel(effortOn) : t("home.effortDefault")}`}
+                  title={t("home.effort")}
+                  items={effortItems}
+                  up
+                />
+              )}
+            </div>
+            <div className="bar-actions">
+              {/* Whose permission the chat runs with. A run's default worker has the same pick
+                  beside the worker, in the options. */}
+              {mode === "chat" && (
+                <PermissionPicks
+                  variant="compact"
+                  label={t("home.permission")}
+                  value={chatPermission}
+                  onChange={setChatPerm}
+                  plugin={chosenSession?.agent.plugin ?? chatModel?.plugin}
+                />
+              )}
+              {files.picker}
+              {mode === "run" && (
+                <button
+                  type="button"
+                  className={`icon-btn options-btn ${options ? "on" : ""}`}
+                  onClick={() => setOptions(!options)}
+                  aria-expanded={options}
+                  title={t("home.options")}
+                  aria-label={t("home.options")}
+                >
+                  <Icon name="sliders" size={15} />
+                </button>
+              )}
               <button
-                type="button"
-                className={`icon-btn options-btn ${options ? "on" : ""}`}
-                onClick={() => setOptions(!options)}
-                aria-expanded={options}
-                title={t("home.options")}
-                aria-label={t("home.options")}
+                className="primary send"
+                disabled={!ready}
+                onClick={submit}
+                aria-label={t(mode === "chat" ? "home.send" : "home.start")}
+                title={t(mode === "chat" ? "home.sendHint" : "home.startHint")}
               >
-                <Icon name="sliders" size={15} />
+                <Icon name="send" size={16} />
               </button>
-            )}
-            <button
-              className="primary send"
-              disabled={!ready}
-              onClick={submit}
-              aria-label={t(mode === "chat" ? "home.send" : "home.start")}
-              title={t(mode === "chat" ? "home.sendHint" : "home.startHint")}
-            >
-              <Icon name="send" size={16} />
-            </button>
+            </div>
           </div>
         </div>
 
-        {missing ? (
-          <p className="home-note">{missing}</p>
-        ) : (
-          mode === "run" && (
-            <p className="home-note">
-              {t(preset === "full" ? "home.whereFull" : "home.where")}
-              {preset !== "manual" && (
-                <button type="button" className="link" onClick={() => setOptions(true)}>
-                  {" · "}
-                  {PRESETS.find((p) => p.key === preset)?.label}
-                </button>
-              )}
-              {preset === "full" && !maxUsd && !maxMinutes && !maxTokens && <span className="warn-text"> · {t("home.noCaps")}</span>}
-            </p>
-          )
-        )}
+        {/* The line under the box keeps its place in both modes: turning Chat into Work must
+            not move the greeting above it. */}
+        <div className="home-note">
+          {missing ? (
+            <span>{missing}</span>
+          ) : (
+            mode === "run" && (
+              <span>
+                {t(preset === "full" ? "home.whereFull" : "home.where")}
+                {preset !== "manual" && (
+                  <button type="button" className="link" onClick={() => setOptions(true)}>
+                    {" · "}
+                    {PRESETS.find((p) => p.key === preset)?.label}
+                  </button>
+                )}
+                {preset === "full" && !maxUsd && !maxMinutes && !maxTokens && <span className="warn-text"> · {t("home.noCaps")}</span>}
+              </span>
+            )
+          )}
+        </div>
 
         {mode === "run" && options && (
           <div className="card form home-options">
