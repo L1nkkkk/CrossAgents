@@ -236,6 +236,10 @@ function makeWebview(page: Page, url: string): WebviewTag {
   const el = document.createElement("webview") as WebviewTag;
   el.setAttribute("partition", "persist:browser");
   el.setAttribute("data-crossagents-browser", "1");
+  // Without this Electron blocks the guest's window.open / target=_blank before any handler runs,
+  // so a link that asks for a new tab (a video card on bilibili, most search results) did nothing.
+  // The window itself is still refused: the main process sends its url here as a new tab.
+  el.setAttribute("allowpopups", "");
   el.setAttribute("src", url);
   el.addEventListener("dom-ready", () => {
     // A re-attached <webview> has a new guest, and so a new id: this is where it is learned.
