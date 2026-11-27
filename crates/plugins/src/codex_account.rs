@@ -699,6 +699,7 @@ impl AccountProvider for CodexAccounts {
                         description: m["description"].as_str().map(str::to_owned),
                         context_window: m["context_window"].as_u64(),
                         credit_multiplier: None,
+                        efforts: crossagents_drivers::codex_native::parse_model_efforts(m),
                         id,
                     },
                 ))
@@ -998,15 +999,34 @@ pub(crate) mod tests {
     async fn lists_visible_models_by_priority() {
         let home = fixture(false);
         let cache = serde_json::json!({ "models": [
-            { "slug": "old", "display_name": "Old", "visibility": "list", "priority": 9 },
+            { "slug": "old", "display_name": "Old", "visibility": "list", "priority": 9,
+              "supported_reasoning_levels": [{ "effort": "low" }, { "effort": "high" }] },
             { "slug": "hidden", "visibility": "hide", "priority": 1 },
-            { "slug": "best", "display_name": "Best", "description": "strong", "visibility": "list", "priority": 2, "context_window": 1000 }
+            { "slug": "best", "display_name": "Best", "description": "strong", "visibility": "list", "priority": 2, "context_window": 1000,
+              "supported_reasoning_levels": [
+                  { "effort": "low" }, { "effort": "medium" }, { "effort": "high" },
+                  { "effort": "xhigh" }, { "effort": "max" }, { "effort": "ultra" }
+              ] },
+            { "slug": "legacy", "display_name": "Legacy", "visibility": "list", "priority": 10 }
         ]});
         std::fs::write(home.path().join("models_cache.json"), cache.to_string()).unwrap();
         let models = CodexAccounts::default().models(&account(home.path())).await;
         let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["best", "old"]);
+        assert_eq!(ids, ["best", "old", "legacy"]);
         assert_eq!(models[0].context_window, Some(1000));
+        assert_eq!(
+            models[0].efforts,
+            Some(vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+                "ultra".into(),
+            ])
+        );
+        assert_eq!(models[1].efforts, Some(vec!["low".into(), "high".into()]));
+        assert_eq!(models[2].efforts, None);
     }
 
     #[tokio::test]

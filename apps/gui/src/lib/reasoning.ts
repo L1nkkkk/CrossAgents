@@ -46,7 +46,7 @@ export function cursorModeLabel(model: string): string {
   return parts.length ? parts.join(" · ") : "默认";
 }
 
-const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 /** A base's offered variants for a menu: no effort suffix first, then weakest to strongest; standard before Thinking; Fast off before on. */
 export function cursorVariantsOrdered(models: readonly string[], model: string): string[] {

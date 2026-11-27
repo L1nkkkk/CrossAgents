@@ -171,6 +171,7 @@ const EFFORT_LABELS: Record<string, string> = {
   high: "高",
   xhigh: "超高",
   max: "最高",
+  ultra: "极致",
 };
 
 export function effortLabel(value: string): string {

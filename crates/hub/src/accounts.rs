@@ -48,6 +48,7 @@ struct ModelRead {
     at: Instant,
     loading: bool,
     models: Vec<String>,
+    efforts: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 fn model_identity(account: &Account) -> String {
@@ -1031,10 +1032,10 @@ impl Accounts {
             }
             reads.next += 1;
             let ticket = reads.next;
-            let previous = reads
+            let (previous, previous_efforts) = reads
                 .entries
                 .remove(&account.id)
-                .map(|r| r.models)
+                .map(|r| (r.models, r.efforts))
                 .unwrap_or_default();
             reads.entries.insert(
                 account.id.clone(),
@@ -1044,6 +1045,7 @@ impl Accounts {
                     at: Instant::now(),
                     loading: true,
                     models: previous,
+                    efforts: previous_efforts,
                 },
             );
             drop(reads);
@@ -1067,9 +1069,17 @@ impl Accounts {
                     read.at = Instant::now();
                     match result {
                         Ok(result) => {
-                            let result: Vec<_> = result.into_iter().map(|m| m.id).collect();
-                            let changed = read.models != result;
-                            read.models = result;
+                            let mut ids = Vec::with_capacity(result.len());
+                            let mut efforts = std::collections::BTreeMap::new();
+                            for m in result {
+                                if let Some(levels) = m.efforts {
+                                    efforts.insert(m.id.clone(), levels);
+                                }
+                                ids.push(m.id);
+                            }
+                            let changed = read.models != ids || read.efforts != efforts;
+                            read.models = ids;
+                            read.efforts = efforts;
                             changed
                         }
                         Err(_) => false,
@@ -1083,6 +1093,36 @@ impl Accounts {
             });
         }
         models
+    }
+
+    /// Per-model reasoning effort levels reported by `plugin`'s cached account model lists.
+    /// Non-blocking: reads what `offered_models` already cached; first account to report a
+    /// model wins.
+    pub async fn offered_model_efforts(
+        &self,
+        plugin: &str,
+    ) -> std::collections::BTreeMap<String, Vec<String>> {
+        let Ok(accounts) = self.store().list_accounts().await else {
+            return std::collections::BTreeMap::new();
+        };
+        let reads = self.model_reads.lock().unwrap();
+        let mut by_model = std::collections::BTreeMap::new();
+        for account in accounts.into_iter().filter(|a| a.provider == plugin) {
+            let identity = model_identity(&account);
+            let Some(read) = reads
+                .entries
+                .get(&account.id)
+                .filter(|r| r.identity == identity)
+            else {
+                continue;
+            };
+            for (model, levels) in &read.efforts {
+                by_model
+                    .entry(model.clone())
+                    .or_insert_with(|| levels.clone());
+            }
+        }
+        by_model
     }
 
     /// Environment for an agent bound to an account through `config.account`, plus any
@@ -2134,6 +2174,7 @@ mod login_tests {
                     description: None,
                     context_window: None,
                     credit_multiplier: None,
+                    efforts: None,
                 }]
             } else {
                 Vec::new()
@@ -2371,6 +2412,7 @@ mod login_tests {
                 description: None,
                 context_window: None,
                 credit_multiplier: None,
+                efforts: Some(vec!["low".into(), "high".into()]),
             }]
         }
         fn login_command(&self, _: &Account) -> LoginCommand {
@@ -2421,6 +2463,13 @@ mod login_tests {
         assert_eq!(
             accounts.offered_models("cursor").await,
             ["new-account-model"]
+        );
+        assert_eq!(
+            accounts.offered_model_efforts("cursor").await,
+            std::collections::BTreeMap::from([(
+                "new-account-model".to_owned(),
+                vec!["low".to_owned(), "high".to_owned()]
+            )])
         );
         assert_eq!(provider.reads.load(Ordering::SeqCst), 2);
         // Plugin install/uninstall/refresh and successful login discard the account list.

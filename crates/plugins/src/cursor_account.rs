@@ -502,6 +502,7 @@ fn models_of(text: &str) -> Vec<ModelInfo> {
             description: None,
             context_window: None,
             credit_multiplier: None,
+            efforts: None,
         });
     }
     models
@@ -520,6 +521,7 @@ fn fallback_models() -> Vec<ModelInfo> {
                     description: None,
                     context_window: None,
                     credit_multiplier: None,
+                    efforts: None,
                 })
                 .collect()
         })

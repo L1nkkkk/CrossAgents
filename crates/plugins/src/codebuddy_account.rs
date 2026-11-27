@@ -155,11 +155,17 @@ impl CodebuddyAccounts {
         if let Some(uid) = login.and_then(|a| a.get("uid")).and_then(Value::as_str) {
             let home = account.home.clone();
             let uid = uid.to_owned();
-            let rates = tokio::task::spawn_blocking(move || multipliers(&home, &uid))
-                .await
-                .unwrap_or_default();
+            let (rates, efforts) = tokio::task::spawn_blocking(move || {
+                (
+                    multipliers(&home, &uid),
+                    codebuddy_native::cached_model_efforts(&home, Some(&uid)),
+                )
+            })
+            .await
+            .unwrap_or_default();
             for model in &mut models {
                 model.credit_multiplier = rates.get(&model.id).copied();
+                model.efforts = efforts.get(&model.id).cloned();
             }
         }
         let entry = InitCache { init, models };
@@ -473,6 +479,7 @@ fn models_of(init: &Value) -> Vec<ModelInfo> {
                     .map(str::to_owned),
                 context_window: None,
                 credit_multiplier: None,
+                efforts: None,
                 id,
             })
         })

@@ -8,4 +8,9 @@ export type ModelInfo = { id: string, name: string, description: string | null, 
  * What a call costs relative to the vendor's base rate, for vendors that bill in
  * credits (CodeBuddy's "x0.69 credits").
  */
-credit_multiplier?: number, };
+credit_multiplier?: number, 
+/**
+ * Reasoning effort levels this model takes, lowest first, when the vendor reports them
+ * per model (`Some(vec![])` means none at all; `None` falls back to the plugin's list).
+ */
+efforts?: Array<string>, };

@@ -88,6 +88,11 @@ impl Driver for CodebuddyNativeDriver {
         self.inner.models()
     }
 
+    fn model_efforts(&self, model: &str) -> Option<Vec<String>> {
+        default_codebuddy_home()
+            .and_then(|home| cached_model_efforts(&home, None).remove(model))
+    }
+
     fn installed(&self) -> bool {
         self.inner.installed()
     }
@@ -133,6 +138,74 @@ impl Driver for CodebuddyNativeDriver {
     ) -> Result<Option<Box<dyn DriverSession>>, CoreError> {
         self.inner.adopt(session_id, turn_running, spec).await
     }
+}
+
+/// `$CODEBUDDY_CONFIG_DIR`, else `~/.codebuddy`.
+fn default_codebuddy_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CODEBUDDY_CONFIG_DIR") {
+        return Some(PathBuf::from(home));
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+    Some(PathBuf::from(home).join(".codebuddy"))
+}
+
+/// Reasoning effort levels from one CodeBuddy cached model object (`reasoning.supportedEfforts`,
+/// or `supportsReasoning: false` → empty). `None` when absent so the plugin's default list applies.
+pub fn parse_model_efforts(entry: &Value) -> Option<Vec<String>> {
+    if let Some(arr) = entry
+        .pointer("/reasoning/supportedEfforts")
+        .and_then(Value::as_array)
+    {
+        let mut levels = Vec::new();
+        for item in arr {
+            if let Some(effort) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                let effort = effort.to_ascii_lowercase();
+                if !levels.contains(&effort) {
+                    levels.push(effort);
+                }
+            }
+        }
+        return Some(levels);
+    }
+    if entry.get("supportsReasoning").and_then(Value::as_bool) == Some(false) {
+        return Some(Vec::new());
+    }
+    None
+}
+
+/// Per-model effort levels from CodeBuddy's `local_storage/` cache under `home`.
+/// When `uid` is given, only entries for that user are read; otherwise every cached
+/// model list is scanned.
+pub fn cached_model_efforts(
+    home: &Path,
+    uid: Option<&str>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(files) = std::fs::read_dir(home.join("local_storage")) else {
+        return out;
+    };
+    for file in files.flatten() {
+        let Ok(text) = std::fs::read_to_string(file.path()) else {
+            continue;
+        };
+        let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let models = entries
+            .iter()
+            .filter(|e| uid.is_none_or(|u| e.get("userId").and_then(Value::as_str) == Some(u)))
+            .filter_map(|e| e.pointer("/data/models")?.as_array())
+            .flatten();
+        for model in models {
+            let Some(id) = model.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(efforts) = parse_model_efforts(model) {
+                out.insert(id.to_owned(), efforts);
+            }
+        }
+    }
+    out
 }
 
 /// Makes session `session_id` resumable from `cwd`. CodeBuddy keeps each session under
@@ -458,6 +531,53 @@ mod tests {
         assert_eq!(configured.name(), "codebuddy");
         assert_eq!(configured.models(), ["hy3"]);
         assert!(configured.missing.is_none());
+    }
+
+    #[test]
+    fn cached_model_efforts_reads_per_model_supported_efforts() {
+        let home = tempfile::tempdir().unwrap();
+        let ls = home.path().join("local_storage");
+        std::fs::create_dir_all(&ls).unwrap();
+        let payload = serde_json::json!([
+            {
+                "userId": "u1",
+                "data": {
+                    "models": [
+                        { "id": "deepseek-v4.1-flash", "supportsReasoning": true, "reasoning": { "supportedEfforts": ["low", "high", "max"] } },
+                        { "id": "hy4std", "supportsReasoning": true, "reasoning": { "supportedEfforts": ["high"] } },
+                        { "id": "gpt-6.1-sol", "supportsReasoning": true, "reasoning": { "supportedEfforts": ["low", "medium", "high", "xhigh"] } },
+                        { "id": "plain-chat", "supportsReasoning": false },
+                        { "id": "legacy", "supportsReasoning": true, "reasoning": { "effort": "high" } }
+                    ]
+                }
+            },
+            {
+                "userId": "u2",
+                "data": {
+                    "models": [
+                        { "id": "other-only", "reasoning": { "supportedEfforts": ["low"] } }
+                    ]
+                }
+            }
+        ]);
+        std::fs::write(ls.join("entry_test.info"), payload.to_string()).unwrap();
+
+        let u1 = cached_model_efforts(home.path(), Some("u1"));
+        assert_eq!(
+            u1.get("deepseek-v4.1-flash"),
+            Some(&vec!["low".into(), "high".into(), "max".into()])
+        );
+        assert_eq!(u1.get("hy4std"), Some(&vec!["high".into()]));
+        assert_eq!(
+            u1.get("gpt-6.1-sol"),
+            Some(&vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()])
+        );
+        assert_eq!(u1.get("plain-chat"), Some(&Vec::new()));
+        assert_eq!(u1.get("legacy"), None);
+        assert_eq!(u1.get("other-only"), None);
+
+        let all = cached_model_efforts(home.path(), None);
+        assert_eq!(all.get("other-only"), Some(&vec!["low".into()]));
     }
 
     /// A session asked of a CLI this machine does not have says what the description says:

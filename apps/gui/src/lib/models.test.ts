@@ -88,6 +88,7 @@ test("effort levels come from the plugin, and from an agent's config", () => {
   assert.deepEqual(effortLevels([]), []);
   assert.deepEqual(effortLevels(undefined), []);
   assert.equal(effortLabel("xhigh"), "超高");
+  assert.equal(effortLabel("ultra"), "极致");
   assert.equal(effortOf({ effort: "high", account: "a" }), "high");
   assert.equal(effortOf(null), undefined);
   assert.equal(effortOf({ effort: "" }), undefined);

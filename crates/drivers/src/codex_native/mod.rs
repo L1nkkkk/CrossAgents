@@ -220,6 +220,10 @@ impl Driver for CodexNativeDriver {
         self.models.clone()
     }
 
+    fn model_efforts(&self, model: &str) -> Option<Vec<String>> {
+        default_codex_home().and_then(|home| cached_model_efforts(&home, model))
+    }
+
     fn installed(&self) -> bool {
         self.cli.installed()
     }
@@ -1216,6 +1220,39 @@ pub fn cached_models(home: &Path) -> Vec<String> {
     models.into_iter().map(|(_, slug)| slug).collect()
 }
 
+/// Reasoning effort levels from one `models_cache.json` entry's `supported_reasoning_levels`.
+/// `None` when the cache entry omits the field (older caches), so the plugin's default applies.
+pub fn parse_model_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
+    let arr = entry.get("supported_reasoning_levels")?.as_array()?;
+    let mut levels = Vec::new();
+    for item in arr {
+        if let Some(effort) = item
+            .get("effort")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let effort = effort.to_ascii_lowercase();
+            if !levels.contains(&effort) {
+                levels.push(effort);
+            }
+        }
+    }
+    Some(levels)
+}
+
+/// Reasoning effort levels `model` takes from `home/models_cache.json`, or `None` when
+/// the cache does not declare them for `model`.
+pub fn cached_model_efforts(home: &Path, model: &str) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(home.join("models_cache.json")).ok()?;
+    let cache = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    cache["models"]
+        .as_array()?
+        .iter()
+        .find(|m| m["slug"].as_str() == Some(model))
+        .and_then(parse_model_efforts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1383,11 +1420,39 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         assert!(cached_models(home.path()).is_empty());
         let cache = serde_json::json!({ "models": [
-            { "slug": "later", "visibility": "list", "priority": 9 },
+            { "slug": "later", "visibility": "list", "priority": 9,
+              "supported_reasoning_levels": [{ "effort": "low" }, { "effort": "medium" }, { "effort": "high" }, { "effort": "xhigh" }, { "effort": "max" }] },
             { "slug": "hidden", "visibility": "hide", "priority": 1 },
-            { "slug": "first", "visibility": "list", "priority": 5 },
+            { "slug": "first", "visibility": "list", "priority": 5,
+              "supported_reasoning_levels": [{ "effort": "low" }, { "effort": "medium" }, { "effort": "high" }, { "effort": "xhigh" }, { "effort": "max" }, { "effort": "ultra" }] },
+            { "slug": "fixed", "visibility": "list", "priority": 10, "supported_reasoning_levels": [] },
+            { "slug": "legacy", "visibility": "list", "priority": 11 }
         ]});
         std::fs::write(home.path().join("models_cache.json"), cache.to_string()).unwrap();
-        assert_eq!(cached_models(home.path()), ["first", "later"]);
+        assert_eq!(cached_models(home.path()), ["first", "later", "fixed", "legacy"]);
+        assert_eq!(
+            cached_model_efforts(home.path(), "first"),
+            Some(vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+                "ultra".into(),
+            ])
+        );
+        assert_eq!(
+            cached_model_efforts(home.path(), "later"),
+            Some(vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+            ])
+        );
+        assert_eq!(cached_model_efforts(home.path(), "fixed"), Some(Vec::new()));
+        assert_eq!(cached_model_efforts(home.path(), "legacy"), None);
+        assert_eq!(cached_model_efforts(home.path(), "missing"), None);
     }
 }
