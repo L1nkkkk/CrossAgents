@@ -29,7 +29,7 @@ pub struct SendArgs {
     /// Print the agent's answer and wait until its turn ends.
     #[arg(long, short)]
     pub wait: bool,
-    /// Send a file with the message (image, PDF, JSON or text); may be given several times.
+    /// Send a file with the message (image, audio, video, PDF, text or common document); may be given several times.
     #[arg(long = "file", value_name = "PATH")]
     pub files: Vec<PathBuf>,
 }
@@ -271,7 +271,9 @@ fn read_attachments(paths: &[PathBuf]) -> Result<Vec<AttachmentUpload>> {
             .with_context(|| format!("cannot read {}", path.display()))?
             .len() as usize;
         let Some(mime) = mime_of(path).filter(|m| attachment_mime_ok(m)) else {
-            bail!("{name}: files of this type cannot be sent (images, PDF, JSON and text can)");
+            bail!(
+                "{name}: files of this type cannot be sent (images, audio, video, PDF, text and common documents can)"
+            );
         };
         if size > MAX_ATTACHMENT_BYTES {
             bail!(
@@ -313,15 +315,43 @@ fn mime_of(path: &Path) -> Option<&'static str> {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
         "pdf" => "application/pdf",
         "json" => "application/json",
-        "md" => "text/markdown",
+        "md" | "markdown" => "text/markdown",
         "csv" => "text/csv",
-        "html" => "text/html",
+        "html" | "htm" => "text/html",
         "css" => "text/css",
+        "xml" => "application/xml",
+        "rtf" => "application/rtf",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        "weba" => "audio/webm",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "m4v" => "video/x-m4v",
+        "ogv" => "video/ogg",
+        "mkv" => "video/x-matroska",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "epub" => "application/epub+zip",
         "txt" | "log" | "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py" | "go"
-        | "java" | "c" | "h" | "cpp" | "toml" | "yaml" | "yml" | "sh" | "ps1" | "sql" | "xml"
-        | "ini" | "cfg" => "text/plain",
+        | "java" | "c" | "h" | "cpp" | "cc" | "hpp" | "toml" | "yaml" | "yml" | "sh" | "ps1"
+        | "sql" | "ini" | "cfg" => "text/plain",
         _ => return None,
     })
 }
@@ -414,11 +444,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shot = file(dir.path(), "Shot.PNG", 3);
         let code = file(dir.path(), "main.rs", 1);
-        let uploads = read_attachments(&[shot, code]).unwrap();
+        let audio = file(dir.path(), "speech.mp3", 2);
+        let video = file(dir.path(), "demo.mp4", 2);
+        let doc = file(dir.path(), "report.docx", 2);
+        let uploads = read_attachments(&[shot, code, audio, video, doc]).unwrap();
         assert_eq!(uploads[0].name, "Shot.PNG");
         assert_eq!(uploads[0].mime, "image/png");
         assert_eq!(uploads[0].data, "YWFh");
         assert_eq!(uploads[1].mime, "text/plain");
+        assert_eq!(uploads[2].mime, "audio/mpeg");
+        assert_eq!(uploads[3].mime, "video/mp4");
+        assert_eq!(
+            uploads[4].mime,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
         assert!(read_attachments(&[]).unwrap().is_empty());
     }
 
@@ -438,12 +477,12 @@ mod tests {
         assert!(err(&many).contains("at most 8 files per message (got 9)"));
 
         let big = file(dir.path(), "big.log", MAX_ATTACHMENT_BYTES + 1);
-        assert!(err(&[big]).contains("big.log is 10 MB; one file may be at most 10 MB"));
+        assert!(err(&[big]).contains("big.log is 25 MB; one file may be at most 25 MB"));
 
         let parts: Vec<_> = (0..3)
-            .map(|i| file(dir.path(), &format!("part{i}.json"), 8 * 1024 * 1024))
+            .map(|i| file(dir.path(), &format!("part{i}.json"), 15 * 1024 * 1024))
             .collect();
-        assert!(err(&parts).contains("add up to 24 MB; a message may carry at most 20 MB"));
+        assert!(err(&parts).contains("add up to 45 MB; a message may carry at most 40 MB"));
 
         assert!(err(&[dir.path().join("missing.txt")]).contains("cannot read"));
     }

@@ -2258,7 +2258,10 @@ pub struct UpdateRunPolicyRequest {
         deserialize_with = "stated",
         skip_serializing_if = "Option::is_none"
     )]
-    #[ts(optional)]
+    #[ts(
+        optional,
+        type = "import('./LeadPhaseModels').LeadPhaseModels | null"
+    )]
     pub lead_models: Option<Option<crossagents_core::LeadPhaseModels>>,
 }
 

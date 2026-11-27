@@ -674,6 +674,15 @@ async fn drivers_say_which_files_they_take() {
             .status(),
         201
     );
+    // Antigravity's native driver accepts images and text, not PDFs.
+    assert_eq!(
+        create("antigrav", "antigravity", "antigravity-native")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
 
     let codex: Value = t
         .get("/v1/agents/codexer/transcript")
@@ -686,7 +695,7 @@ async fn drivers_say_which_files_they_take() {
     assert_eq!(codex["driver"], "codex-native");
     assert_eq!(
         codex["capabilities"]["attachments"],
-        json!({ "image": true, "pdf": false, "text": true })
+        json!({ "image": true, "pdf": true, "text": true })
     );
     let claude: Value = t
         .get("/v1/agents/clauder/transcript")
@@ -725,10 +734,23 @@ async fn drivers_say_which_files_they_take() {
         cursor["capabilities"]["attachments"],
         json!({ "image": true, "pdf": true, "text": true })
     );
+    let antigrav: Value = t
+        .get("/v1/agents/antigrav/transcript")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(antigrav["driver"], "antigravity-native");
+    assert_eq!(
+        antigrav["capabilities"]["attachments"],
+        json!({ "image": true, "pdf": false, "text": true })
+    );
 
-    // No `codex` process is needed: the driver's answer is known without one.
+    // No CLI process is needed: the driver's answer is known without one.
     let resp = t
-        .post("/v1/agents/codexer/messages")
+        .post("/v1/agents/antigrav/messages")
         .json(&json!({
             "text": "read this",
             "attachments": [{ "name": "spec.pdf", "mime": "application/pdf", "data": "JVBERg==" }],
@@ -740,7 +762,7 @@ async fn drivers_say_which_files_they_take() {
     let offered = resp.text().await.unwrap();
     assert!(offered.contains("spec.pdf"), "{offered}");
     assert!(offered.contains("PDFs"), "{offered}");
-    assert!(offered.contains("codex-native"), "{offered}");
+    assert!(offered.contains("antigravity-native"), "{offered}");
     assert!(offered.contains("images, text"), "{offered}");
 }
 
