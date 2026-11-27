@@ -15,7 +15,7 @@ import { ErrorBox, Field, Icon, VendorMark, ago, vendorName } from "../component
 import { useHubData } from "../hub";
 import { creditText, egressOf, level, planLabel, resetText, windowLabel, type Level } from "../lib/quota";
 import { prettyModel } from "../lib/models";
-import { cursorMode } from "../lib/reasoning";
+import { cursorMode, usesVariantReasoning } from "../lib/reasoning";
 import { EgressPicker } from "../egressPicks";
 import { useConnectionState } from "../lib/useConnection";
 import { useArmed } from "../parts";
@@ -208,7 +208,7 @@ function AccountRow({
   const windows = status.rate_limits;
   const extraGroups = status.limits.slice(1).filter((g) => g.windows.length > 0);
   const hasWindows = windows.length > 0 || extraGroups.length > 0;
-  const cursor = account.provider === "cursor";
+  const cursor = usesVariantReasoning(account.provider);
   const models = cursor ? byBase(quota.models) : quota.models;
   const egress = egressOf(quota.egress);
   const health = accountHealth(quota);

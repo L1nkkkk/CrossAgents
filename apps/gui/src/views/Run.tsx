@@ -57,13 +57,13 @@ import {
   resetBody,
   type ContinuationField,
 } from "../lib/continuation";
-import { accountOf, effortOf, prettyModel } from "../lib/models";
+import { accountOf, effortOf, prettyModel, vendorLabel } from "../lib/models";
 import { modelPickValue, parseModelPick, reasoningWorkerRequest, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget, type ReasoningChoice } from "../lib/workerModels";
 import { ReasoningPicks } from "../reasoningPicks";
 import { PermissionPicks, applyPermission } from "../permissionPicks";
 import { useOperation } from "../lib/features";
 import { configWithPermission, permissionOf, type PermissionChoice } from "../lib/permission";
-import { cursorMode, reasoningModels } from "../lib/reasoning";
+import { cursorMode, reasoningModels, usesVariantReasoning } from "../lib/reasoning";
 import { refusedTasks, unusableOf } from "../lib/unusable";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
@@ -1102,7 +1102,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
           return {
             kind: "item",
             key: v,
-            label: option.plugin === "cursor" ? `${prettyModel(cursorMode(option.model).base)} · Cursor` : workerModelLabel(option, workerOptions, accounts),
+            label: usesVariantReasoning(option.plugin) ? `${prettyModel(cursorMode(option.model).base)} · ${vendorLabel(option.plugin)}` : workerModelLabel(option, workerOptions, accounts),
             sub: option.blocked ? t(option.blocked.key) : option.model,
             ...(option.blocked ? { subDir: "ltr" as const } : {}),
             icon: <VendorMark plugin={option.plugin} size={14} />,
@@ -1127,7 +1127,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
     ) : fallback ? (
       <Avatar agent={fallback} size={16} />
     ) : undefined;
-    const label = chosen ? sessionLabel(chosen) : model ? model.plugin === "cursor" ? `${prettyModel(cursorMode(model.model).base)} · Cursor` : (option ? workerModelLabel(option, workerOptions, accounts) : prettyModel(model.model)) : autoLabel;
+    const label = chosen ? sessionLabel(chosen) : model ? usesVariantReasoning(model.plugin) ? `${prettyModel(cursorMode(model.model).base)} · ${vendorLabel(model.plugin)}` : (option ? workerModelLabel(option, workerOptions, accounts) : prettyModel(model.model)) : autoLabel;
     const chosenWhy = whyOf(template);
     // The hub's reason for refusing this task, read off the failed approval's message.
     const refusal = refused[task.key];

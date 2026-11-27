@@ -313,6 +313,11 @@ pub struct ModelInfo {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub credit_multiplier: Option<f64>,
+    /// Reasoning effort levels this model takes, lowest first, when the vendor reports them
+    /// per model (`Some(vec![])` means none at all; `None` falls back to the plugin's list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub efforts: Option<Vec<String>>,
 }
 
 /// How a login is carried out.

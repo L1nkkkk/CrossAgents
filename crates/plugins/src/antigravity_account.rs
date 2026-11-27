@@ -218,6 +218,7 @@ impl AntigravityAccounts {
                 id,
                 description: None,
                 credit_multiplier: None,
+                efforts: None,
             })
             .collect();
         let note = if signed_out {
@@ -345,6 +346,7 @@ impl AccountProvider for AntigravityAccounts {
                 description: None,
                 context_window: None,
                 credit_multiplier: None,
+                efforts: None,
             })
             .collect::<Vec<_>>();
         *cache = Some((Instant::now(), key, models.clone()));

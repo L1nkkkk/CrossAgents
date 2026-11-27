@@ -2233,14 +2233,21 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
                 .map(|c| c.efforts.clone())
                 .unwrap_or_default(),
         },
-        // What the CLI says each model takes, when it says it at all (`with-cli` does): the
-        // profile's list above is then only the fallback for models it did not name.
+        // What the CLI or account reports each model takes (`with-cli`, `agy`, Codex
+        // `models_cache.json`, Claude `initialize`, CodeBuddy `local_storage`): the profile's
+        // list above is then only the fallback for models it did not name.
         efforts_by_model: match d.kind() {
             DriverKind::AcpGeneric => Default::default(),
-            _ => all
-                .iter()
-                .filter_map(|model| d.model_efforts(model).map(|levels| (model.clone(), levels)))
-                .collect(),
+            _ => {
+                let mut by_model: std::collections::BTreeMap<String, Vec<String>> = all
+                    .iter()
+                    .filter_map(|model| d.model_efforts(model).map(|levels| (model.clone(), levels)))
+                    .collect();
+                for (model, levels) in state.accounts.offered_model_efforts(name).await {
+                    by_model.insert(model, levels);
+                }
+                by_model
+            }
         },
         cli,
     }

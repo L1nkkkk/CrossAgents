@@ -1,6 +1,11 @@
 import { effortLabel } from "./models.ts";
 
-/** Cursor encodes its modes in model IDs; never manufacture an ID the CLI didn't offer. */
+/** Vendors whose CLI encodes reasoning modes/effort directly in offered model IDs. */
+export function usesVariantReasoning(plugin: string | undefined): boolean {
+  return plugin === "cursor" || plugin === "antigravity";
+}
+
+/** Cursor and Antigravity encode reasoning modes in model IDs; never manufacture an ID the CLI didn't offer. */
 export function cursorMode(model: string) {
   let base = model;
   let fast = false;
@@ -41,7 +46,7 @@ export function cursorModeLabel(model: string): string {
   return parts.length ? parts.join(" · ") : "默认";
 }
 
-const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 /** A base's offered variants for a menu: no effort suffix first, then weakest to strongest; standard before Thinking; Fast off before on. */
 export function cursorVariantsOrdered(models: readonly string[], model: string): string[] {
@@ -58,7 +63,7 @@ export function cursorVariantsOrdered(models: readonly string[], model: string):
 
 /** One entry per base model, preserving the selected variant and the CLI's default order. */
 export function reasoningModels(plugin: string, models: readonly string[], selected?: string | null): string[] {
-  if (plugin !== "cursor") return [...models];
+  if (!usesVariantReasoning(plugin)) return [...models];
   const seen = new Set<string>();
   return models.filter((m) => {
     const base = cursorMode(m).base;

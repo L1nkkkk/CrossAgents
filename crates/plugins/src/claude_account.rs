@@ -153,10 +153,30 @@ fn models_of(init: &Value) -> Vec<ModelInfo> {
                     .map(str::to_owned),
                 context_window: None,
                 credit_multiplier: None,
+                efforts: model_efforts_of(m),
                 id,
             })
         })
         .collect()
+}
+
+/// Per-model effort levels from Claude Code's `initialize` model entry (`supportsEffort` /
+/// `supportedEffortLevels`). `None` when absent so the plugin's default list applies.
+fn model_efforts_of(model: &Value) -> Option<Vec<String>> {
+    if model.get("supportsEffort").and_then(Value::as_bool) == Some(false) {
+        return Some(Vec::new());
+    }
+    let arr = model.get("supportedEffortLevels")?.as_array()?;
+    let mut levels = Vec::new();
+    for item in arr {
+        if let Some(effort) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            let effort = effort.to_ascii_lowercase();
+            if !levels.contains(&effort) {
+                levels.push(effort);
+            }
+        }
+    }
+    Some(levels)
 }
 
 fn has_quota(status: &AccountStatus) -> bool {
@@ -478,13 +498,26 @@ mod tests {
     #[test]
     fn models_come_from_initialize() {
         let init = serde_json::json!({ "models": [
-            { "value": "default", "displayName": "Default (recommended)", "description": "Opus 5.5" },
-            { "value": "haiku", "displayName": "Haiku 5.5" } ] });
+            { "value": "default", "displayName": "Default (recommended)", "description": "Opus 5.5",
+              "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "max"] },
+            { "value": "haiku", "displayName": "Haiku 5.5", "supportsEffort": false },
+            { "value": "legacy", "displayName": "Legacy" } ] });
         let models = models_of(&init);
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            ["default", "haiku"]
+            ["default", "haiku", "legacy"]
         );
         assert_eq!(models[1].name, "Haiku 5.5");
+        assert_eq!(
+            models[0].efforts,
+            Some(vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "max".into()
+            ])
+        );
+        assert_eq!(models[1].efforts, Some(Vec::new()));
+        assert_eq!(models[2].efforts, None);
     }
 }

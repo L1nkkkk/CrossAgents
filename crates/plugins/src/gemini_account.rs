@@ -274,6 +274,7 @@ impl AccountProvider for GeminiAccounts {
                 description: None,
                 context_window: None,
                 credit_multiplier: None,
+                efforts: None,
             })
             .collect()
     }

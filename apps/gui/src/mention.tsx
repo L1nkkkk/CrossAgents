@@ -8,7 +8,7 @@ import type { Agent } from "@bindings/Agent";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { Avatar, VendorMark, agentTitle, displayName } from "./components";
 import { prettyModel, vendorLabel } from "./lib/models";
-import { cursorMode, reasoningModels } from "./lib/reasoning";
+import { cursorMode, reasoningModels, usesVariantReasoning } from "./lib/reasoning";
 import { unusableOf } from "./lib/unusable";
 import { isImeEvent } from "./lib/ime";
 
@@ -34,7 +34,7 @@ export function mentionsFor(agents: Agent[], plugins: PluginInfo[]): Mention[] {
     reasoningModels(p.name, p.models)
       .filter((m) => !seen.has(m) && !!seen.add(m))
       .map((m): Mention => {
-        const base = p.name === "cursor" ? cursorMode(m).base : m;
+        const base = usesVariantReasoning(p.name) ? cursorMode(m).base : m;
         return {
           key: `m/${p.name}/${m}`,
           token: m,

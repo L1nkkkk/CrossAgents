@@ -1344,7 +1344,7 @@ impl DriverSession for ClaudeSession {
                 )
                 .await?;
         }
-        if let Some(effort) = effort {
+        if let Some(effort) = effort.filter(|e| !e.is_empty()) {
             self.shared
                 .control(wire::set_effort(self.flavor, effort), REQUEST_TIMEOUT)
                 .await?;

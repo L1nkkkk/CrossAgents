@@ -10,7 +10,7 @@ import { useNodePlugins } from "./nodes";
 import { favoriteKey, toggleFavorite, useModelFavorites } from "./lib/modelFavorites";
 import { accountOf, effortLabel, effortLevels, effortOf, prettyModel } from "./lib/models";
 import { modelDisplay } from "./lib/modelDisplay";
-import { cursorMode, reasoningModels } from "./lib/reasoning";
+import { cursorMode, reasoningModels, usesVariantReasoning } from "./lib/reasoning";
 import { ReasoningPicks } from "./reasoningPicks";
 import { useQuota } from "./views/Quota";
 import { ChipMenu, type MenuItem } from "./menu";
@@ -25,11 +25,13 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
   const display = (m: string) => modelDisplay(agent.plugin, m, quota.data?.accounts ?? [], account);
   const info = plugins.data?.find((p) => p.name === agent.plugin);
   const models = info?.models ?? [];
+  const variantPlugin = usesVariantReasoning(agent.plugin);
   // A model the CLI reports levels for takes exactly those, which may be none at all; one it
   // does not name takes the plugin's list.
   const levels = effortLevels(info?.efforts_by_model?.[agent.model ?? ""] ?? info?.efforts);
   const effort = effortOf(agent.config);
-  const label = effort ? effortLabel(effort) : undefined;
+  const activeEffort = effort && levels.some((l) => l.value === effort) ? effort : undefined;
+  const label = activeEffort ? effortLabel(activeEffort) : undefined;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -47,6 +49,11 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
       () => setError(undefined),
       (err) => setError(errorText(err)),
     );
+  const pickModel = (m: string | null) => {
+    const nextLevels = info?.efforts_by_model?.[m ?? ""] ?? info?.efforts ?? [];
+    const clearEffort = effort && !nextLevels.includes(effort) ? "" : undefined;
+    void apply(m, clearEffort);
+  };
 
   const list = reasoningModels(agent.plugin, (agent.model && !models.includes(agent.model) ? [agent.model] : []).concat(models), agent.model);
   const toItem = (m: string, prefix = ""): MenuItem => {
@@ -54,14 +61,14 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
     return {
       kind: "item",
       key: `${prefix}${m}`,
-      label: agent.plugin === "cursor" ? prettyModel(cursorMode(m).base) : display(m).label,
+      label: variantPlugin ? prettyModel(cursorMode(m).base) : display(m).label,
       sub: m,
       searchText: display(m).description ?? undefined,
       icon: <VendorMark plugin={agent.plugin} size={14} />,
       on: agent.model === m,
       starred: favorites.has(fkey),
       onToggleStar: () => toggleFavorite(fkey),
-      onPick: () => void apply(m),
+      onPick: () => pickModel(m),
     };
   };
   const favModels = list.filter((m) => favorites.has(favoriteKey(agent.plugin, m, account)));
@@ -69,7 +76,7 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
     ...(favModels.length > 0 ? [{ kind: "header", key: "h-fav", label: "常用模型" } satisfies MenuItem, ...favModels.map((m) => toItem(m, "fav/"))] : []),
     ...(favModels.length > 0 ? [{ kind: "header", key: "h-all", label: "全部模型" } satisfies MenuItem] : []),
     ...list.map((m) => toItem(m)),
-    { kind: "item", key: "", label: "插件默认", sub: "由 CLI 自己决定", on: !agent.model, onPick: () => void apply(null) },
+    { kind: "item", key: "", label: "插件默认", sub: "由 CLI 自己决定", on: !agent.model, onPick: () => pickModel(null) },
   ];
 
   const effortFooter =
@@ -77,14 +84,14 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
       <>
         <span className="menu-footer-label">推理强度</span>
         <div className="effort-pills">
-          <button type="button" className={`effort-pill ${!effort ? "on" : ""}`} onClick={() => void apply(agent.model, "")}>
+          <button type="button" className={`effort-pill ${!activeEffort ? "on" : ""}`} onClick={() => void apply(agent.model, "")}>
             默认
           </button>
           {levels.map((l) => (
             <button
               key={l.value}
               type="button"
-              className={`effort-pill ${effort === l.value ? "on" : ""}`}
+              className={`effort-pill ${activeEffort === l.value ? "on" : ""}`}
               onClick={() => void apply(agent.model, l.value)}
             >
               {l.label}
@@ -95,7 +102,7 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
     ) : undefined;
 
   const modelLabel = agent.model
-    ? agent.plugin === "cursor"
+    ? variantPlugin
       ? prettyModel(cursorMode(agent.model).base)
       : display(agent.model).label
     : "插件默认";
@@ -112,7 +119,7 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
         openSignal={openSignal}
         up
       />
-      {agent.plugin === "cursor" && <ReasoningPicks plugin={info} model={agent.model} onChange={(model) => void apply(model)} />}
+      {variantPlugin && <ReasoningPicks plugin={info} model={agent.model} variantsOnly onChange={(model, next) => void apply(model, next)} />}
       {error && (
         <span className="chip danger" title={error}>
           切换失败

@@ -66,12 +66,83 @@ pub fn prepare_query(command: &mut Command) {
     hide_console(command);
 }
 
+/// Canonical order for Antigravity `--effort` levels.
+const EFFORT_ORDER: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+fn effort_unsupported_model(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    lower == "auto"
+        || lower == "gemini-pro-orchestrator"
+        || lower.starts_with("gemini-pro-orchestrator-")
+}
+
+/// Effort levels `listed` offers as suffixed variants of a bare base model, in canonical order.
+fn listed_efforts_for_base(listed: &[String], base: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for slug in listed {
+        if let Some((slug_base, effort)) = crate::acp::wire::split_effort_suffix(slug)
+            && slug_base.eq_ignore_ascii_case(base)
+        {
+            let effort = effort.to_ascii_lowercase();
+            if !found.iter().any(|existing| existing == &effort) {
+                found.push(effort);
+            }
+        }
+    }
+    found.sort_by_key(|e| {
+        EFFORT_ORDER
+            .iter()
+            .position(|k| *k == e.as_str())
+            .unwrap_or(EFFORT_ORDER.len())
+    });
+    found
+}
+
+/// Resolves `(model, effort)` into CLI flags `agy` accepts without conflict:
+/// - `agy models` lists effort-suffixed slugs (`gemini-4-neon-xhigh`) whose effort is already
+///   encoded in `--model`; passing any conflicting `--effort` fails with
+///   `--model <slug> conflicts with --effort=<level>`.
+/// - `auto` and `gemini-pro-orchestrator*` reject `--effort`.
+/// - Bare base models (`gemini-4-neon`) only accept the effort levels their listed variants
+///   support (e.g. `gemini-4-neon` has no `max`, `claude-opus-5-5` has no `xhigh`).
+pub(crate) fn resolve_model_effort(
+    model: Option<&str>,
+    effort: Option<&str>,
+    listed: &[String],
+) -> (Option<String>, Option<String>) {
+    let model = model.map(str::trim).filter(|m| !m.is_empty());
+    let effort = effort.map(str::trim).filter(|e| !e.is_empty());
+    let Some(model) = model else {
+        return (None, effort.map(str::to_owned));
+    };
+    let Some(effort) = effort else {
+        return (Some(model.to_owned()), None);
+    };
+    if effort_unsupported_model(model) || crate::acp::wire::split_effort_suffix(model).is_some() {
+        return (Some(model.to_owned()), None);
+    }
+    if !listed.is_empty() {
+        let allowed = listed_efforts_for_base(listed, model);
+        if !allowed.is_empty() {
+            let supported = allowed.iter().any(|a| a.eq_ignore_ascii_case(effort));
+            return (
+                Some(model.to_owned()),
+                supported.then(|| effort.to_owned()),
+            );
+        }
+        if listed.iter().any(|s| s.eq_ignore_ascii_case(model)) {
+            return (Some(model.to_owned()), None);
+        }
+    }
+    (Some(model.to_owned()), Some(effort.to_owned()))
+}
+
 pub struct AntigravityDriver {
     name: String,
     cli: Cli,
     models: Vec<String>,
     /// What `agy models` answered, once it has.
-    listed: Mutex<Vec<String>>,
+    listed: Arc<Mutex<Vec<String>>>,
 }
 
 impl AntigravityDriver {
@@ -80,7 +151,7 @@ impl AntigravityDriver {
             name: name.into(),
             cli,
             models,
-            listed: Mutex::new(Vec::new()),
+            listed: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -104,7 +175,13 @@ impl AntigravityDriver {
         resume: Option<String>,
     ) -> Result<Box<dyn DriverSession>, CoreError> {
         let command = self.command(&spec)?;
-        Ok(Box::new(AntigravitySession::new(id, command, spec, resume)))
+        Ok(Box::new(AntigravitySession::new(
+            id,
+            command,
+            spec,
+            resume,
+            Arc::clone(&self.listed),
+        )))
     }
 
     /// Asks the CLI which models the signed-in account may use. Best effort: the
@@ -202,6 +279,33 @@ impl Driver for AntigravityDriver {
         }
         drop(listed);
         self.models.clone()
+    }
+
+    fn model_efforts(&self, model: &str) -> Option<Vec<String>> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        // `agy models` returns effort-suffixed slugs (`gemini-4-neon-xhigh`) whose effort is
+        // already encoded in `--model`, and `auto` / orchestrator models reject `--effort`.
+        // Reporting `Some(vec![])` keeps pickers from offering a conflicting `--effort` flag.
+        if effort_unsupported_model(model)
+            || crate::acp::wire::split_effort_suffix(model).is_some()
+        {
+            return Some(Vec::new());
+        }
+        let listed = self.listed.lock().expect("model list");
+        if listed.is_empty() {
+            return None;
+        }
+        let levels = listed_efforts_for_base(&listed, model);
+        if !levels.is_empty() {
+            return Some(levels);
+        }
+        if listed.iter().any(|s| s.eq_ignore_ascii_case(model)) {
+            return Some(Vec::new());
+        }
+        None
     }
 
     fn installed(&self) -> bool {
@@ -441,6 +545,8 @@ pub struct AntigravitySession {
     /// The concrete model the CLI reported in `init` (or its transcript when `init` omits it).
     resolved_model: Mutex<Option<String>>,
     effort: Mutex<Option<String>>,
+    /// Shared catalog from `agy models`, used to avoid passing unsupported `--effort`.
+    listed: Arc<Mutex<Vec<String>>>,
     permission: PermissionPolicy,
     instructions: Mutex<Option<String>>,
     usage: Mutex<UsageTracker>,
@@ -456,7 +562,13 @@ pub struct AntigravitySession {
 }
 
 impl AntigravitySession {
-    fn new(id: String, command: Vec<String>, spec: SessionSpec, resume: Option<String>) -> Self {
+    fn new(
+        id: String,
+        command: Vec<String>,
+        spec: SessionSpec,
+        resume: Option<String>,
+        listed: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
         if spec.permissions.is_some() {
             let _ = spec.events.send(
                 SessionEventKind::Warning {
@@ -482,6 +594,14 @@ impl AntigravitySession {
                 .into(),
             );
         }
+        let initial_effort = spec
+            .agent
+            .config
+            .get("effort")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(str::to_owned);
         Self {
             id,
             conversation: Mutex::new(resume),
@@ -491,7 +611,8 @@ impl AntigravitySession {
             env: spec.env,
             model: Mutex::new(spec.agent.model.filter(|m| !m.is_empty())),
             resolved_model: Mutex::new(None),
-            effort: Mutex::new(None),
+            effort: Mutex::new(initial_effort),
+            listed,
             permission: spec.permission,
             instructions: Mutex::new(spec.instructions),
             usage: Mutex::new(UsageTracker::new(started)),
@@ -551,6 +672,15 @@ impl AntigravitySession {
         }
     }
 
+    /// Model and effort flags after resolving conflicts with effort-suffixed slugs and
+    /// per-model support.
+    fn effective_model_and_effort(&self) -> (Option<String>, Option<String>) {
+        let model = self.model.lock().expect("model").clone();
+        let effort = self.effort.lock().expect("effort").clone();
+        let listed = self.listed.lock().expect("model list");
+        resolve_model_effort(model.as_deref(), effort.as_deref(), &listed)
+    }
+
     /// The arguments a process is started with; the conversation id makes a restarted
     /// process carry on where the last one stopped.
     fn args(&self) -> Vec<String> {
@@ -570,11 +700,12 @@ impl AntigravitySession {
             args.push("--conversation".into());
             args.push(id);
         }
-        if let Some(model) = self.model.lock().expect("model").clone() {
+        let (model, effort) = self.effective_model_and_effort();
+        if let Some(model) = model {
             args.push("--model".into());
             args.push(model);
         }
-        if let Some(effort) = self.effort.lock().expect("effort").clone() {
+        if let Some(effort) = effort {
             args.push("--effort".into());
             args.push(effort);
         }
@@ -938,6 +1069,7 @@ impl AntigravitySession {
             .env
             .push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
 
+        let (effective_model, effective_effort) = self.effective_model_and_effort();
         let opts = AcpOptions {
             launch,
             mcp_servers: Vec::new(),
@@ -947,13 +1079,13 @@ impl AntigravitySession {
             } else {
                 PermissionPolicy::Deny
             },
-            model: self.model.lock().expect("model").clone(),
+            model: effective_model,
             instructions: self.instructions.lock().expect("instructions").clone(),
             events: self.events.clone(),
         };
         let image = ImageTurnOptions {
             resume: self.conversation.lock().expect("conversation").clone(),
-            effort: self.effort.lock().expect("effort").clone(),
+            effort: effective_effort,
             mode: match self.permission {
                 PermissionPolicy::Bypass => None,
                 PermissionPolicy::Guard => Some("accept-edits"),
@@ -1514,7 +1646,13 @@ cat >/dev/null
         let dir = tempfile::tempdir().unwrap();
         let (spec, _events) = spec(dir.path());
         let command = mock_cli(dir.path(), "Start-Sleep -Seconds 60\n", "sleep 60\n");
-        let session = Arc::new(AntigravitySession::new("id-1".into(), command, spec, None));
+        let session = Arc::new(AntigravitySession::new(
+            "id-1".into(),
+            command,
+            spec,
+            None,
+            Arc::default(),
+        ));
         let prompt = tokio::spawn({
             let session = session.clone();
             async move { session.prompt("hi").await }
@@ -1528,6 +1666,163 @@ cat >/dev/null
         session.interrupt().await.unwrap();
         let outcome = prompt.await.unwrap().unwrap();
         assert_eq!(outcome.stop_reason, StopReason::Cancelled);
+    }
+
+    #[test]
+    fn model_efforts_suppresses_suffixed_and_unsupported_models_and_derives_base_levels() {
+        let driver = AntigravityDriver::new(
+            "antigravity",
+            Cli::at(vec!["agy".into()]),
+            vec!["gemini-3.8-flash".into()],
+        );
+        // Before `agy models` answers, suffixed slugs and `auto`/orchestrator still take no
+        // separate `--effort`, while bare fallback slugs defer to the plugin's defaults (`None`).
+        assert_eq!(driver.model_efforts("gemini-4-neon-xhigh"), Some(vec![]));
+        assert_eq!(driver.model_efforts("gpt-oss-120b-medium"), Some(vec![]));
+        assert_eq!(driver.model_efforts("auto"), Some(vec![]));
+        assert_eq!(
+            driver.model_efforts("gemini-pro-orchestrator-neon"),
+            Some(vec![])
+        );
+        assert_eq!(driver.model_efforts("gemini-3.8-flash"), None);
+
+        *driver.listed.lock().unwrap() = vec![
+            "gemini-4-neon-high".into(),
+            "gemini-4-neon-xhigh".into(),
+            "gemini-4-neon-medium".into(),
+            "gemini-4-neon-low".into(),
+            "claude-opus-5-5-high".into(),
+            "claude-opus-5-5-low".into(),
+            "claude-opus-5-5-medium".into(),
+            "gpt-oss-120b-medium".into(),
+        ];
+        assert_eq!(driver.model_efforts("gemini-4-neon-xhigh"), Some(vec![]));
+        assert_eq!(
+            driver.model_efforts("gemini-4-neon"),
+            Some(vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into()
+            ])
+        );
+        assert_eq!(
+            driver.model_efforts("claude-opus-5-5"),
+            Some(vec!["low".into(), "medium".into(), "high".into()])
+        );
+        assert_eq!(
+            driver.model_efforts("gpt-oss-120b"),
+            Some(vec!["medium".into()])
+        );
+    }
+
+    #[test]
+    fn resolve_model_effort_never_emits_conflicting_or_unsupported_effort() {
+        let listed = vec![
+            "gemini-4-neon-low".to_owned(),
+            "gemini-4-neon-medium".to_owned(),
+            "gemini-4-neon-high".to_owned(),
+            "gemini-4-neon-xhigh".to_owned(),
+            "claude-opus-5-5-low".to_owned(),
+            "claude-opus-5-5-medium".to_owned(),
+            "claude-opus-5-5-high".to_owned(),
+        ];
+        // Effort-suffixed model + conflicting effort: keep the slug and drop `--effort`.
+        assert_eq!(
+            resolve_model_effort(Some("gemini-4-neon-xhigh"), Some("medium"), &listed),
+            (Some("gemini-4-neon-xhigh".into()), None)
+        );
+        assert_eq!(
+            resolve_model_effort(Some("gemini-4-neon-xhigh"), Some("xhigh"), &listed),
+            (Some("gemini-4-neon-xhigh".into()), None)
+        );
+        // Models `agy` refuses `--effort` for.
+        assert_eq!(
+            resolve_model_effort(Some("auto"), Some("medium"), &listed),
+            (Some("auto".into()), None)
+        );
+        assert_eq!(
+            resolve_model_effort(Some("gemini-pro-orchestrator-neon"), Some("medium"), &listed),
+            (Some("gemini-pro-orchestrator-neon".into()), None)
+        );
+        // Bare base model + supported effort passes both; unsupported effort (`max`/`xhigh`) drops `--effort`.
+        assert_eq!(
+            resolve_model_effort(Some("gemini-4-neon"), Some("medium"), &listed),
+            (Some("gemini-4-neon".into()), Some("medium".into()))
+        );
+        assert_eq!(
+            resolve_model_effort(Some("gemini-4-neon"), Some("max"), &listed),
+            (Some("gemini-4-neon".into()), None)
+        );
+        assert_eq!(
+            resolve_model_effort(Some("claude-opus-5-5"), Some("xhigh"), &listed),
+            (Some("claude-opus-5-5".into()), None)
+        );
+        // Bare fallback when `listed` is empty still forwards `--effort`.
+        assert_eq!(
+            resolve_model_effort(Some("gemini-3.8-flash"), Some("high"), &[]),
+            (Some("gemini-3.8-flash".into()), Some("high".into()))
+        );
+        // Effort without an explicit model still passes `--effort`.
+        assert_eq!(
+            resolve_model_effort(None, Some("medium"), &listed),
+            (None, Some("medium".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn suffixed_model_drops_conflicting_effort_and_clearing_effort_works_on_bare_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log.txt");
+        let (mut spec, _events) = spec(dir.path());
+        spec.agent.model = Some("gemini-4-neon-xhigh".into());
+        spec.agent.config = json!({ "effort": "medium" });
+        spec.env = vec![("CROSSAGENTS_AGY_TEST_LOG".into(), log.display().to_string())];
+        let command = mock_cli(dir.path(), &stream_for(true), &stream_for(false));
+        let driver = AntigravityDriver::new("antigravity", Cli::at(command), vec![]);
+        let session = driver.open(spec).await.unwrap();
+
+        // Turn 1: `gemini-4-neon-xhigh` with stale `config.effort = "medium"` must not pass `--effort`.
+        session.prompt("turn 1").await.unwrap();
+        let args1 = logged_args(&read_log(&log));
+        assert!(
+            args1.windows(2).any(|w| w == ["--model", "gemini-4-neon-xhigh"]),
+            "{args1:?}"
+        );
+        assert!(!args1.contains(&"--effort".to_owned()), "{args1:?}");
+
+        // Turn 2: switching to a bare model with explicit effort passes both flags.
+        std::fs::write(&log, "").unwrap();
+        session
+            .set_model(Some("gemini-3.8-flash"), Some("high"))
+            .await
+            .unwrap();
+        session.prompt("turn 2").await.unwrap();
+        let args2 = logged_args(&read_log(&log));
+        assert!(
+            args2.windows(2).any(|w| w == ["--model", "gemini-3.8-flash"]),
+            "{args2:?}"
+        );
+        assert!(
+            args2.windows(2).any(|w| w == ["--effort", "high"]),
+            "{args2:?}"
+        );
+
+        // Turn 3: clearing effort with `Some("")` drops `--effort` on the restarted process.
+        std::fs::write(&log, "").unwrap();
+        session
+            .set_model(Some("gemini-3.8-flash"), Some(""))
+            .await
+            .unwrap();
+        session.prompt("turn 3").await.unwrap();
+        let args3 = logged_args(&read_log(&log));
+        assert!(
+            args3.windows(2).any(|w| w == ["--model", "gemini-3.8-flash"]),
+            "{args3:?}"
+        );
+        assert!(!args3.contains(&"--effort".to_owned()), "{args3:?}");
+
+        session.shutdown().await;
     }
 
     #[test]

@@ -17,7 +17,7 @@ import { buildTag } from "../lib/build";
 import { setChatProfile, useChatProfile, type ChatProfile } from "../lib/chatProfile";
 import { useUpdateState } from "../lib/updates";
 import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
-import { cursorFamilies } from "../lib/reasoning";
+import { cursorFamilies, usesVariantReasoning } from "../lib/reasoning";
 import { exportPreferences, importPreferences, PREFERENCES_MAX_BYTES } from "../lib/preferencesTransfer";
 import { FONTS, MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
 import { AgentsPage } from "./Agents";
@@ -378,9 +378,9 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
   const all = p.all_models;
   const on = new Set(p.models);
   const allOn = !p.shown;
-  // Cursor offers every mode of a model as its own ID; list them as one line per base model,
-  // turned on and off together (the hub still needs the exact variant IDs).
-  const cursor = p.name === "cursor";
+  // Cursor and Antigravity offer every mode of a model as its own ID; list them as one line
+  // per base model, turned on and off together (the hub still needs the exact variant IDs).
+  const cursor = usesVariantReasoning(p.name);
   const rows: ModelRows[] = cursor
     ? cursorFamilies(all).map((f) => ({ key: f.base, label: prettyModel(f.base), id: f.base, models: f.variants }))
     : all.map((m) => ({ key: m, label: prettyModel(m), id: m, models: [m] }));

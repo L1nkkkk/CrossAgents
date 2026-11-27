@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cursorFamilies, cursorMode, cursorModeLabel, cursorVariants, cursorVariantsOrdered, cursorWith, reasoningModels } from "./reasoning.ts";
+import { cursorFamilies, cursorMode, cursorModeLabel, cursorVariants, cursorVariantsOrdered, cursorWith, reasoningModels, usesVariantReasoning } from "./reasoning.ts";
 
 const models = ["auto", "claude-opus-5-thinking-high", "claude-opus-5-high", "claude-opus-5-medium", "claude-opus-5-thinking-max", "claude-opus-5-thinking-high-fast", "composer-2.5", "composer-2.5-fast"];
 
@@ -18,8 +18,21 @@ test("Cursor extra-high suffix is effort xhigh, not part of the base", () => {
   assert.equal(cursorMode("gpt-5.5").base, "gpt-5.5");
 });
 
-test("Cursor catalog collapses combinations and keeps selected variants without affecting other providers", () => {
+test("Cursor and Antigravity catalogs collapse combinations and keep selected variants without affecting other providers", () => {
+  assert.equal(usesVariantReasoning("cursor"), true);
+  assert.equal(usesVariantReasoning("antigravity"), true);
+  assert.equal(usesVariantReasoning("claude"), false);
   assert.deepEqual(reasoningModels("cursor", models, "claude-opus-5-medium"), ["auto", "claude-opus-5-medium", "composer-2.5"]);
+  assert.deepEqual(
+    reasoningModels(
+      "antigravity",
+      ["gemini-4-neon-high", "gemini-4-neon-xhigh", "gemini-4-neon-medium", "gemini-4-neon-low", "gpt-oss-120b-medium"],
+      "gemini-4-neon-xhigh",
+    ),
+    ["gemini-4-neon-xhigh", "gpt-oss-120b-medium"],
+  );
+  // Signed-out fallback bare models stay untouched.
+  assert.deepEqual(reasoningModels("antigravity", ["gemini-3.8-flash", "gemini-3.1-pro"]), ["gemini-3.8-flash", "gemini-3.1-pro"]);
   assert.deepEqual(reasoningModels("claude", models), models);
   assert.deepEqual(cursorVariants(models, "composer-2.5"), ["composer-2.5", "composer-2.5-fast"]);
 });
