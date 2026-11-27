@@ -1,4 +1,4 @@
-import type { ConnectionState, CrossAgentsBridge, HubResponse, NativeBrowserEvent, PairStep, UpdateState, WindowMode, WindowModeSnapshot } from "./bridge";
+import type { ConnectionState, CrossAgentsBridge, DockEdge, HubResponse, NativeBrowserEvent, PairStep, UpdateState, WindowMode, WindowModeSnapshot } from "./bridge";
 
 type StreamFrame =
   | { type: "connected" }
@@ -195,6 +195,9 @@ export function installTauriBridge() {
       setAlwaysOnTop: (enabled: boolean) => invoke<WindowModeSnapshot>("window_always_on_top", { enabled }),
       setOpacity: (opacity: number, persist = true) => invoke<WindowModeSnapshot>("window_opacity", { opacity, persist }),
       setMiniCollapsed: (collapsed: boolean) => invoke<WindowModeSnapshot>("window_mini_resize", { collapsed }),
+      setEdgeDock: (enabled: boolean) => invoke<WindowModeSnapshot>("window_edge_dock", { enabled }),
+      setDockHold: (held: boolean) => invoke<void>("window_dock_hold", { held }),
+      dockNow: (edge?: DockEdge) => invoke<WindowModeSnapshot>("window_dock_now", { edge }),
       onChange(listener) {
         windowModeListeners.add(listener);
         if (!windowModeRegistered) {

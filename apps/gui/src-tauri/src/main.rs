@@ -271,6 +271,9 @@ fn main() {
         desktop::window_always_on_top,
         desktop::window_opacity,
         desktop::window_mini_resize,
+        desktop::window_edge_dock,
+        desktop::window_dock_hold,
+        desktop::window_dock_now,
         desktop::notify,
         desktop::listen_for_notice,
         extensions::extension_safe_mode,
@@ -439,6 +442,7 @@ fn main() {
                 .build()?;
             desktop::install_tray(app.handle())?;
             desktop::install_notice_actions(app.handle())?;
+            desktop::start_edge_dock_watcher(app.handle());
             desktop::show_window(app.handle());
             Ok(())
         })

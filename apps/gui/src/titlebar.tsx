@@ -152,45 +152,50 @@ export function Titlebar({ title }: { title?: string }) {
       </div>
       <MenuBar />
       {title && <div className="titlebar-title">{title}</div>}
-      <div className="titlebar-mode-actions">
-        <button
-          type="button"
-          className="tb-btn tb-mode-btn"
-          onClick={() => void setWindowMode("mini")}
-          title="迷你悬浮窗（置顶 / 透明度，打游戏时看进度 · Alt+Shift+3）"
-          aria-label="切换到迷你窗"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="2.2" y="3.2" width="11.6" height="9.6" rx="2.2" stroke="currentColor" strokeWidth="1.35" />
-            <rect x="7.5" y="7.5" width="4.4" height="3.4" rx="0.9" fill="currentColor" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          className="tb-btn tb-mode-btn"
-          onClick={() => void setWindowMode("classic")}
-          title="经典模式（QQ 风格侧边窄面板 · Alt+Shift+2）"
-          aria-label="切换到经典模式"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="4.2" y="1.8" width="7.6" height="12.4" rx="1.8" stroke="currentColor" strokeWidth="1.35" />
-            <path d="M6.4 5h3.2M6.4 8h3.2M6.4 11h2.2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
-          </svg>
-        </button>
-      </div>
-      {inTauri && !isMac && (
-        <div className="titlebar-controls">
-          <button type="button" className="titlebar-win-btn" onClick={() => window.crossagents?.command?.("minimize")} title="最小化" aria-label="最小化">
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 5h8" stroke="currentColor" strokeWidth="1.2" /></svg>
+      <div className="titlebar-right">
+        <div className="titlebar-mode-actions">
+          <button
+            type="button"
+            className="tb-btn tb-mode-btn"
+            onClick={() => void setWindowMode("mini")}
+            title="迷你悬浮窗（置顶 / 透明度，打游戏时看进度 · Alt+Shift+3）"
+            aria-label="切换到迷你窗"
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="2" y="3" width="12" height="10" rx="2.2" stroke="currentColor" strokeWidth="1.35" />
+              <rect x="7.6" y="7.4" width="4.4" height="3.6" rx="0.9" fill="currentColor" />
+            </svg>
           </button>
-          <button type="button" className="titlebar-win-btn" onClick={() => window.crossagents?.command?.("maximize")} title="最大化" aria-label="最大化">
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1.1" /></svg>
-          </button>
-          <button type="button" className="titlebar-win-btn close" onClick={() => window.crossagents?.command?.("close")} title="关闭" aria-label="关闭">
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" strokeWidth="1.2" /></svg>
+          <button
+            type="button"
+            className="tb-btn tb-mode-btn"
+            onClick={() => void setWindowMode("classic")}
+            title="经典模式（QQ 风格侧边窄面板 · 贴边自动收起 · Alt+Shift+2）"
+            aria-label="切换到经典模式"
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="3.6" y="1.8" width="8.8" height="12.4" rx="2" stroke="currentColor" strokeWidth="1.35" />
+              <path d="M6.2 5.2h3.6M6.2 8h3.6M6.2 10.8h2.4" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+            </svg>
           </button>
         </div>
-      )}
+        {inTauri && !isMac && (
+          <>
+            <span className="titlebar-sep" aria-hidden="true" />
+            <div className="titlebar-controls">
+              <button type="button" className="titlebar-win-btn" onClick={() => window.crossagents?.command?.("minimize")} title="最小化" aria-label="最小化">
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 5h8" stroke="currentColor" strokeWidth="1.2" /></svg>
+              </button>
+              <button type="button" className="titlebar-win-btn" onClick={() => window.crossagents?.command?.("maximize")} title="最大化" aria-label="最大化">
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1.1" /></svg>
+              </button>
+              <button type="button" className="titlebar-win-btn close" onClick={() => window.crossagents?.command?.("close")} title="关闭" aria-label="关闭">
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" strokeWidth="1.2" /></svg>
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </header>
   );
 }

@@ -1,12 +1,12 @@
 // Three QQ-style desktop window modes:
 // - "efficiency": full multi-pane workspace (default)
-// - "classic": narrow vertical QQ-style floating session panel (with quick in-pane chat)
+// - "classic": narrow vertical QQ-style floating session panel (with edge-dock drawer + in-pane chat)
 // - "mini": ultra-compact always-on-top gaming HUD (collapsible pill + opacity/auto-fade)
 
 import { useEffect, useSyncExternalStore } from "react";
-import type { WindowMode, WindowModeSnapshot } from "./bridge";
+import type { DockEdge, WindowMode, WindowModeSnapshot } from "./bridge";
 
-export type { WindowMode };
+export type { DockEdge, WindowMode };
 
 export type WindowModeView = {
   mode: WindowMode;
@@ -14,6 +14,9 @@ export type WindowModeView = {
   opacity: number;
   autoFade: boolean;
   miniCollapsed: boolean;
+  edgeDock: boolean;
+  dockedEdge: DockEdge;
+  dockHidden: boolean;
 };
 
 const STORAGE_KEY = "crossagents.windowMode.ui";
@@ -31,7 +34,17 @@ function readLocal(): Partial<WindowModeView> {
 
 function writeLocal(state: WindowModeView) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        mode: state.mode,
+        alwaysOnTop: state.alwaysOnTop,
+        opacity: state.opacity,
+        autoFade: state.autoFade,
+        miniCollapsed: state.miniCollapsed,
+        edgeDock: state.edgeDock,
+      }),
+    );
   } catch {
     // Private browsing or full storage.
   }
@@ -44,6 +57,9 @@ let current: WindowModeView = {
   opacity: typeof stored.opacity === "number" ? Math.min(1, Math.max(0.35, stored.opacity)) : 1,
   autoFade: stored.autoFade ?? true,
   miniCollapsed: Boolean(stored.miniCollapsed),
+  edgeDock: stored.edgeDock ?? true,
+  dockedEdge: "none",
+  dockHidden: false,
 };
 
 const listeners = new Set<() => void>();
@@ -63,6 +79,9 @@ function applySnapshot(snap: WindowModeSnapshot) {
     alwaysOnTop: snap.alwaysOnTop,
     opacity: snap.opacity,
     miniCollapsed: snap.miniCollapsed,
+    edgeDock: snap.edgeDock ?? current.edgeDock,
+    dockedEdge: snap.dockedEdge ?? "none",
+    dockHidden: Boolean(snap.dockHidden),
   });
 }
 
@@ -95,6 +114,8 @@ export async function setWindowMode(mode: WindowMode): Promise<void> {
     mode,
     alwaysOnTop: mode === "mini" ? true : mode === "classic" ? current.alwaysOnTop : false,
     opacity: mode === "efficiency" ? 1 : mode === "mini" ? Math.min(current.opacity, 0.94) : current.opacity,
+    dockedEdge: "none",
+    dockHidden: false,
   });
 }
 
@@ -148,6 +169,44 @@ export async function setMiniCollapsed(collapsed: boolean): Promise<void> {
   emit({ ...current, miniCollapsed: collapsed });
 }
 
+export async function setWindowEdgeDock(enabled: boolean): Promise<void> {
+  const api = bridge();
+  if (api) {
+    try {
+      const snap = await api.setEdgeDock(enabled);
+      applySnapshot(snap);
+      return;
+    } catch {
+      // ignore
+    }
+  }
+  emit({
+    ...current,
+    edgeDock: enabled,
+    dockedEdge: enabled ? current.dockedEdge : "none",
+    dockHidden: enabled ? current.dockHidden : false,
+  });
+}
+
+export async function dockWindowNow(edge: DockEdge = "right"): Promise<void> {
+  const api = bridge();
+  if (api) {
+    try {
+      const snap = await api.dockNow(edge);
+      applySnapshot(snap);
+      return;
+    } catch {
+      // ignore
+    }
+  }
+  emit({
+    ...current,
+    edgeDock: edge !== "none" ? true : current.edgeDock,
+    dockedEdge: edge,
+    dockHidden: edge !== "none",
+  });
+}
+
 /** Cycles preset opacities in Mini/Classic mode: 100% → 85% → 65% → 45% → 100%. */
 export function cycleWindowOpacity(): void {
   const presets = [1, 0.85, 0.65, 0.45];
@@ -155,7 +214,13 @@ export function cycleWindowOpacity(): void {
   void setWindowOpacity(next, true);
 }
 
-/** Reactive hook for the active window mode and gaming HUD preferences. */
+function isEditable(el: Element | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el as HTMLElement).isContentEditable;
+}
+
+/** Reactive hook for the active window mode, gaming HUD preferences, and edge-dock state. */
 export function useWindowMode(): WindowModeView {
   useEffect(() => {
     ensureBridgeSync();
@@ -172,7 +237,7 @@ export function useWindowMode(): WindowModeView {
   // Auto-fade when blurred in Mini/Classic mode, snapping back to 100% when hovered or focused.
   useEffect(() => {
     const api = bridge();
-    if (!api || state.mode === "efficiency" || !state.autoFade) return;
+    if (!api || state.mode === "efficiency" || !state.autoFade || state.dockHidden) return;
     const applyFocusOpacity = () => {
       const clear = hovering || document.hasFocus();
       const target = clear ? 1 : Math.min(state.opacity, 0.72);
@@ -196,7 +261,27 @@ export function useWindowMode(): WindowModeView {
       document.documentElement.removeEventListener("mouseenter", onEnter);
       document.documentElement.removeEventListener("mouseleave", onLeave);
     };
-  }, [state.mode, state.autoFade, state.opacity]);
+  }, [state.mode, state.autoFade, state.opacity, state.dockHidden]);
+
+  // Hold the edge-docked Classic drawer open while the user is typing in an input/textarea.
+  useEffect(() => {
+    const api = bridge();
+    if (!api || state.mode !== "classic") return;
+    const syncHold = () => {
+      const held = document.hasFocus() && isEditable(document.activeElement);
+      void api.setDockHold(held).catch(() => {});
+    };
+    syncHold();
+    window.addEventListener("focusin", syncHold);
+    window.addEventListener("focusout", syncHold);
+    window.addEventListener("blur", syncHold);
+    return () => {
+      window.removeEventListener("focusin", syncHold);
+      window.removeEventListener("focusout", syncHold);
+      window.removeEventListener("blur", syncHold);
+      void api.setDockHold(false).catch(() => {});
+    };
+  }, [state.mode]);
 
   return state;
 }

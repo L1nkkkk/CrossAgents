@@ -397,6 +397,16 @@ pub enum WindowMode {
     Mini,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DockEdge {
+    #[default]
+    None,
+    Left,
+    Right,
+    Top,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SavedBounds {
@@ -420,6 +430,8 @@ struct StoredModePrefs {
     mini_bounds: Option<SavedBounds>,
     #[serde(default)]
     classic_always_on_top: bool,
+    #[serde(default = "default_true_bool")]
+    classic_edge_dock: bool,
     #[serde(default = "default_true_bool")]
     mini_always_on_top: bool,
     #[serde(default = "default_one")]
@@ -445,7 +457,7 @@ fn default_mini_opacity() -> f64 {
 }
 
 fn default_mini_expanded_height() -> f64 {
-    248.0
+    268.0
 }
 
 impl Default for StoredModePrefs {
@@ -456,11 +468,12 @@ impl Default for StoredModePrefs {
             classic_bounds: None,
             mini_bounds: None,
             classic_always_on_top: false,
+            classic_edge_dock: true,
             mini_always_on_top: true,
             classic_opacity: 1.0,
             mini_opacity: 0.94,
             mini_collapsed: false,
-            mini_expanded_height: 248.0,
+            mini_expanded_height: 268.0,
         }
     }
 }
@@ -472,28 +485,40 @@ pub struct WindowModeSnapshot {
     pub always_on_top: bool,
     pub opacity: f64,
     pub mini_collapsed: bool,
+    pub edge_dock: bool,
+    pub docked_edge: DockEdge,
+    pub dock_hidden: bool,
 }
 
 impl StoredModePrefs {
-    fn snapshot(&self) -> WindowModeSnapshot {
+    fn snapshot(&self, docked_edge: DockEdge, dock_hidden: bool) -> WindowModeSnapshot {
         match self.mode {
             WindowMode::Efficiency => WindowModeSnapshot {
                 mode: WindowMode::Efficiency,
                 always_on_top: false,
                 opacity: 1.0,
                 mini_collapsed: self.mini_collapsed,
+                edge_dock: self.classic_edge_dock,
+                docked_edge: DockEdge::None,
+                dock_hidden: false,
             },
             WindowMode::Classic => WindowModeSnapshot {
                 mode: WindowMode::Classic,
                 always_on_top: self.classic_always_on_top,
                 opacity: self.classic_opacity,
                 mini_collapsed: self.mini_collapsed,
+                edge_dock: self.classic_edge_dock,
+                docked_edge,
+                dock_hidden,
             },
             WindowMode::Mini => WindowModeSnapshot {
                 mode: WindowMode::Mini,
                 always_on_top: self.mini_always_on_top,
                 opacity: self.mini_opacity,
                 mini_collapsed: self.mini_collapsed,
+                edge_dock: self.classic_edge_dock,
+                docked_edge: DockEdge::None,
+                dock_hidden: false,
             },
         }
     }
@@ -502,6 +527,7 @@ impl StoredModePrefs {
 #[derive(Default)]
 pub struct WindowModeState {
     inner: Mutex<WindowModeInner>,
+    wake: std::sync::Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -509,6 +535,17 @@ struct WindowModeInner {
     loaded: bool,
     prefs: StoredModePrefs,
     listener: Option<Channel<WindowModeSnapshot>>,
+    docked_edge: DockEdge,
+    dock_hidden: bool,
+    dock_hold: bool,
+    /// Last expanded (visible) physical coordinates when tucked into an edge.
+    dock_visible_pos: Option<(i32, i32)>,
+}
+
+impl WindowModeInner {
+    fn snapshot(&self) -> WindowModeSnapshot {
+        self.prefs.snapshot(self.docked_edge, self.dock_hidden)
+    }
 }
 
 fn prefs_path(app: &AppHandle) -> Option<PathBuf> {
@@ -582,16 +619,16 @@ fn default_bounds_for(window: &Window, mode: WindowMode, mini_collapsed: bool, m
             )
         }
         WindowMode::Classic => {
-            let w = 356.0;
-            let h = 760.0_f64.min((work_h - 90.0).max(520.0));
+            let w = 368.0;
+            let h = 780.0_f64.min((work_h - 80.0).max(520.0));
             (
-                LogicalPosition::new((work_x + work_w - w - 18.0).max(work_x), work_y + 42.0),
+                LogicalPosition::new((work_x + work_w - w - 16.0).max(work_x), work_y + 38.0),
                 LogicalSize::new(w, h),
             )
         }
         WindowMode::Mini => {
-            let w = if mini_collapsed { 286.0 } else { 312.0 };
-            let h = if mini_collapsed { 52.0 } else { mini_h.clamp(160.0, 420.0) };
+            let w = if mini_collapsed { 300.0 } else { 332.0 };
+            let h = if mini_collapsed { 46.0 } else { mini_h.clamp(160.0, 440.0) };
             (
                 LogicalPosition::new((work_x + work_w - w - 18.0).max(work_x), work_y + 24.0),
                 LogicalSize::new(w, h),
@@ -629,10 +666,479 @@ fn apply_opacity_native(window: &Window, opacity: f64) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PxRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl PxRect {
+    fn width(self) -> i32 {
+        (self.right - self.left).max(1)
+    }
+
+    fn height(self) -> i32 {
+        (self.bottom - self.top).max(1)
+    }
+
+    fn contains(self, x: i32, y: i32, pad: i32) -> bool {
+        x >= self.left - pad
+            && x <= self.right + pad
+            && y >= self.top - pad
+            && y <= self.bottom + pad
+    }
+}
+
+/// Detects whether a window rect is close enough to a monitor work-area edge to snap-dock.
+/// Bottom edge is intentionally omitted so Windows taskbar stays unobstructed (classic QQ rule).
+fn compute_snap_edge(win: PxRect, work: PxRect, threshold: i32) -> DockEdge {
+    if win.left <= work.left + threshold {
+        DockEdge::Left
+    } else if win.right >= work.right - threshold {
+        DockEdge::Right
+    } else if win.top <= work.top + threshold {
+        DockEdge::Top
+    } else {
+        DockEdge::None
+    }
+}
+
+/// Computes the `(expanded_pos, hidden_pos)` physical top-left coordinates for a docked Classic
+/// window, leaving `peek_px` visible along the docked screen edge as an interactive handle.
+fn compute_dock_positions(
+    win: PxRect,
+    work: PxRect,
+    edge: DockEdge,
+    peek_px: i32,
+) -> ((i32, i32), (i32, i32)) {
+    let w = win.width();
+    let h = win.height();
+    let peek = peek_px.max(4);
+    let clamp_y = win.top.clamp(work.top, (work.bottom - h).max(work.top));
+    let clamp_x = win.left.clamp(work.left, (work.right - w).max(work.left));
+    match edge {
+        DockEdge::Left => (
+            (work.left, clamp_y),
+            (work.left - w + peek, clamp_y),
+        ),
+        DockEdge::Right => (
+            (work.right - w, clamp_y),
+            (work.right - peek, clamp_y),
+        ),
+        DockEdge::Top => (
+            (clamp_x, work.top),
+            (clamp_x, work.top - h + peek),
+        ),
+        DockEdge::None => ((win.left, win.top), (win.left, win.top)),
+    }
+}
+
+#[cfg(windows)]
+fn monitor_work_area(window: &Window) -> Option<PxRect> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
+    let raw = window.hwnd().ok()?;
+    let hwnd = HWND(raw.0 as *mut _);
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(hmon, &mut info).as_bool() {
+            let r = info.rcWork;
+            Some(PxRect {
+                left: r.left,
+                top: r.top,
+                right: r.right,
+                bottom: r.bottom,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn monitor_work_area(window: &Window) -> Option<PxRect> {
+    let m = window.current_monitor().ok()??;
+    let pos = m.position();
+    let size = m.size();
+    Some(PxRect {
+        left: pos.x,
+        top: pos.y,
+        right: pos.x + size.width as i32,
+        bottom: pos.y + size.height as i32,
+    })
+}
+
+#[cfg(windows)]
+fn window_rect_px(window: &Window) -> Option<PxRect> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let raw = window.hwnd().ok()?;
+    let hwnd = HWND(raw.0 as *mut _);
+    let mut r = RECT::default();
+    unsafe {
+        GetWindowRect(hwnd, &mut r).ok()?;
+    }
+    Some(PxRect {
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
+    })
+}
+
+#[cfg(not(windows))]
+fn window_rect_px(window: &Window) -> Option<PxRect> {
+    let pos = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    Some(PxRect {
+        left: pos.x,
+        top: pos.y,
+        right: pos.x + size.width as i32,
+        bottom: pos.y + size.height as i32,
+    })
+}
+
+#[cfg(windows)]
+fn cursor_pos_px() -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT::default();
+    unsafe {
+        GetCursorPos(&mut pt).ok()?;
+    }
+    Some((pt.x, pt.y))
+}
+
+#[cfg(windows)]
+fn left_mouse_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+}
+
+#[cfg(windows)]
+fn set_window_pos_no_activate(window: &Window, x: i32, y: i32, topmost: Option<bool>) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+        SetWindowPos,
+    };
+    let Ok(raw) = window.hwnd() else {
+        return;
+    };
+    let hwnd = HWND(raw.0 as *mut _);
+    let (insert_after, flags) = match topmost {
+        Some(true) => (
+            Some(HWND_TOPMOST),
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        ),
+        Some(false) => (
+            Some(HWND_NOTOPMOST),
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        ),
+        None => (
+            None,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+        ),
+    };
+    unsafe {
+        let _ = SetWindowPos(hwnd, insert_after, x, y, 0, 0, flags);
+    }
+}
+
+#[cfg(not(windows))]
+fn set_window_pos_no_activate(window: &Window, x: i32, y: i32, topmost: Option<bool>) {
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+    if let Some(top) = topmost {
+        let _ = window.set_always_on_top(top);
+    }
+}
+
+/// Slides the window smoothly from `(from_x, from_y)` to `(to_x, to_y)` using a 60fps cubic
+/// ease-out curve without stealing focus from games or other active applications.
+async fn slide_window_no_activate(
+    window: &Window,
+    from: (i32, i32),
+    to: (i32, i32),
+    topmost: Option<bool>,
+) {
+    if (from.0 - to.0).abs() <= 2 && (from.1 - to.1).abs() <= 2 {
+        set_window_pos_no_activate(window, to.0, to.1, topmost);
+        return;
+    }
+    const STEPS: usize = 11;
+    for step in 1..=STEPS {
+        let t = step as f64 / STEPS as f64;
+        // Cubic ease-out: quick departure, gentle landing against the screen edge.
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let x = from.0 + ((to.0 - from.0) as f64 * eased).round() as i32;
+        let y = from.1 + ((to.1 - from.1) as f64 * eased).round() as i32;
+        let z = if step == 1 { topmost } else { None };
+        set_window_pos_no_activate(window, x, y, z);
+        if step < STEPS {
+            tokio::time::sleep(Duration::from_millis(14)).await;
+        }
+    }
+}
+
+fn notify_snapshot(app: &AppHandle) {
+    let state = app.state::<WindowModeState>();
+    let (snapshot, listener) = {
+        let inner = state.inner.lock().expect("window mode state");
+        (inner.snapshot(), inner.listener.clone())
+    };
+    if let Some(channel) = listener {
+        let _ = channel.send(snapshot);
+    }
+}
+
+/// Immediately restores a tucked-in Classic window back onto the visible work area.
+fn reveal_docked_sync(app: &AppHandle, clear_dock: bool) {
+    let Some(window) = app.get_window("main") else {
+        return;
+    };
+    let state = app.state::<WindowModeState>();
+    let (restore_pos, restore_topmost, changed) = {
+        let mut inner = state.inner.lock().expect("window mode state");
+        let was_hidden = inner.dock_hidden;
+        let was_docked = inner.docked_edge != DockEdge::None;
+        let pos = inner.dock_visible_pos;
+        if clear_dock {
+            inner.docked_edge = DockEdge::None;
+            inner.dock_hidden = false;
+            inner.dock_visible_pos = None;
+        } else if was_hidden {
+            inner.dock_hidden = false;
+        }
+        let topmost = if clear_dock {
+            Some(inner.snapshot().always_on_top)
+        } else {
+            None
+        };
+        (
+            if was_hidden { pos } else { None },
+            topmost,
+            was_hidden || (clear_dock && was_docked),
+        )
+    };
+    if let Some((x, y)) = restore_pos {
+        set_window_pos_no_activate(&window, x, y, restore_topmost);
+    } else if let Some(top) = restore_topmost {
+        let _ = window.set_always_on_top(top);
+    }
+    if changed {
+        notify_snapshot(app);
+    }
+}
+
+/// Spawns the background watcher that powers classic QQ-style screen-edge snapping and smooth
+/// auto-hide drawer reveal/collapse. Sleeps completely idle unless Classic mode + edge-dock
+/// are both active.
+pub fn start_edge_dock_watcher(app: &AppHandle) {
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        return;
+    }
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            use std::time::Instant;
+            let wake = app.state::<WindowModeState>().wake.clone();
+            let mut was_dragging = false;
+            let mut hover_reveal_since: Option<Instant> = None;
+            let mut outside_hide_since: Option<Instant> = None;
+
+            loop {
+                let (active, docked_edge, dock_hidden, dock_hold, pref_topmost) = {
+                    let state = app.state::<WindowModeState>();
+                    let inner = state.inner.lock().expect("window mode state");
+                    (
+                        inner.prefs.mode == WindowMode::Classic && inner.prefs.classic_edge_dock,
+                        inner.docked_edge,
+                        inner.dock_hidden,
+                        inner.dock_hold,
+                        inner.prefs.classic_always_on_top,
+                    )
+                };
+
+                if !active {
+                    was_dragging = false;
+                    hover_reveal_since = None;
+                    outside_hide_since = None;
+                    wake.notified().await;
+                    continue;
+                }
+
+                tokio::time::sleep(Duration::from_millis(36)).await;
+
+                let Some(window) = app.get_window("main") else {
+                    continue;
+                };
+                if !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false) {
+                    hover_reveal_since = None;
+                    outside_hide_since = None;
+                    continue;
+                }
+                let (Some(win_rect), Some(work), Some((cx, cy))) =
+                    (window_rect_px(&window), monitor_work_area(&window), cursor_pos_px())
+                else {
+                    continue;
+                };
+                let scale = window.scale_factor().unwrap_or(1.0);
+                let snap_px = (16.0 * scale).round() as i32;
+                let detach_px = (26.0 * scale).round() as i32;
+                let peek_px = (6.0 * scale).round() as i32;
+                let lbtn = left_mouse_down();
+
+                // While the person is dragging, never yank the window away.
+                if lbtn {
+                    if win_rect.contains(cx, cy, 24) {
+                        was_dragging = true;
+                        hover_reveal_since = None;
+                        outside_hide_since = None;
+                    }
+                    continue;
+                }
+
+                // Drag just finished (or initial Classic placement): check whether we snapped to
+                // a screen edge or pulled away into open space.
+                if was_dragging || docked_edge == DockEdge::None {
+                    was_dragging = false;
+                    let snapped = compute_snap_edge(win_rect, work, snap_px);
+                    if snapped != DockEdge::None && !dock_hidden {
+                        let (expanded, _) = compute_dock_positions(win_rect, work, snapped, peek_px);
+                        if (win_rect.left - expanded.0).abs() > 1
+                            || (win_rect.top - expanded.1).abs() > 1
+                        {
+                            slide_window_no_activate(
+                                &window,
+                                (win_rect.left, win_rect.top),
+                                expanded,
+                                Some(true),
+                            )
+                            .await;
+                        } else {
+                            set_window_pos_no_activate(&window, expanded.0, expanded.1, Some(true));
+                        }
+                        let changed = {
+                            let state = app.state::<WindowModeState>();
+                            let mut inner = state.inner.lock().expect("window mode state");
+                            let diff = inner.docked_edge != snapped || inner.dock_hidden;
+                            inner.docked_edge = snapped;
+                            inner.dock_hidden = false;
+                            inner.dock_visible_pos = Some(expanded);
+                            diff
+                        };
+                        if changed {
+                            notify_snapshot(&app);
+                        }
+                        outside_hide_since = None;
+                        hover_reveal_since = None;
+                        continue;
+                    } else if docked_edge != DockEdge::None
+                        && !dock_hidden
+                        && compute_snap_edge(win_rect, work, detach_px) == DockEdge::None
+                    {
+                        // User dragged it back away from the screen edge -> undock cleanly.
+                        {
+                            let state = app.state::<WindowModeState>();
+                            let mut inner = state.inner.lock().expect("window mode state");
+                            inner.docked_edge = DockEdge::None;
+                            inner.dock_hidden = false;
+                            inner.dock_visible_pos = None;
+                        }
+                        let _ = window.set_always_on_top(pref_topmost);
+                        notify_snapshot(&app);
+                        outside_hide_since = None;
+                        hover_reveal_since = None;
+                        continue;
+                    }
+                }
+
+                if docked_edge == DockEdge::None {
+                    continue;
+                }
+
+                if dock_hidden {
+                    outside_hide_since = None;
+                    // Check if cursor is resting on the exposed 6px edge peek strip.
+                    let on_strip = win_rect.contains(cx, cy, 4);
+                    if on_strip {
+                        let start = *hover_reveal_since.get_or_insert_with(Instant::now);
+                        // 160ms anti-accidental-brush hover dwell before sliding out.
+                        if start.elapsed() >= Duration::from_millis(160) {
+                            let (expanded, _) =
+                                compute_dock_positions(win_rect, work, docked_edge, peek_px);
+                            {
+                                let state = app.state::<WindowModeState>();
+                                let mut inner = state.inner.lock().expect("window mode state");
+                                inner.dock_hidden = false;
+                                inner.dock_visible_pos = Some(expanded);
+                            }
+                            notify_snapshot(&app);
+                            slide_window_no_activate(
+                                &window,
+                                (win_rect.left, win_rect.top),
+                                expanded,
+                                Some(true),
+                            )
+                            .await;
+                            hover_reveal_since = None;
+                        }
+                    } else {
+                        hover_reveal_since = None;
+                    }
+                } else {
+                    hover_reveal_since = None;
+                    // Keep expanded if cursor is inside window or user is actively typing.
+                    let inside = win_rect.contains(cx, cy, 8);
+                    if inside || dock_hold {
+                        outside_hide_since = None;
+                    } else {
+                        let start = *outside_hide_since.get_or_insert_with(Instant::now);
+                        // 360ms grace delay before smoothly gliding back into the screen edge.
+                        if start.elapsed() >= Duration::from_millis(360) {
+                            let (expanded, hidden) =
+                                compute_dock_positions(win_rect, work, docked_edge, peek_px);
+                            {
+                                let state = app.state::<WindowModeState>();
+                                let mut inner = state.inner.lock().expect("window mode state");
+                                inner.dock_visible_pos = Some(expanded);
+                                inner.dock_hidden = true;
+                            }
+                            notify_snapshot(&app);
+                            slide_window_no_activate(
+                                &window,
+                                (win_rect.left, win_rect.top),
+                                hidden,
+                                Some(true),
+                            )
+                            .await;
+                            outside_hide_since = None;
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
 pub fn apply_window_mode(app: &AppHandle, next_mode: WindowMode) -> Result<WindowModeSnapshot, String> {
     let window = app
         .get_window("main")
         .ok_or_else(|| "找不到主窗口".to_owned())?;
+    // If Classic was tucked into a screen edge, bring it back before saving bounds or switching.
+    reveal_docked_sync(app, true);
+
     let state = app.state::<WindowModeState>();
     let (saved_target, prev_mode, snapshot, mini_collapsed, mini_expanded_height, listener) = {
         let mut inner = state.inner.lock().expect("window mode state");
@@ -647,13 +1153,17 @@ pub fn apply_window_mode(app: &AppHandle, next_mode: WindowMode) -> Result<Windo
                         if !inner.prefs.mini_collapsed {
                             let scale = window.scale_factor().unwrap_or(1.0);
                             inner.prefs.mini_expanded_height =
-                                (f64::from(bounds.height) / scale).clamp(160.0, 420.0);
+                                (f64::from(bounds.height) / scale).clamp(160.0, 440.0);
                         }
                         inner.prefs.mini_bounds = Some(bounds);
                     }
                 }
             }
             inner.prefs.mode = next_mode;
+            inner.docked_edge = DockEdge::None;
+            inner.dock_hidden = false;
+            inner.dock_hold = false;
+            inner.dock_visible_pos = None;
             save_prefs(app, &inner.prefs);
         }
         let target = match next_mode {
@@ -664,7 +1174,7 @@ pub fn apply_window_mode(app: &AppHandle, next_mode: WindowMode) -> Result<Windo
         (
             target,
             prev,
-            inner.prefs.snapshot(),
+            inner.snapshot(),
             inner.prefs.mini_collapsed,
             inner.prefs.mini_expanded_height,
             inner.listener.clone(),
@@ -681,8 +1191,8 @@ pub fn apply_window_mode(app: &AppHandle, next_mode: WindowMode) -> Result<Windo
         }
         let min_size = match next_mode {
             WindowMode::Efficiency => LogicalSize::new(640.0, 480.0),
-            WindowMode::Classic => LogicalSize::new(280.0, 440.0),
-            WindowMode::Mini => LogicalSize::new(220.0, 44.0),
+            WindowMode::Classic => LogicalSize::new(300.0, 460.0),
+            WindowMode::Mini => LogicalSize::new(240.0, 44.0),
         };
         let _ = window.set_min_size(Some(min_size));
 
@@ -693,14 +1203,14 @@ pub fn apply_window_mode(app: &AppHandle, next_mode: WindowMode) -> Result<Windo
                 let scale = window.scale_factor().unwrap_or(1.0);
                 let target_height = if next_mode == WindowMode::Mini {
                     if mini_collapsed {
-                        (52.0 * scale).round() as u32
+                        (46.0 * scale).round() as u32
                     } else {
                         (mini_expanded_height * scale).round() as u32
                     }
                 } else {
                     bounds.height
                 };
-                let _ = window.set_size(PhysicalSize::new(bounds.width.max(220), target_height.max(44)));
+                let _ = window.set_size(PhysicalSize::new(bounds.width.max(240), target_height.max(44)));
                 let _ = window.set_position(PhysicalPosition::new(bounds.x, bounds.y));
             }
         } else {
@@ -712,6 +1222,7 @@ pub fn apply_window_mode(app: &AppHandle, next_mode: WindowMode) -> Result<Windo
 
     let _ = window.set_always_on_top(snapshot.always_on_top);
     let _ = apply_opacity_native(&window, snapshot.opacity);
+    state.wake.notify_one();
     if let Some(channel) = listener {
         let _ = channel.send(snapshot.clone());
     }
@@ -723,7 +1234,7 @@ pub fn window_mode_get(app: AppHandle) -> Result<WindowModeSnapshot, String> {
     let state = app.state::<WindowModeState>();
     let mut inner = state.inner.lock().expect("window mode state");
     load_prefs(&app, &mut inner);
-    Ok(inner.prefs.snapshot())
+    Ok(inner.snapshot())
 }
 
 #[tauri::command]
@@ -743,7 +1254,8 @@ pub fn window_mode_listen(
     if webview.label() == "main" {
         inner.listener = Some(channel);
     }
-    Ok(inner.prefs.snapshot())
+    state.wake.notify_one();
+    Ok(inner.snapshot())
 }
 
 #[tauri::command]
@@ -762,7 +1274,7 @@ pub fn window_always_on_top(
             WindowMode::Efficiency => {}
         }
         save_prefs(&app, &inner.prefs);
-        inner.prefs.snapshot()
+        inner.snapshot()
     };
     window
         .set_always_on_top(enabled)
@@ -794,7 +1306,7 @@ pub fn window_opacity(
             }
             save_prefs(&app, &inner.prefs);
         }
-        inner.prefs.snapshot()
+        inner.snapshot()
     };
     Ok(WindowModeSnapshot {
         opacity: clamped,
@@ -816,29 +1328,92 @@ pub fn window_mini_resize(
             if let Ok(size) = window.inner_size() {
                 let scale = window.scale_factor().unwrap_or(1.0);
                 inner.prefs.mini_expanded_height =
-                    (f64::from(size.height) / scale).clamp(160.0, 420.0);
+                    (f64::from(size.height) / scale).clamp(160.0, 440.0);
             }
         }
         inner.prefs.mini_collapsed = collapsed;
         save_prefs(&app, &inner.prefs);
         let h = if collapsed {
-            52.0
+            46.0
         } else {
             inner.prefs.mini_expanded_height
         };
-        (h, inner.prefs.snapshot())
+        (h, inner.snapshot())
     };
     if snapshot.mode == WindowMode::Mini
         && let Ok(size) = window.inner_size()
     {
         let scale = window.scale_factor().unwrap_or(1.0);
-        let width_logical = (f64::from(size.width) / scale).max(260.0);
+        let width_logical = (f64::from(size.width) / scale).max(280.0);
         let _ = window.set_size(LogicalSize::new(width_logical, target_h));
     }
     Ok(snapshot)
 }
 
+#[tauri::command]
+pub fn window_edge_dock(app: AppHandle, enabled: bool) -> Result<WindowModeSnapshot, String> {
+    if !enabled {
+        reveal_docked_sync(&app, true);
+    }
+    let state = app.state::<WindowModeState>();
+    let snapshot = {
+        let mut inner = state.inner.lock().expect("window mode state");
+        load_prefs(&app, &mut inner);
+        inner.prefs.classic_edge_dock = enabled;
+        save_prefs(&app, &inner.prefs);
+        inner.snapshot()
+    };
+    state.wake.notify_one();
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn window_dock_hold(app: AppHandle, held: bool) -> Result<(), String> {
+    let state = app.state::<WindowModeState>();
+    let mut inner = state.inner.lock().expect("window mode state");
+    inner.dock_hold = held;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn window_dock_now(
+    app: AppHandle,
+    window: Window,
+    edge: Option<DockEdge>,
+) -> Result<WindowModeSnapshot, String> {
+    let target_edge = edge.unwrap_or(DockEdge::Right);
+    let Some(win_rect) = window_rect_px(&window) else {
+        return window_mode_get(app);
+    };
+    let Some(work) = monitor_work_area(&window) else {
+        return window_mode_get(app);
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let peek_px = (6.0 * scale).round() as i32;
+    if target_edge == DockEdge::None {
+        reveal_docked_sync(&app, true);
+        return window_mode_get(app);
+    }
+    let (expanded, hidden) = compute_dock_positions(win_rect, work, target_edge, peek_px);
+    let state = app.state::<WindowModeState>();
+    let snapshot = {
+        let mut inner = state.inner.lock().expect("window mode state");
+        load_prefs(&app, &mut inner);
+        inner.prefs.classic_edge_dock = true;
+        inner.docked_edge = target_edge;
+        inner.dock_hidden = true;
+        inner.dock_visible_pos = Some(expanded);
+        save_prefs(&app, &inner.prefs);
+        inner.snapshot()
+    };
+    notify_snapshot(&app);
+    slide_window_no_activate(&window, (win_rect.left, win_rect.top), hidden, Some(true)).await;
+    state.wake.notify_one();
+    Ok(snapshot)
+}
+
 pub fn show_window(app: &AppHandle) {
+    reveal_docked_sync(app, false);
     if let Some(window) = app.get_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -1098,7 +1673,9 @@ fn runs_when_opened(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{WindowAction, WindowMode};
+    use super::{
+        DockEdge, PxRect, WindowAction, WindowMode, compute_dock_positions, compute_snap_edge,
+    };
 
     #[test]
     fn window_modes_roundtrip_camel_case() {
@@ -1111,6 +1688,56 @@ mod tests {
             assert_eq!(parsed, expected);
             assert_eq!(serde_json::to_string(&parsed).unwrap(), raw);
         }
+    }
+
+    #[test]
+    fn dock_edge_snap_and_drawer_positions() {
+        let work = PxRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        let near_right = PxRect {
+            left: 1550,
+            top: 80,
+            right: 1912,
+            bottom: 840,
+        };
+        assert_eq!(compute_snap_edge(near_right, work, 16), DockEdge::Right);
+        let (exp, hid) = compute_dock_positions(near_right, work, DockEdge::Right, 6);
+        assert_eq!(exp, (1920 - 362, 80));
+        assert_eq!(hid, (1920 - 6, 80));
+
+        let near_left = PxRect {
+            left: 10,
+            top: 100,
+            right: 370,
+            bottom: 860,
+        };
+        assert_eq!(compute_snap_edge(near_left, work, 16), DockEdge::Left);
+        let (exp_l, hid_l) = compute_dock_positions(near_left, work, DockEdge::Left, 6);
+        assert_eq!(exp_l, (0, 100));
+        assert_eq!(hid_l, (-360 + 6, 100));
+
+        let near_top = PxRect {
+            left: 700,
+            top: 8,
+            right: 1060,
+            bottom: 768,
+        };
+        assert_eq!(compute_snap_edge(near_top, work, 16), DockEdge::Top);
+        let (exp_t, hid_t) = compute_dock_positions(near_top, work, DockEdge::Top, 6);
+        assert_eq!(exp_t, (700, 0));
+        assert_eq!(hid_t, (700, -760 + 6));
+
+        let center = PxRect {
+            left: 600,
+            top: 120,
+            right: 960,
+            bottom: 880,
+        };
+        assert_eq!(compute_snap_edge(center, work, 16), DockEdge::None);
     }
 
     #[test]

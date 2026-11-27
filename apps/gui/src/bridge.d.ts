@@ -160,12 +160,16 @@ export type NativeBrowser = {
 };
 
 export type WindowMode = "efficiency" | "classic" | "mini";
+export type DockEdge = "none" | "left" | "right" | "top";
 
 export type WindowModeSnapshot = {
   mode: WindowMode;
   alwaysOnTop: boolean;
   opacity: number;
   miniCollapsed: boolean;
+  edgeDock: boolean;
+  dockedEdge: DockEdge;
+  dockHidden: boolean;
 };
 
 export interface CrossAgentsBridge {
@@ -258,6 +262,9 @@ export interface CrossAgentsBridge {
     setAlwaysOnTop(enabled: boolean): Promise<WindowModeSnapshot>;
     setOpacity(opacity: number, persist?: boolean): Promise<WindowModeSnapshot>;
     setMiniCollapsed(collapsed: boolean): Promise<WindowModeSnapshot>;
+    setEdgeDock(enabled: boolean): Promise<WindowModeSnapshot>;
+    setDockHold(held: boolean): Promise<void>;
+    dockNow(edge?: DockEdge): Promise<WindowModeSnapshot>;
     onChange(listener: (state: WindowModeSnapshot) => void): () => void;
   };
   /** This machine's Tailscale state and peers (src-tauri/src/remote.rs). Desktop only. */
