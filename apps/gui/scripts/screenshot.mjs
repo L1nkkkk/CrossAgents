@@ -1,6 +1,6 @@
 // A screenshot of the GUI's mock preview (docs/tasks/DOGFOOD.md §3), so an agent can see what
-// its GUI change looks like: Vite serves `preview:mock` on a free port, a hidden Electron
-// window opens a scenario and saves a PNG, then both stop. Needs no hub.
+// its GUI change looks like: Vite serves `preview:mock` on a free port, headless Chrome / Edge
+// opens a scenario over CDP and saves a PNG, then both stop. Needs no hub.
 //
 //   node scripts/screenshot.mjs --scenario review --out shot.png
 //     [--route '#/runs/…'] [--width 1280] [--height 800] [--theme light|dark] [--wait 1500]
@@ -8,12 +8,14 @@
 //
 // Prints the PNG's path as JSON on stdout: {"path": "…", "url": "…"}.
 
-import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
+import { writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createServer } from "vite";
+import { launchCdpBrowser } from "./cdp-browser.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function parse(argv) {
   const out = { scenario: "running", width: 1280, height: 800, wait: 1500, theme: "", route: "", click: "", out: "screenshot.png" };
@@ -27,21 +29,9 @@ function parse(argv) {
   return out;
 }
 
-/** This environment without ELECTRON_RUN_AS_NODE: set (say, by an Electron-based shell), the
- * binary would run as plain Node and have no windows. */
-function childEnv() {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-  return env;
-}
-
 async function main() {
   const opts = parse(process.argv.slice(2));
   const out = resolve(process.cwd(), opts.out);
-  const require = createRequire(import.meta.url);
-  // The path of the Electron binary (the package's main export, when required from Node).
-  const electron = require("electron");
-  const { createServer } = await import("vite");
   const server = await createServer({
     root,
     configFile: join(root, "vite.config.ts"),
@@ -52,34 +42,56 @@ async function main() {
     server: { host: "127.0.0.1", port: 0, strictPort: false },
   });
   await server.listen();
+  let page = null;
+  const deadline = setTimeout(() => {
+    process.stderr.write("capture timed out\n");
+    process.exit(2);
+  }, 90_000);
+  deadline.unref();
   try {
     const { port } = server.httpServer.address();
     const url = `http://127.0.0.1:${port}/?scenario=${encodeURIComponent(opts.scenario)}${opts.route}`;
-    const code = await new Promise((done, fail) => {
-      const child = spawn(electron, [join(root, "scripts", "capture.cjs")], {
-        stdio: ["ignore", "inherit", "inherit"],
-        env: {
-          ...childEnv(),
-          CA_SHOT_URL: url,
-          CA_SHOT_OUT: out,
-          CA_SHOT_WIDTH: String(opts.width),
-          CA_SHOT_HEIGHT: String(opts.height),
-          CA_SHOT_WAIT: String(opts.wait),
-          CA_SHOT_THEME: opts.theme,
-          CA_SHOT_CLICK: opts.click,
-        },
-      });
-      child.on("error", fail);
-      child.on("exit", done);
+    page = await launchCdpBrowser({
+      width: opts.width,
+      height: opts.height,
+      noSandbox: !!process.env.CA_SHOT_NO_SANDBOX,
     });
-    if (code !== 0) throw new Error(`the capture window exited with code ${code}`);
+    await page.navigate(url);
+    if (opts.theme) {
+      // The app keeps its theme in localStorage (src/lib/theme.ts); set it and load again.
+      const choice = JSON.stringify({ mode: opts.theme, paper: process.env.CA_SHOT_PAPER || "plain" });
+      await page.evaluate(`localStorage.setItem("crossagents.theme", ${JSON.stringify(choice)})`);
+      await page.navigate(url);
+    }
+    // The scenario panel is the preview's own, not the app's.
+    await page.insertCSS("#mock-panel { display: none !important; }");
+    // Ensure focus-gated polling (like quota) runs even in headless mode.
+    await page.evaluate(`document.hasFocus = () => true; window.dispatchEvent(new Event("focus"));`);
+    await sleep(opts.wait);
+    if (opts.click) {
+      // A state only a click reaches (a confirmation's answer from the hub): click, settle.
+      const clicked = await page.evaluate(
+        `(() => { const el = document.querySelector(${JSON.stringify(opts.click)}); if (!el) return false; el.click(); return true; })()`,
+      );
+      if (!clicked) throw new Error(`nothing to click: ${opts.click}`);
+      await sleep(600);
+    }
+    if (process.env.CA_SHOT_FOCUS) {
+      await page.evaluate(
+        `(() => { const el = document.querySelector(${JSON.stringify(process.env.CA_SHOT_FOCUS)}); if (el) el.focus(); })()`,
+      );
+      await sleep(300);
+    }
+    writeFileSync(out, await page.screenshot());
     process.stdout.write(JSON.stringify({ path: out, url }) + "\n");
   } finally {
+    clearTimeout(deadline);
+    await page?.close();
     await server.close();
   }
 }
 
 main().catch((err) => {
-  process.stderr.write(`screenshot failed: ${err instanceof Error ? err.message : err}\n`);
+  process.stderr.write(`${err?.message ?? err}\n`);
   process.exit(1);
 });

@@ -169,7 +169,12 @@ pub fn current_state(app: &AppHandle) -> Value {
     state(app, &app.state::<Updates>())
 }
 
-fn publish(app: &AppHandle, updates: &Updates, events: Option<&Channel<Value>>, value: Value) -> Value {
+fn publish(
+    app: &AppHandle,
+    updates: &Updates,
+    events: Option<&Channel<Value>>,
+    value: Value,
+) -> Value {
     *updates.current.lock().expect("update state") = value.clone();
     if let Some(channel) = events {
         let _ = channel.send(value.clone());

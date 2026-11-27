@@ -45,10 +45,7 @@ function die(message) {
 }
 
 // `cargo build --release` has to write into the repository's own target/, because that is
-// where build.win.extraResources copies the hub from. A release once went out with no hub at all
-// because CARGO_TARGET_DIR was set in the shell: electron-builder packaged the rest without
-// complaining, the installer had nothing to put in `<home>/bin/<version>/`, and an updated GUI
-// kept talking to the old hub. check-version.mjs catches it now, but do not rely on that.
+// where scripts/tauri-bundle.mjs copies the hub binaries from.
 const buildEnv = { ...process.env };
 delete buildEnv.CARGO_TARGET_DIR;
 
@@ -89,22 +86,21 @@ const tag = `v${version}`;
 if (run(`git tag --list ${tag}`)) die(`tag ${tag} 已存在；换个版本号，或先 git tag -d ${tag}`);
 if (run(`git ls-remote --tags origin ${tag}`)) die(`origin 上已经有 tag ${tag}`);
 
-// electron-builder 发到另一个仓库，要一个有 repo 权限的 token。gh 已经登录的话直接借它的。
+// 发到另一个仓库，要一个有 repo 权限的 token。gh 已经登录的话直接借它的。
 let token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
 if (!token && !skipPublish) {
   try {
     token = execFileSync("gh", ["auth", "token"], { encoding: "utf8" }).trim();
   } catch {
-    die("没有 GH_TOKEN，`gh auth token` 也拿不到；electron-builder 发不出去。先 gh auth login");
+    die("没有 GH_TOKEN，`gh auth token` 也拿不到；无法发布到 " + RELEASES_REPO + "。先 gh auth login");
   }
 }
 
 console.log(`  ${current} → \x1b[1m${version}\x1b[0m（tag ${tag}，发到 ${RELEASES_REPO}）`);
 console.log(`  HEAD ${run("git rev-parse --short HEAD")} ${run("git log -1 --format=%s")}`);
 
-// 0.2.18 带着一个 GUI 调不通的路由出去了：electron/allowed.cts 漏了它，allowed.test 能抓到，
-// 但那个测试只在 npm test 里跑，提交前的校验不跑它。所以发版前跑一遍全量 GUI 测试。
-step("apps/gui 下 npm test（含 electron 白名单测试）");
+// 发版前跑一遍全量 GUI 测试（含桌面路由白名单与 Tauri 打包配置校验）。
+step("apps/gui 下 npm test（含打包与路由白名单测试）");
 try {
   runLoud("npm test", { cwd: new URL("../apps/gui", import.meta.url), env: buildEnv });
 } catch {
@@ -154,18 +150,14 @@ runLoud(`git tag ${tag}`);
 
 if (skipPublish) {
   console.log(`\n--skip-publish：已提交并打好 ${tag}，没有打包也没有 push。`);
-  console.log(`  继续： npm --prefix apps/gui run electron:release  然后  git push origin main ${tag}`);
+  console.log(`  继续： npm --prefix apps/gui run tauri:bundle  然后上传并  git push origin main ${tag}`);
   console.log(`  撤销： git tag -d ${tag} && git reset --hard HEAD~1`);
   process.exit(0);
 }
 
 // ---------------------------------------------------------------------------- 打包发布
 
-// 先把 release 建出来再让 electron-builder 上传。0.1.22 那次踩到的坑：`--publish always`
-// 配 `releaseType: "release"` 时，多个产物会并发去建同一个 release，一个建成、另一个撞上
-// `422 Published releases must have a valid tag`，整条命令按失败退出——可安装包其实已经传上去了，
-// latest.yml 和 blockmap 却没传。没有 latest.yml，已装的 GUI 根本发现不了新版本。
-// release 事先存在就不会有这个竞态。
+// 先把 release 建出来再上传产物，避免并发创建冲突或半成品上传。
 step(`在 ${RELEASES_REPO} 建 ${tag}`);
 const ghEnv = { ...process.env, GH_TOKEN: token };
 try {

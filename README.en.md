@@ -161,7 +161,7 @@ checks = [
 timeout_secs = 1800
 ```
 
-3. **Three-Tier Credentials & Local Security Boundary**: The `hub` binds strictly to `127.0.0.1` by default. API access is partitioned into `read`, `write`, and `admin` credentials. Each agent session receives a scoped token restricted to `/v1/me*` collaboration endpoints, preventing privilege escalation. The Electron renderer communicates with the main process through an explicit method-and-path allowlist, keeping tokens out of the webview context (see [API Auth & Access Levels](docs/API-AUTH.md)).
+3. **Three-Tier Credentials & Local Security Boundary**: The `hub` binds strictly to `127.0.0.1` by default. API access is partitioned into `read`, `write`, and `admin` credentials. Each agent session receives a scoped token restricted to `/v1/me*` collaboration endpoints, preventing privilege escalation. The Tauri desktop webview communicates with its Rust backend through an explicit method-and-path allowlist, keeping tokens out of the webview context (see [API Auth & Access Levels](docs/API-AUTH.md)).
 
 ## Global Configuration & Custom Plugins
 
@@ -207,12 +207,12 @@ models = ["fast", "smart"]
 cargo build --release
 # Binary is produced at target/release/crossagents (or crossagents.exe)
 
-# 2. Run the Desktop GUI in development mode
+# 2. Run the Desktop GUI in development mode (Tauri)
 cd apps/gui
 npm install
-npm run electron:dev       # Launch Electron dev window with hot reload
+npm run tauri:dev          # Launch Tauri dev window with hot reload
 npm run preview:mock       # Preview UI in browser with built-in mock scenarios (no hub required)
-npm run electron:build     # Package desktop application
+npm run tauri:bundle       # Package Tauri desktop application with bundled hub
 ```
 
 ### Testing
@@ -239,7 +239,7 @@ When modifying shared API types in `crates/api-types`, run `cargo test -p crossa
 - [Process Supervision & Takeover (PROCESS-SUPERVISION.md)](docs/PROCESS-SUPERVISION.md): `runtime-host` lifecycle, output buffering, and Windows Job Objects
 - [Extension System (EXTENSIONS.md)](docs/EXTENSIONS.md): Zero-compile tools, prompts, rules, hooks, services, and GUI panels
 - [Built-in Browser (BROWSER.md)](docs/BROWSER.md): GUI browser tabs, Chrome bridge, prompt-injection wrapping, and human takeover
-- [API Auth & Access Control (API-AUTH.md)](docs/API-AUTH.md): Three-tier credentials, Electron allowlist, and endpoint matrix
+- [API Auth & Access Control (API-AUTH.md)](docs/API-AUTH.md): Three-tier credentials, desktop allowlist, and endpoint matrix
 - [Stall Recovery & Continuation (CONTINUATION.md)](docs/CONTINUATION.md): Bounded automatic wakeups for unattended runs
 - [Multi-Node & Device Pairing (MULTI-NODE.md)](docs/MULTI-NODE.md): Cross-device pairing, NAT traversal, and remote hub architecture
 

@@ -162,7 +162,7 @@ checks = [
 timeout_secs = 1800
 ```
 
-3. **三级权限与本地安全边界**：`hub` 默认仅监听 `127.0.0.1`。API 划分为 `read` / `write` / `admin` 三级凭据；每个 Agent 会话仅持有作用域受限的会话 Token（只能访问 `/v1/me*` 工具接口），无法触达账号管理或越权操作其他会话。Electron 渲染进程与主进程之间通过严格的方法与路径白名单通信，Token 永不暴露给前端页面（详见 [API 鉴权与分级说明](docs/API-AUTH.md)）。
+3. **三级权限与本地安全边界**：`hub` 默认仅监听 `127.0.0.1`。API 划分为 `read` / `write` / `admin` 三级凭据；每个 Agent 会话仅持有作用域受限的会话 Token（只能访问 `/v1/me*` 工具接口），无法触达账号管理或越权操作其他会话。Tauri 桌面前端与 Rust 后端之间通过严格的方法与路径白名单通信，Token 永不暴露给前端页面（详见 [API 鉴权与分级说明](docs/API-AUTH.md)）。
 
 ## 全局配置与自定义插件
 
@@ -208,12 +208,12 @@ models = ["fast", "smart"]
 cargo build --release
 # 编译产物位于 target/release/crossagents（或 crossagents.exe），可加入 PATH
 
-# 2. 启动桌面端 GUI 开发模式
+# 2. 启动桌面端 GUI 开发模式（Tauri）
 cd apps/gui
 npm install
-npm run electron:dev       # 启动 Electron 开发窗口（支持热重载）
+npm run tauri:dev          # 启动 Tauri 桌面开发窗口（支持热重载）
 npm run preview:mock       # 无需启动 hub，在浏览器中使用内置 Mock 场景预览界面与交互
-npm run electron:build     # 打包桌面客户端
+npm run tauri:bundle       # 打包 Tauri 桌面客户端（含随附 hub）
 ```
 
 ### 运行测试
@@ -240,7 +240,7 @@ npm --prefix apps/gui test
 - [进程监督与热接管 (PROCESS-SUPERVISION.md)](docs/PROCESS-SUPERVISION.md)：`runtime-host` 守护、断线缓存补发与 Windows Job Object 进程树隔离
 - [免编译扩展系统 (EXTENSIONS.md)](docs/EXTENSIONS.md)：工具、提示词、事件响应、后台服务与 GUI 扩展规范
 - [内置受控浏览器 (BROWSER.md)](docs/BROWSER.md)：GUI 浏览器与 Chrome 桥接、防注入包裹与人工接管机制
-- [API 权限分级与安全边界 (API-AUTH.md)](docs/API-AUTH.md)：三级 Token 体系、Electron 主进程白名单与接口清单
+- [API 权限分级与安全边界 (API-AUTH.md)](docs/API-AUTH.md)：三级 Token 体系、桌面端路由白名单与接口清单
 - [停滞恢复与持续推进 (CONTINUATION.md)](docs/CONTINUATION.md)：无人值守运行时的自动唤醒与推进策略
 - [多节点与跨设备互联 (MULTI-NODE.md)](docs/MULTI-NODE.md)：设备配对、内网穿透与远程 Hub 架构设计
 

@@ -1,9 +1,7 @@
-// The built-in browser (run note browser/contract §3): every tab is a `<webview>` on the
-// `persist:browser` session, with an address bar and its page's title above it. Tabs are dock
-// tabs like terminals (`web:<id>`, panes.ts) and their pages are kept out of React so a re-render
-// does not throw them away; moving a tab to the other dock re-parents its `<webview>`, and
-// Electron may then recreate the guest (the page loads again, with a new webContents id). Their
-// urls are saved with the layout, so a reload of the window brings the tabs back at those pages.
+// The built-in browser (run note browser/contract §3): every tab is a native Tauri child webview
+// with an address bar and its page's title above it. Tabs are dock tabs like terminals (`web:<id>`,
+// panes.ts) and their host elements are kept out of React so a re-render does not recreate them.
+// Their urls are saved with the layout, so a reload of the window brings the tabs back at those pages.
 //
 // Agents drive the same tabs (§2): the hub sends `browser.request`, this page claims it, runs the
 // tool against the tab and posts the result. The person can take a tab over meanwhile; while it
@@ -13,7 +11,7 @@ import { writeClipboard } from "./lib/clipboard";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api, errorText, getBridge, scopeKey, scopePath, type FileScope } from "./api";
 import type { BookmarkEntry, BrowserBridge, ChromeBridgeStatus } from "./bridge";
-import { CopyButton, ErrorBox, Icon } from "./components";
+import { ErrorBox, Icon } from "./components";
 import { resolvePath } from "./fileResolve";
 import { onHubEvent } from "./hub";
 import { holdAfterRequest, holdLapsed, type Hold } from "./lib/browserControl";
@@ -108,12 +106,7 @@ const usePages = () => useSyncExternalStore(subscribe, () => view);
 /** Whether this page can open a built-in browser at all. */
 export const browserAvailable = () => !!getBridge()?.browser;
 
-/** Whether a `<webview>` exists here: Electron has one, a plain page (the mock preview) does not. */
-function supportsWebview(): boolean {
-  return typeof (document.createElement("webview") as Partial<WebviewTag>).getWebContentsId === "function";
-}
-
-/** The mock preview's own browser (src/dev/browser.mock.ts), for the parts a `<webview>` would do. */
+/** The mock preview's own browser (src/dev/browser.mock.ts), for the parts a native webview would do. */
 type MockBrowser = BrowserBridge & {
   attach(tab: WebTab, url: string): number;
   page(tab: WebTab): { url: string; title: string; lines: string[] } | undefined;
@@ -331,17 +324,8 @@ function makeNativeWebview(page: Page, url: string): WebviewTag {
 }
 
 function makeWebview(page: Page, url: string): WebviewTag {
-  const native = getBridge()?.nativeBrowser;
-  const el = native ? makeNativeWebview(page, url) : document.createElement("webview") as WebviewTag;
-  el.setAttribute("partition", "persist:browser");
-  el.setAttribute("data-crossagents-browser", "1");
-  // Without this Electron blocks the guest's window.open / target=_blank before any handler runs,
-  // so a link that asks for a new tab (a video card on bilibili, most search results) did nothing.
-  // The window itself is still refused: the main process sends its url here as a new tab.
-  el.setAttribute("allowpopups", "");
-  el.setAttribute("src", url);
+  const el = makeNativeWebview(page, url);
   el.addEventListener("dom-ready", () => {
-    // A re-attached <webview> has a new guest, and so a new id: this is where it is learned.
     page.wcId = el.getWebContentsId();
     el.insertCSS(PAGE_SCROLLBAR).catch(() => {});
     page.back = el.canGoBack();
@@ -360,11 +344,6 @@ function makeWebview(page: Page, url: string): WebviewTag {
     page.forward = el.canGoForward();
     publish();
     settle(page, null);
-  });
-  el.addEventListener("destroyed", () => {
-    // The guest is gone (Electron recreates it when the <webview> moves): its id is not usable.
-    page.wcId = null;
-    publish();
   });
   el.addEventListener("did-navigate", (e) => onUrl(page, (e as NavEvent).url));
   el.addEventListener("did-navigate-in-page", (e) => onUrl(page, (e as NavEvent).url));
@@ -412,7 +391,7 @@ function createPage(id: string, url: string, title?: string): Page {
       page.title = shown.title;
     }
     page.loading = false;
-  } else if (getBridge()?.nativeBrowser || supportsWebview()) {
+  } else if (getBridge()?.nativeBrowser) {
     page.el = makeWebview(page, url);
     // In the document from the start: a page loads (and an agent can drive it) even when no dock
     // is on screen; showing the tab moves it into the dock's box.
@@ -866,15 +845,10 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
         // Not attached and ready yet: the coming dom-ready reports the id.
       }
     }
-    // Re-parented into the vault rather than removed: removing a <webview> destroys its page.
-    // A re-attached one gets a new guest (Electron may recreate it when it moves between docks),
-    // which `dom-ready` reports, so the id of the old one is dropped here and never used again.
+    // Hide the native child webview and park its host element back in the vault so the tab stays
+    // alive (and reachable by agent tools) while not displayed in a dock.
     return () => {
       detachNative?.();
-      page.wcId = null;
-      // A closing tab's page is already disposed (element removed, page dropped) before this
-      // cleanup runs; putting the element back in the vault would attach it again and start the
-      // page over — a video that was playing would go on sounding from a tab that is gone.
       if (pages.get(page.id) === page) vault().appendChild(el);
     };
   }, [tab, page?.el]);
@@ -900,13 +874,12 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
 function BrowserSessionTransfer({ page }: { page: Page }) {
   const browser = getBridge()?.browser;
   const [open, setOpen] = useState(false);
-  const [exported, setExported] = useState<{ file: string; key: string }>();
   const [file, setFile] = useState<File>();
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [count, setCount] = useState<number>();
-  if (!page.url.startsWith("https:") || (!browser?.exportSession && !browser?.importSession)) return null;
+  if (!page.url.startsWith("https:") || !browser?.importSession) return null;
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -914,33 +887,17 @@ function BrowserSessionTransfer({ page }: { page: Page }) {
     try { await action(); } catch (err) { setError(errorText(err)); }
     finally { setBusy(false); }
   };
-  const download = () => {
-    if (!exported) return;
-    const url = URL.createObjectURL(new Blob([exported.file], { type: "application/json" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "CrossAgents-网站会话.json";
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  };
 
   return (
     <div className="web-session-transfer">
       <button type="button" className="ghost small" aria-expanded={open} onClick={() => {
         setOpen(!open);
-        if (open) { setExported(undefined); setKey(""); }
+        if (open) setKey("");
       }}>迁移网站登录状态</button>
       {open && (
         <>
           <p className="small muted">仅迁移 {hostLabel(page.url)} 的安全 Cookie。部分网站可能仍需重新登录。</p>
-          {browser.exportSession && <button type="button" className="ghost small" disabled={busy || page.wcId === null} onClick={() => void run(async () => {
-            setExported(await browser.exportSession!(await whenAttached(page)));
-          })}>生成加密文件</button>}
-          {exported && <div className="row">
-            <CopyButton text={exported.key} label="复制迁移密钥" />
-            <button type="button" onClick={download}>下载加密文件</button>
-          </div>}
-          {browser.importSession && <form className="row" onSubmit={(event) => {
+          <form className="row" onSubmit={(event) => {
             event.preventDefault();
             if (!file || !key.trim()) return;
             void run(async () => {
@@ -953,7 +910,7 @@ function BrowserSessionTransfer({ page }: { page: Page }) {
             <input type="file" aria-label="网站会话迁移文件" accept=".json,application/json" onChange={(event) => setFile(event.target.files?.[0])} />
             <input type="password" autoComplete="off" aria-label="网站会话迁移密钥" placeholder="迁移密钥" value={key} onChange={(event) => setKey(event.target.value)} />
             <button disabled={busy || !file || !key.trim()}>导入当前网站</button>
-          </form>}
+          </form>
           {count !== undefined && <p className="small" role="status">已导入 {count} 条 Cookie</p>}
           <ErrorBox error={error} />
         </>

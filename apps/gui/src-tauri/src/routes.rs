@@ -10,7 +10,7 @@ struct Route {
     path: String,
 }
 
-// Electron reads the same table. Streaming routes have their own commands.
+// Desktop Hub API route allowlist. Streaming routes have their own commands.
 static ROUTES: LazyLock<Vec<(String, Regex)>> = LazyLock::new(|| {
     let routes: Vec<Route> = serde_json::from_str(include_str!("../../shared/hub-routes.json"))
         .expect("valid desktop Hub route table");

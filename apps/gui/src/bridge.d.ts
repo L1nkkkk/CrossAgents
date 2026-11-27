@@ -1,12 +1,12 @@
-// What the Electron preload (electron/preload.cts) exposes as `window.crossagents`. The
-// main process does all hub I/O; the token never reaches the page.
+// What the Tauri desktop bridge (tauriBridge.ts) exposes as `window.crossagents`. The
+// desktop backend does all hub I/O; the token never reaches the page.
 
 export type HubResponse = { status: number; body: string };
 
-/** A development build of the hub running where the GUI's own would (electron/localHub.cts). */
+/** A development build of the hub running where the GUI's own would (src-tauri/src/startup.rs). */
 export type DevHub = { exe: string; running: string; shipped: string };
 
-/** Where the GUI's own update stands (electron/updates.cts). Times are ISO strings. */
+/** Where the GUI's own update stands (src-tauri/src/updates.rs). Times are ISO strings. */
 export type UpdateState =
   | { state: "manual"; current: string; reason: string }
   | { state: "idle"; current: string }
@@ -49,7 +49,7 @@ export type ConnectionState = {
 /** Pairing goes: find the hub there, `device add`, start the tunnel, check the token. */
 export type PairStep = "locate" | "pair" | "tunnel" | "check" | "redeem" | "forward";
 
-/** A machine on this person's Tailscale network, as `tailscale status --json` shows it (electron/tailscale.cts). */
+/** A machine on this person's Tailscale network, as `tailscale status --json` shows it (src-tauri/src/remote.rs). */
 export type TailscaleOs = "windows" | "macos" | "linux" | "ios" | "android" | "other";
 export type TailscalePeer = {
   hostName: string;
@@ -72,7 +72,7 @@ export type TailscaleStatus = {
   peers: TailscalePeer[];
 };
 
-/** A console entry a browser tab logged (electron/browserCdp.cts). */
+/** A console entry a browser tab logged (src-tauri/src/browser_console.js). */
 export type BrowserConsoleEntry = { level: string; text: string; ts: number };
 
 export type BookmarkLink = { kind: "url"; id: string; name: string; url: string };
@@ -96,11 +96,10 @@ export type ChromeBridgeStatus = {
 
 /**
  * The built-in browser's tabs (run note browser/contract §3), as `window.crossagents.browser`
- * exposes them (electron/preload.cts). Every call names the tab by its webContents id
- * (`webview.getWebContentsId()`), which only the page that owns the tab can ask about.
+ * exposes them (tauriBridge.ts). Every call names the tab by its numeric id.
  */
 export type BrowserBridge = {
-  /** The page's accessibility tree, each interactive element carrying `[ref=N]`, and its url and title. */
+  /** The page's interactive elements carrying `[ref=N]`, text content, url and title. */
   snapshot(wcId: number): Promise<{ text: string; url: string; title: string }>;
   click(wcId: number, ref: number): Promise<{ ok: true }>;
   type(wcId: number, ref: number, text: string, submit?: boolean): Promise<{ ok: true }>;
@@ -108,10 +107,9 @@ export type BrowserBridge = {
   scroll(wcId: number, dy: number): Promise<{ ok: true }>;
   screenshot(wcId: number): Promise<{ base64: string; mime: "image/png" }>;
   console(wcId: number): Promise<BrowserConsoleEntry[]>;
-  /** A local file's `crossagents-file://` url; the main process lets the tab read that file's folder. */
+  /** A local file's preview url; the desktop shell lets the tab read that file's folder. */
   fileUrl(absPath: string): Promise<string>;
   scopedFileUrl?(scope: string, path: string): Promise<string>;
-  exportSession?(id: number): Promise<{ file: string; key: string }>;
   importSession?(id: number, file: string, key: string): Promise<{ count: number }>;
   /** The url of a new tab the page asked for (a `window.open` or `target=_blank` in a tab). */
   onOpenTab(listener: (url: string) => void): () => void;
@@ -145,12 +143,12 @@ export type NativeBrowser = {
 };
 
 export interface CrossAgentsBridge {
-  /** The built-in browser (<webview> tabs); absent where the page has no tab of its own. */
+  /** The built-in browser (native child webviews); absent where the page has no tab of its own. */
   browser?: BrowserBridge;
   nativeBrowser?: NativeBrowser;
   /**
-   * Which hub the GUI talks to (electron/remoteController.cts). Switching mode, pairing anew or
-   * forgetting while remote reloads the window. Electron only.
+   * Which hub the GUI talks to (src-tauri/src/remote.rs). Switching mode, pairing anew or
+   * forgetting while remote reloads the window. Desktop only.
    */
   connection?: {
     get(): Promise<ConnectionState>;
@@ -163,12 +161,11 @@ export interface CrossAgentsBridge {
     reconnect(): Promise<ConnectionState>;
     /** Forgets the pairing here only; the device stays on the hub until revoked there. */
     forget(): Promise<ConnectionState>;
-    exportPairing?(): Promise<{ file: string; key: string }>;
     importPairing?(file: string, key: string): Promise<ConnectionState>;
     onState(listener: (state: ConnectionState) => void): () => void;
     onPairStep(listener: (step: PairStep) => void): () => void;
   };
-  /** Main-process recovery state and durable extension startup reporting (Electron only). */
+  /** Desktop recovery state and durable extension startup reporting (desktop only). */
   extensions?: {
     /** Origin for installed extension assets when the desktop shell uses a shared protocol host. */
     assetBase?: string;
@@ -226,9 +223,9 @@ export interface CrossAgentsBridge {
     install(): void;
     onState(listener: (state: UpdateState) => void): () => void;
   };
-  /** A window command from the page's menu (electron/main.cts `COMMANDS`). */
+  /** A window command from the page's menu (src-tauri/src/desktop.rs `window_command`). */
   command?(name: "drag" | "minimize" | "maximize" | "close" | "zoomIn" | "zoomOut" | "zoomReset" | "reload" | "devtools" | "fullscreen" | "quit"): void;
-  /** This machine's Tailscale state and peers (electron/tailscale.cts). Electron only. */
+  /** This machine's Tailscale state and peers (src-tauri/src/remote.rs). Desktop only. */
   tailscale?: { status(): Promise<TailscaleStatus> };
 }
 

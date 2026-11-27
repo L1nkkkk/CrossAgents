@@ -20,7 +20,7 @@ async function readBody(req: IncomingMessage): Promise<string | undefined> {
 }
 
 /// Dev-server only: lets the frontend run in a plain browser (`npm run dev`) by forwarding
-/// `/v1/*` to the hub with the bearer token, like the Electron main process does in the app.
+/// `/v1/*` to the hub with the bearer token, like the Tauri backend does in the desktop app.
 function hubProxy(): Plugin {
   return {
     name: "crossagents-hub-proxy",
@@ -118,7 +118,7 @@ export default defineConfig(({ command, mode }) => {
     },
     resolve: { alias: { "@bindings": fileURLToPath(new URL("../../bindings", import.meta.url)) } },
     clearScreen: false,
-    server: { port: 1420, strictPort: !mock, watch: { ignored: ["**/electron/**", "**/dist-electron/**", "**/release/**"] } },
+    server: { port: 1420, strictPort: !mock, watch: { ignored: ["**/src-tauri/target/**", "**/release/**"] } },
     build: { target: "es2022" },
   };
 });

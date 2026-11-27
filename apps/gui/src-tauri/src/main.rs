@@ -15,6 +15,7 @@ use tauri::{
 use tauri_plugin_opener::OpenerExt;
 
 mod browser;
+mod browser_bookmarks;
 mod chrome;
 mod desktop;
 mod extensions;
@@ -291,7 +292,10 @@ fn main() {
         browser::browser_action,
         browser::browser_screenshot,
         browser::browser_import_session,
+        browser::browser_open_external,
+        browser_bookmarks::browser_bookmarks,
         file_preview::browser_file_url,
+        file_preview::browser_local_file_url,
         chrome::chrome_status,
         chrome::chrome_open_extension,
         chrome::chrome_activate,
@@ -371,11 +375,12 @@ fn main() {
             app.manage(file_preview::Previews::new(&app_handle)?);
             chrome::Chrome::setup(&app_handle)?;
             remote::Remote::start(&app_handle);
-            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("CrossAgents")
-                .inner_size(1280.0, 900.0)
-                .visible(false)
-                .disable_drag_drop_handler();
+            let builder =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("CrossAgents")
+                    .inner_size(1280.0, 900.0)
+                    .visible(false)
+                    .disable_drag_drop_handler();
             #[cfg(target_os = "macos")]
             let builder = builder
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
@@ -389,6 +394,15 @@ fn main() {
                     }
                 })
                 .on_navigation(|url| {
+                    #[cfg(debug_assertions)]
+                    if url.scheme() == "http"
+                        && url.host_str() == Some("localhost")
+                        && url.port() == Some(1420)
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                    {
+                        return true;
+                    }
                     url.port().is_none()
                         && url.username().is_empty()
                         && url.password().is_none()

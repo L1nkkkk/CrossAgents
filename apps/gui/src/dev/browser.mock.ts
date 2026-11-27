@@ -11,7 +11,7 @@ import type { WebTab } from "../panes";
 type MockPage = { url: string; title: string; lines: string[] };
 
 export type MockBrowser = BrowserBridge & {
-  /** The webContents id this tab stands for: the page's calls are keyed by it, as in Electron. */
+  /** The numeric id this tab stands for: the page's calls are keyed by it, as in Tauri. */
   attach(tab: WebTab, url: string): number;
   /** What the tab shows, for the preview's page surface. */
   page(tab: WebTab): MockPage | undefined;

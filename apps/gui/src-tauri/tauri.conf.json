@@ -3,7 +3,11 @@
   "productName": "CrossAgents",
   "version": "../package.json",
   "identifier": "dev.crossagents.tauri-prototype",
-  "build": { "frontendDist": "../dist-tauri" },
+  "build": {
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev -- --mode tauri",
+    "frontendDist": "../dist-tauri"
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [],

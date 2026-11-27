@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
 };
@@ -24,11 +24,37 @@ const LIMIT: usize = 16 * 1024 * 1024;
 const ROOTS: usize = 128;
 
 #[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum RootSource {
+    Local {
+        local_root: PathBuf,
+    },
+    Workspace {
+        scope: String,
+        directory: String,
+        workspace: String,
+    },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 struct Root {
     id: Uuid,
-    scope: String,
-    directory: String,
-    workspace: String,
+    #[serde(flatten)]
+    source: RootSource,
+}
+
+impl Root {
+    fn valid(&self) -> bool {
+        match &self.source {
+            RootSource::Local { local_root } => local_root.is_absolute() && local_root.is_dir(),
+            RootSource::Workspace {
+                scope, directory, ..
+            } => {
+                valid_scope(scope)
+                    && (directory.is_empty() || directory.split('/').all(valid_segment))
+            }
+        }
+    }
 }
 
 struct Store {
@@ -49,10 +75,7 @@ impl Previews {
             .and_then(|bytes| serde_json::from_slice::<Vec<Root>>(&bytes).ok())
             .unwrap_or_default()
             .into_iter()
-            .filter(|root| {
-                valid_scope(&root.scope)
-                    && (root.directory.is_empty() || root.directory.split('/').all(valid_segment))
-            })
+            .filter(Root::valid)
             .take(ROOTS)
             .collect();
         Ok(Self {
@@ -145,6 +168,21 @@ fn valid_segment(part: &str) -> bool {
     !matches!(part, "" | "." | "..") && !part.contains(['/', '\\', ':', '\0'])
 }
 
+fn preview_url(id: Uuid, name: &str) -> Result<String, String> {
+    let origin = if cfg!(windows) {
+        "http://crossagents-preview.localhost/"
+    } else {
+        "crossagents-preview://localhost/"
+    };
+    let mut url = Url::parse(origin).map_err(|err| err.to_string())?;
+    url.path_segments_mut()
+        .map_err(|_| "无法构造文件预览地址")?
+        .clear()
+        .push(&id.to_string())
+        .push(name);
+    Ok(url.into())
+}
+
 #[tauri::command]
 pub async fn browser_file_url(
     client: State<'_, Client>,
@@ -164,27 +202,55 @@ pub async fn browser_file_url(
     }
     let (directory, name) = relative.rsplit_once('/').unwrap_or(("", &relative));
     let id = Uuid::new_v4();
-    let origin = if cfg!(windows) {
-        "http://crossagents-preview.localhost/"
-    } else {
-        "crossagents-preview://localhost/"
-    };
-    let mut url = Url::parse(origin).map_err(|err| err.to_string())?;
-    url.path_segments_mut()
-        .map_err(|_| "无法构造文件预览地址")?
-        .clear()
-        .push(&id.to_string())
-        .push(name);
+    let url = preview_url(id, name)?;
     if remote.workspace_key().as_deref() != Some(&workspace) {
         return Err("连接已切换，请重新打开文件".into());
     }
     previews.remember(Root {
         id,
-        scope,
-        directory: directory.into(),
-        workspace,
+        source: RootSource::Workspace {
+            scope,
+            directory: directory.into(),
+            workspace,
+        },
     })?;
-    Ok(url.into())
+    Ok(url)
+}
+
+#[tauri::command]
+pub fn browser_local_file_url(
+    remote: State<'_, Remote>,
+    previews: State<'_, Previews>,
+    path: String,
+) -> Result<String, String> {
+    if remote.is_remote() {
+        return Err("远程模式下不能直接打开本机绝对路径文件".into());
+    }
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("没有文件路径".into());
+    }
+    let target = Path::new(trimmed);
+    if !target.is_absolute() {
+        return Err("需要文件的绝对路径".into());
+    }
+    let real = fs::canonicalize(target).map_err(|_| "文件不存在".to_owned())?;
+    if !real.is_file() {
+        return Err("不是一个文件".into());
+    }
+    let local_root = real.parent().ok_or("无法确定文件所在目录")?.to_path_buf();
+    let name = real
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| valid_segment(n))
+        .ok_or("文件名无效")?;
+    let id = Uuid::new_v4();
+    let url = preview_url(id, name)?;
+    previews.remember(Root {
+        id,
+        source: RootSource::Local { local_root },
+    })?;
+    Ok(url)
 }
 
 pub async fn serve(app: AppHandle, view: String, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
@@ -210,14 +276,42 @@ pub async fn serve(app: AppHandle, view: String, request: Request<Vec<u8>>) -> R
     response
 }
 
+fn read_local(
+    local_root: &Path,
+    name: &str,
+    head: bool,
+) -> Result<(&'static str, Vec<u8>), StatusCode> {
+    let real_root = fs::canonicalize(local_root).map_err(|_| StatusCode::FORBIDDEN)?;
+    let candidate = real_root.join(name);
+    let real = fs::canonicalize(&candidate).map_err(|_| StatusCode::NOT_FOUND)?;
+    if !real.starts_with(&real_root) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let meta = fs::metadata(&real).map_err(|_| StatusCode::NOT_FOUND)?;
+    if !meta.is_file() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if meta.len() > LIMIT as u64 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let bytes = if head {
+        Vec::new()
+    } else {
+        fs::read(&real).map_err(|_| StatusCode::NOT_FOUND)?
+    };
+    Ok((mime(name), bytes))
+}
+
 async fn read(
     app: &AppHandle,
     view: &str,
     request: Request<Vec<u8>>,
 ) -> Result<(&'static str, Vec<u8>), StatusCode> {
-    if !matches!(*request.method(), Method::GET | Method::HEAD) {
-        return Err(StatusCode::METHOD_NOT_ALLOWED);
-    }
+    let head = match *request.method() {
+        Method::GET => false,
+        Method::HEAD => true,
+        _ => return Err(StatusCode::METHOD_NOT_ALLOWED),
+    };
     let (id, name) = parse(request.uri().path()).ok_or(StatusCode::NOT_FOUND)?;
     let root = {
         let previews = app.state::<Previews>();
@@ -232,53 +326,66 @@ async fn read(
             .cloned()
             .ok_or(StatusCode::NOT_FOUND)?
     };
-    let remote = app.state::<Remote>();
-    let hub = remote
-        .hub()
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    if remote.workspace_key().as_deref() != Some(&root.workspace) {
-        return Err(StatusCode::GONE);
-    }
-    let mut url = hub
-        .base
-        .join(&format!("{}/files/raw", root.scope))
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    let file = if root.directory.is_empty() {
-        name.clone()
-    } else {
-        format!("{}/{name}", root.directory)
-    };
-    url.query_pairs_mut().append_pair("path", &file);
-    let client = app.state::<Client>();
-    let raw = client
-        .request(request.method().clone(), url)
-        .bearer_auth(&hub.token)
-        .timeout(Duration::from_secs(30));
-    let mut reply = client_headers(raw, &hub)
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    if reply.status() == StatusCode::UNAUTHORIZED {
-        remote.unauthorized(&hub);
-    }
-    if !reply.status().is_success() {
-        return Err(reply.status());
-    }
-    if reply
-        .content_length()
-        .is_some_and(|length| length > LIMIT as u64)
-    {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = reply.chunk().await.map_err(|_| StatusCode::BAD_GATEWAY)? {
-        if bytes.len() + chunk.len() > LIMIT {
-            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    match root.source {
+        RootSource::Local { local_root } => {
+            tokio::task::spawn_blocking(move || read_local(&local_root, &name, head))
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         }
-        bytes.extend_from_slice(&chunk);
+        RootSource::Workspace {
+            scope,
+            directory,
+            workspace,
+        } => {
+            let remote = app.state::<Remote>();
+            let hub = remote
+                .hub()
+                .await
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if remote.workspace_key().as_deref() != Some(&workspace) {
+                return Err(StatusCode::GONE);
+            }
+            let mut url = hub
+                .base
+                .join(&format!("{scope}/files/raw"))
+                .map_err(|_| StatusCode::NOT_FOUND)?;
+            let file = if directory.is_empty() {
+                name.clone()
+            } else {
+                format!("{directory}/{name}")
+            };
+            url.query_pairs_mut().append_pair("path", &file);
+            let client = app.state::<Client>();
+            let raw = client
+                .request(request.method().clone(), url)
+                .bearer_auth(&hub.token)
+                .timeout(Duration::from_secs(30));
+            let mut reply = client_headers(raw, &hub)
+                .send()
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            if reply.status() == StatusCode::UNAUTHORIZED {
+                remote.unauthorized(&hub);
+            }
+            if !reply.status().is_success() {
+                return Err(reply.status());
+            }
+            if reply
+                .content_length()
+                .is_some_and(|length| length > LIMIT as u64)
+            {
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = reply.chunk().await.map_err(|_| StatusCode::BAD_GATEWAY)? {
+                if bytes.len() + chunk.len() > LIMIT {
+                    return Err(StatusCode::PAYLOAD_TOO_LARGE);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok((mime(&name), bytes))
+        }
     }
-    Ok((mime(&name), bytes))
 }
 
 fn mime(path: &str) -> &'static str {
@@ -290,13 +397,65 @@ fn mime(path: &str) -> &'static str {
         Some("html" | "htm") => "text/html; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("txt" | "md") => "text/plain; charset=utf-8",
+        Some("xml") => "application/xml; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("pdf") => "application/pdf",
+        Some("wasm") => "application/wasm",
         Some("woff") => "font/woff",
         Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_file_preview_reads_inside_root_and_blocks_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("index.html"), "<h1>ok</h1>").unwrap();
+        let (ct, body) = read_local(dir.path(), "index.html", false).unwrap();
+        assert_eq!(ct, "text/html; charset=utf-8");
+        assert_eq!(body, b"<h1>ok</h1>");
+        let (_, empty) = read_local(dir.path(), "index.html", true).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(
+            read_local(dir.path(), "missing.html", false).unwrap_err(),
+            StatusCode::NOT_FOUND
+        );
+        assert!(parse("/not-a-uuid/index.html").is_none());
+        let id = Uuid::new_v4();
+        assert!(parse(&format!("/{id}/../secret.txt")).is_none());
+    }
+
+    #[test]
+    fn root_source_deserializes_legacy_workspace_and_local_entries() {
+        let id = Uuid::new_v4();
+        let workspace_json = serde_json::json!({
+            "id": id,
+            "scope": "/v1/agents/Rex",
+            "directory": "docs",
+            "workspace": "local"
+        });
+        let parsed: Root = serde_json::from_value(workspace_json).unwrap();
+        assert!(matches!(parsed.source, RootSource::Workspace { .. }));
+        assert!(parsed.valid());
+
+        let dir = tempfile::tempdir().unwrap();
+        let local_json = serde_json::json!({
+            "id": id,
+            "local_root": dir.path()
+        });
+        let parsed: Root = serde_json::from_value(local_json).unwrap();
+        assert!(matches!(parsed.source, RootSource::Local { .. }));
+        assert!(parsed.valid());
     }
 }

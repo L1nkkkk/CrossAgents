@@ -120,9 +120,13 @@ pub fn window_command(
     let result = match action {
         WindowAction::Drag => window.start_dragging(),
         WindowAction::Minimize => window.minimize(),
-        WindowAction::Maximize => window
-            .is_maximized()
-            .and_then(|max| if max { window.unmaximize() } else { window.maximize() }),
+        WindowAction::Maximize => window.is_maximized().and_then(|max| {
+            if max {
+                window.unmaximize()
+            } else {
+                window.maximize()
+            }
+        }),
         WindowAction::Close => window.close(),
         WindowAction::Reload => window.reload(),
         WindowAction::Fullscreen => window
@@ -158,7 +162,10 @@ pub fn window_command(
     result.map_err(|err| err.to_string())
 }
 
-fn build_tray_menu(app: &AppHandle, stopping: bool) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+fn build_tray_menu(
+    app: &AppHandle,
+    stopping: bool,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 
     let remote_summary = app.state::<Remote>().remote_summary();
@@ -172,7 +179,12 @@ fn build_tray_menu(app: &AppHandle, stopping: bool) -> tauri::Result<tauri::menu
             let running = crate::hub_home()
                 .map(|home| home.join("hub.json").exists())
                 .unwrap_or(false);
-            if running { "后台运行中" } else { "后台未运行" }.into()
+            if running {
+                "后台运行中"
+            } else {
+                "后台未运行"
+            }
+            .into()
         }
     };
 
@@ -190,12 +202,20 @@ fn build_tray_menu(app: &AppHandle, stopping: bool) -> tauri::Result<tauri::menu
         let (id, label, enabled) = match update_kind {
             "ready" => {
                 let version = update_state["version"].as_str().unwrap_or("");
-                ("update-install", format!("重启并更新到 {version}"), !stopping)
+                (
+                    "update-install",
+                    format!("重启并更新到 {version}"),
+                    !stopping,
+                )
             }
             "downloading" => {
                 let version = update_state["version"].as_str().unwrap_or("");
                 let percent = update_state["percent"].as_u64().unwrap_or(0);
-                ("update-status", format!("正在下载 {version}（{percent}%）"), false)
+                (
+                    "update-status",
+                    format!("正在下载 {version}（{percent}%）"),
+                    false,
+                )
             }
             "checking" => ("update-status", "正在检查更新…".into(), false),
             _ => {
@@ -203,7 +223,11 @@ fn build_tray_menu(app: &AppHandle, stopping: bool) -> tauri::Result<tauri::menu
                     .as_str()
                     .map(str::to_owned)
                     .unwrap_or_else(|| app.package_info().version.to_string());
-                ("update-check", format!("检查更新（当前 {current}）"), !stopping)
+                (
+                    "update-check",
+                    format!("检查更新（当前 {current}）"),
+                    !stopping,
+                )
             }
         };
         let item = MenuItem::with_id(app, id, label, enabled, None::<&str>)?;
@@ -229,7 +253,13 @@ fn build_tray_menu(app: &AppHandle, stopping: bool) -> tauri::Result<tauri::menu
         menu.append(&quit)?;
         #[cfg(feature = "bundled-hub")]
         {
-            let stop = MenuItem::with_id(app, "stop-background", "停止后台并退出", !stopping, None::<&str>)?;
+            let stop = MenuItem::with_id(
+                app,
+                "stop-background",
+                "停止后台并退出",
+                !stopping,
+                None::<&str>,
+            )?;
             menu.append(&stop)?;
         }
     }

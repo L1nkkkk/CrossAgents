@@ -66,7 +66,7 @@ function apply() {
   else delete document.documentElement.dataset.accent;
   if (choice.font && choice.font !== "sans") document.documentElement.dataset.font = choice.font;
   else delete document.documentElement.dataset.font;
-  // The window frame follows (Electron); read the colours the stylesheet now gives.
+  // The window frame follows (desktop shell); read the colours the stylesheet now gives.
   const css = getComputedStyle(document.documentElement);
   getBridge()?.setTheme?.({
     dark: applied === "dark",

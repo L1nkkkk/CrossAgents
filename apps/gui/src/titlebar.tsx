@@ -1,8 +1,8 @@
 // The window's title bar, drawn by the page like Codex's desktop app: back and forward, the
 // sidebar toggle and the 文件 / 编辑 / 视图 / 帮助 menus; the strip drags the window. Page and
 // tool-column headers stay the first row of their own panels, as in Codex.
-// The window buttons are the system's (macOS traffic lights inset on the left, an overlay on
-// the right elsewhere; electron/main.cts), so the strip leaves room for them.
+// The window buttons are the system's (macOS traffic lights inset on the left, custom controls on
+// the right elsewhere), so the strip leaves room for them.
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Icon } from "./components";
@@ -13,8 +13,8 @@ import { MenuBar } from "./menubar";
 /** Only the desktop app has a window to draw a title bar for. */
 export const inTauri = typeof window !== "undefined" && "__TAURI__" in window;
 export const inDesktop =
-  typeof navigator !== "undefined" &&
-  (/Electron/i.test(navigator.userAgent) || inTauri || (__MOCK__ && new URLSearchParams(location.search).has("titlebar")));
+  typeof window !== "undefined" &&
+  (inTauri || (__MOCK__ && new URLSearchParams(location.search).has("titlebar")));
 
 // ---- The sidebar: docked unless hidden (remembered per browser). In a small window it has no
 // column: it floats over the page while the pointer is on its button or on it (like Claude's

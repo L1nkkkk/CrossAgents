@@ -19,7 +19,7 @@ agent 可以像人一样打开网页、读页面、点、填、翻页、截图�
 | `browser_console` | `{tab}` | `[{level, text, ts}]`（最近日志与异常） |
 | `browser_tabs` | `{}` | `[{tab, url, title, controlled_by_human}]` |
 
-`tab` 是字符串 id，就是 GUI 的 `web:<id>` 里的 `<id>`。`path` 是本地文件的绝对路径（GUI 用 `crossagents-file://` 打开）。
+`tab` 是字符串 id，就是 GUI 的 `web:<id>` 里的 `<id>`（或已连接外部 Chrome 的 `chrome:<id>`）。`path` 是本地文件的绝对路径（Tauri 桌面端经 `crossagents-preview` 受限协议只读加载）。
 
 ## 2. 一次调用怎么走
 

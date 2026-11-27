@@ -527,4 +527,5 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 
 - [ ] **修通 macOS CI 构建与实机验收**：排查 `Tauri preview` 中 `macos-latest` 在 `cargo check --workspace --locked` 阶段的编译失败，打出 Apple 芯片 `.dmg` 并在 Mac 上实测启动、内置浏览器截图、系统托盘与 `crossagents-link` 穿透。
 - [ ] **切换正式发布到 Tauri**：配置 `CROSSAGENTS_TAURI_UPDATE_ENDPOINT`、`CROSSAGENTS_TAURI_UPDATE_PUBKEY`、`TAURI_SIGNING_PRIVATE_KEY`，更新 `scripts/release.mjs` 与 `.github/workflows/mac.yml` 发布 Windows/Mac 签名安装包及更新清单。
+- [x] **全面切换 Tauri 并移除 Electron（2026-11-27）**：Windows 与 Mac 正式发布均已切到 Tauri；补齐了 Tauri 下内置浏览器本地文件预览（`browser_local_file_url`）、外部浏览器打开（`browser_open_external`）与本机 Chrome/Edge 书签栏（`browser_bookmarks`）；将 `scripts/screenshot.mjs` 与 `scripts/browser-regression.mjs` 迁至零依赖本机 Chrome/Edge CDP；删除 `apps/gui/electron/` 及 `electron` / `electron-builder` / `electron-updater` 依赖与前端 `<webview>` 双分支。
 - [ ] **推进客户端节点化（接续 §八 B1）**：在 Mac 穿透与单机底座实测通过后，将各端（含 Mac 客户端）落地为可挂载到中心 Hub 的节点代理——中心 Hub 只负责调度与指令/事件中转，CLI 拉起与内置终端 PTY 下沉到节点本机执行，并补齐可信节点授权边界。

@@ -10,6 +10,7 @@ use tauri::{
     ipc::Channel,
     webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder},
 };
+use tauri_plugin_opener::OpenerExt;
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -176,6 +177,18 @@ pub fn browser_style(app: AppHandle, id: u32, css: String) -> Result<(), String>
     let css = serde_json::to_string(&css).map_err(|err| err.to_string())?;
     tab(&app, id)?.eval(format!("(() => {{ const style = document.createElement('style'); style.textContent = {css}; document.head?.append(style); }})()"))
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn browser_open_external(app: AppHandle, url: String) -> Result<Value, String> {
+    let parsed = Url::parse(url.trim())
+        .ok()
+        .filter(|parsed| matches!(parsed.scheme(), "http" | "https") && allowed(parsed))
+        .ok_or_else(|| "只允许在外部浏览器打开 http 或 https 链接".to_owned())?;
+    app.opener()
+        .open_url(parsed.as_str(), None::<&str>)
+        .map_err(|err| err.to_string())?;
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 #[tauri::command]
