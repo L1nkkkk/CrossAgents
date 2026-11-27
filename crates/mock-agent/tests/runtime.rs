@@ -314,6 +314,7 @@ async fn unknown_plugin_is_rejected_and_plugins_are_listed() {
             "cursor",
             "gemini",
             "mock",
+            "qoder",
             "with"
         ]
     );

@@ -268,10 +268,165 @@ pub fn context_window_for(model: Option<&str>) -> Option<u64> {
     if m.starts_with("gpt-5") || m.contains("codex") {
         return Some(272_000);
     }
+    if m.starts_with("gpt-oss-") {
+        return Some(128_000);
+    }
     if m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-4") {
         return Some(200_000);
     }
     None
+}
+
+/// Reads the concrete model slug recorded in Antigravity CLI's on-disk transcript when
+/// `init` omitted `model` (happens when `--model` is not passed). Best effort.
+fn transcript_model(conversation_id: &str) -> Option<String> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    let path = PathBuf::from(home)
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("brain")
+        .join(conversation_id)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl");
+    transcript_model_in(&path)
+}
+
+fn transcript_model_in(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(model) = value
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            return Some(model.to_owned());
+        }
+    }
+    None
+}
+
+/// Token tracking for one driver session.
+///
+/// Empirically verified on `agy 1.5.14`:
+/// - `input_tokens` and `total_tokens` exclude `cache_read_tokens`; the full prompt size of a
+///   step is `input_tokens + cache_read_tokens`, and `thinking_tokens` is a subset of
+///   `output_tokens`.
+/// - `result.usage` is cumulative across the entire conversation lifetime, even across
+///   `--conversation <id>` resumes. A driver session must report tokens starting from 0 for its
+///   own lifetime (`crates/hub/src/usage.rs`), so resumed sessions rebase `result.usage` on the
+///   first result using the steps observed during that turn.
+#[derive(Default)]
+struct UsageTracker {
+    /// Cumulative tokens for this driver session, starting from 0.
+    totals: TokenUsage,
+    /// Step-level raw usage accumulated during the current turn (for rebasing on resume).
+    turn_steps: wire::Usage,
+    /// Conversation-lifetime usage before this driver session started (`Some` once established).
+    result_baseline: Option<wire::Usage>,
+    /// Single-step prompt + output context size from the latest `step_update.usage`.
+    context_used: u64,
+}
+
+impl UsageTracker {
+    fn new(resumed: bool) -> Self {
+        Self {
+            result_baseline: (!resumed).then(wire::Usage::default),
+            ..Self::default()
+        }
+    }
+
+    fn start_turn(&mut self) {
+        self.turn_steps = wire::Usage::default();
+    }
+
+    /// Full prompt tokens of one `agy` usage object (`input_tokens + cache_read_tokens`).
+    fn full_input(u: wire::Usage) -> u64 {
+        u.input.saturating_add(u.cache_read)
+    }
+
+    /// Context window occupancy of a single model step: prompt (uncached + cached) + output.
+    fn step_context(u: wire::Usage) -> u64 {
+        let prompt = Self::full_input(u);
+        if prompt > 0 {
+            prompt.saturating_add(u.output)
+        } else {
+            u.total
+        }
+    }
+
+    fn add_raw(acc: &mut wire::Usage, delta: wire::Usage) {
+        acc.input = acc.input.saturating_add(delta.input);
+        acc.output = acc.output.saturating_add(delta.output);
+        acc.thinking = acc.thinking.saturating_add(delta.thinking);
+        acc.cache_read = acc.cache_read.saturating_add(delta.cache_read);
+        acc.total = acc.total.saturating_add(delta.total);
+    }
+
+    fn sub_raw(lhs: wire::Usage, rhs: wire::Usage) -> wire::Usage {
+        wire::Usage {
+            input: lhs.input.saturating_sub(rhs.input),
+            output: lhs.output.saturating_sub(rhs.output),
+            thinking: lhs.thinking.saturating_sub(rhs.thinking),
+            cache_read: lhs.cache_read.saturating_sub(rhs.cache_read),
+            total: lhs.total.saturating_sub(rhs.total),
+        }
+    }
+
+    /// Records one `step_update.usage` mid-turn and returns `(used, tokens)` for immediate UI
+    /// updates.
+    fn on_step(&mut self, usage: wire::Usage) -> Option<(u64, TokenUsage)> {
+        let step_ctx = Self::step_context(usage);
+        if step_ctx == 0 && usage.output == 0 {
+            return None;
+        }
+        Self::add_raw(&mut self.turn_steps, usage);
+        if step_ctx > 0 {
+            self.context_used = step_ctx;
+        }
+        let full_in = Self::full_input(usage);
+        self.totals.input = self.totals.input.saturating_add(full_in);
+        self.totals.cached_input = self.totals.cached_input.saturating_add(usage.cache_read);
+        self.totals.output = self.totals.output.saturating_add(usage.output);
+        self.totals.reasoning_output = self.totals.reasoning_output.saturating_add(usage.thinking);
+        self.totals.total = self.totals.input.saturating_add(self.totals.output);
+        self.totals.requests = Some(self.totals.requests.unwrap_or(0).saturating_add(1));
+        Some((self.context_used, self.totals.clone()))
+    }
+
+    /// Reconciles the turn's `result.usage` against the session's running totals.
+    fn on_result(&mut self, usage: wire::Usage) -> (u64, TokenUsage) {
+        let baseline = *self
+            .result_baseline
+            .get_or_insert_with(|| Self::sub_raw(usage, self.turn_steps));
+        let rebased = Self::sub_raw(usage, baseline);
+        let full_in = Self::full_input(rebased);
+        let rebased_total = if full_in > 0 || rebased.output > 0 {
+            full_in.saturating_add(rebased.output)
+        } else {
+            rebased.total
+        };
+        // Never go backwards relative to steps already emitted in this session.
+        self.totals.input = self.totals.input.max(full_in);
+        self.totals.cached_input = self.totals.cached_input.max(rebased.cache_read);
+        self.totals.output = self.totals.output.max(rebased.output);
+        self.totals.reasoning_output = self.totals.reasoning_output.max(rebased.thinking);
+        self.totals.total = self
+            .totals
+            .total
+            .max(rebased_total)
+            .max(self.totals.input.saturating_add(self.totals.output));
+        let used = if self.context_used > 0 {
+            self.context_used
+        } else {
+            Self::step_context(rebased)
+        };
+        (used, self.totals.clone())
+    }
 }
 
 pub struct AntigravitySession {
@@ -283,14 +438,12 @@ pub struct AntigravitySession {
     cwd: PathBuf,
     env: Vec<(String, String)>,
     model: Mutex<Option<String>>,
-    /// The concrete model the CLI reported in `init` (resolves `"auto"`).
+    /// The concrete model the CLI reported in `init` (or its transcript when `init` omits it).
     resolved_model: Mutex<Option<String>>,
     effort: Mutex<Option<String>>,
     permission: PermissionPolicy,
     instructions: Mutex<Option<String>>,
-    tokens: Mutex<TokenUsage>,
-    /// Single-step prompt/context size from the latest `step_update.usage`.
-    context_used: std::sync::atomic::AtomicU64,
+    usage: Mutex<UsageTracker>,
     /// Tool calls already announced, so a `DONE` step updates instead of adding another.
     tools: Mutex<HashSet<String>>,
     events: mpsc::UnboundedSender<SessionEvent>,
@@ -341,8 +494,7 @@ impl AntigravitySession {
             effort: Mutex::new(None),
             permission: spec.permission,
             instructions: Mutex::new(spec.instructions),
-            tokens: Mutex::new(TokenUsage::default()),
-            context_used: std::sync::atomic::AtomicU64::new(0),
+            usage: Mutex::new(UsageTracker::new(started)),
             tools: Mutex::new(HashSet::new()),
             events: spec.events,
             turn: tokio::sync::Mutex::new(()),
@@ -492,15 +644,15 @@ impl AntigravitySession {
         if let Some(id) = &step.conversation_id {
             self.remember(id);
         }
-        if let Some(usage) = step.usage {
-            let step_ctx = if usage.input > 0 {
-                usage.input.saturating_add(usage.output)
-            } else {
-                usage.total
-            };
-            if step_ctx > 0 {
-                self.context_used.store(step_ctx, Ordering::Relaxed);
-            }
+        if let Some(usage) = step.usage
+            && let Some((used, tokens)) = self.usage.lock().expect("usage").on_step(usage)
+        {
+            self.emit(SessionEventKind::Usage {
+                used,
+                size: self.context_window(),
+                cost_usd: None,
+                tokens: Some(tokens),
+            });
         }
         if step.is_answer() {
             if let Some(delta) = step.text_delta.as_deref().filter(|d| !d.is_empty()) {
@@ -580,10 +732,24 @@ impl AntigravitySession {
 
     fn context_window(&self) -> u64 {
         let resolved = self.resolved_model.lock().expect("resolved model").clone();
+        if let Some(size) = context_window_for(resolved.as_deref()) {
+            return size;
+        }
         let configured = self.model.lock().expect("model").clone();
-        context_window_for(resolved.as_deref())
-            .or_else(|| context_window_for(configured.as_deref()))
-            .unwrap_or(0)
+        if let Some(size) = context_window_for(configured.as_deref()) {
+            return size;
+        }
+        // When `--model` is omitted, `agy`'s `init` omits `model`, while its transcript logs
+        // the resolved model slug on the first response step. Look it up once if known.
+        let conv = self.conversation.lock().expect("conversation").clone();
+        if let Some(id) = conv.as_deref().filter(|id| !id.is_empty())
+            && let Some(model) = transcript_model(id)
+            && let Some(size) = context_window_for(Some(&model))
+        {
+            *self.resolved_model.lock().expect("resolved model") = Some(model);
+            return size;
+        }
+        0
     }
 
     /// The `result` event: the conversation, the answer when it never streamed, and the
@@ -593,23 +759,7 @@ impl AntigravitySession {
             self.remember(id);
         }
         if let Some(usage) = result.usage {
-            let tokens = {
-                let mut totals = self.tokens.lock().expect("tokens");
-                totals.input = usage.input;
-                totals.cached_input = usage.cache_read.min(usage.input);
-                totals.output = usage.output;
-                totals.reasoning_output = usage.thinking;
-                totals.total = usage.total;
-                totals.clone()
-            };
-            let step_ctx = self.context_used.load(Ordering::Relaxed);
-            let used = if step_ctx > 0 {
-                step_ctx
-            } else if usage.input > 0 {
-                usage.input.saturating_add(usage.output)
-            } else {
-                usage.total
-            };
+            let (used, tokens) = self.usage.lock().expect("usage").on_result(usage);
             self.emit(SessionEventKind::Usage {
                 used,
                 size: self.context_window(),
@@ -626,6 +776,7 @@ impl AntigravitySession {
         }
         self.cancelled.store(false, Ordering::SeqCst);
         self.tools.lock().expect("tools").clear();
+        self.usage.lock().expect("usage").start_turn();
         if prompt
             .attachments
             .iter()
@@ -1253,11 +1404,13 @@ fi
         assert_eq!(text, "hello worldhello world");
         assert_eq!(tools, 2);
         let usage = usage.expect("usage");
-        assert_eq!(usage.input, 10);
+        // Two turns ran on the mock STREAM (step: 10 in / 5 out; result: 10 uncached + 2 cached = 12 in, 5 out, 1 thinking).
+        assert_eq!(usage.input, 22);
         assert_eq!(usage.cached_input, 2);
-        assert_eq!(usage.output, 5);
+        assert_eq!(usage.output, 10);
         assert_eq!(usage.reasoning_output, 1);
-        assert_eq!(usage.total, 15);
+        assert_eq!(usage.total, 32);
+        assert_eq!(usage.requests, Some(2));
 
         let log = read_log(&log);
         // One process for both turns: the flags are logged once.
@@ -1406,5 +1559,108 @@ cat >/dev/null
         assert!(detail.output.as_deref().unwrap().contains("failed"));
         assert!(detail.arguments.is_none());
         assert!(detail.result.is_none());
+    }
+
+    #[test]
+    fn usage_tracker_includes_cache_read_in_context_and_rebases_on_resume() {
+        // Fresh session with two steps in a turn (matches real agy 1.5.14 output):
+        // step 1: 8752 uncached, 0 cached, 36 out
+        // step 2: 2164 uncached, 6711 cached, 1 out -> actual context is 2164 + 6711 + 1 = 8876
+        // result: 10916 uncached, 6711 cached, 37 out
+        let mut fresh = UsageTracker::new(false);
+        fresh.start_turn();
+        let (used1, t1) = fresh
+            .on_step(wire::Usage {
+                input: 8752,
+                output: 36,
+                thinking: 0,
+                cache_read: 0,
+                total: 8788,
+            })
+            .unwrap();
+        assert_eq!(used1, 8788);
+        assert_eq!(t1.input, 8752);
+        assert_eq!(t1.requests, Some(1));
+
+        let (used2, t2) = fresh
+            .on_step(wire::Usage {
+                input: 2164,
+                output: 1,
+                thinking: 0,
+                cache_read: 6711,
+                total: 2165,
+            })
+            .unwrap();
+        assert_eq!(used2, 8876);
+        assert_eq!(t2.input, 8752 + 2164 + 6711);
+        assert_eq!(t2.cached_input, 6711);
+        assert_eq!(t2.total, 8752 + 2164 + 6711 + 37);
+        assert_eq!(t2.requests, Some(2));
+
+        let (used_end, t_end) = fresh.on_result(wire::Usage {
+            input: 10916,
+            output: 37,
+            thinking: 12,
+            cache_read: 6711,
+            total: 10953,
+        });
+        assert_eq!(used_end, 8876);
+        assert_eq!(t_end.input, 17627);
+        assert_eq!(t_end.cached_input, 6711);
+        assert_eq!(t_end.output, 37);
+        assert_eq!(t_end.reasoning_output, 12);
+        assert_eq!(t_end.total, 17664);
+
+        // Resumed session: prior turns totaled (11905 uncached, 7744 cached, 2 out).
+        // Turn 3 step: 2241 uncached, 7824 cached, 1 out.
+        // Turn 3 result: 14146 uncached, 15568 cached, 3 out (conversation cumulative).
+        let mut resumed = UsageTracker::new(true);
+        resumed.start_turn();
+        let (r_used, r_step) = resumed
+            .on_step(wire::Usage {
+                input: 2241,
+                output: 1,
+                thinking: 0,
+                cache_read: 7824,
+                total: 2242,
+            })
+            .unwrap();
+        assert_eq!(r_used, 10066);
+        assert_eq!(r_step.input, 10065);
+        assert_eq!(r_step.cached_input, 7824);
+
+        let (r_end_used, r_end) = resumed.on_result(wire::Usage {
+            input: 14146,
+            output: 3,
+            thinking: 0,
+            cache_read: 15568,
+            total: 14149,
+        });
+        assert_eq!(r_end_used, 10066);
+        // Must count ONLY turn 3, never double-counting turns 1-2.
+        assert_eq!(r_end.input, 10065);
+        assert_eq!(r_end.cached_input, 7824);
+        assert_eq!(r_end.output, 1);
+        assert_eq!(r_end.total, 10066);
+    }
+
+    #[test]
+    fn context_window_covers_gpt_oss_and_transcript_fallback_reads_model() {
+        assert_eq!(context_window_for(Some("gpt-oss-120b-medium")), Some(128_000));
+        assert_eq!(context_window_for(Some("gemini-4-neon-xhigh")), Some(1_000_000));
+        assert_eq!(context_window_for(Some("claude-opus-5-5-high")), Some(200_000));
+
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"step_index\":0,\"type\":\"USER_INPUT\"}\n\
+             {\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"model\":\"gemini-4-neon-high\",\"input_tokens\":9771}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            transcript_model_in(&transcript).as_deref(),
+            Some("gemini-4-neon-high")
+        );
     }
 }

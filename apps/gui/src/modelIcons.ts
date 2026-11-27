@@ -10,6 +10,7 @@ import hunyuan from "@lobehub/icons-static-svg/icons/hunyuan-color.svg";
 import kimi from "@lobehub/icons-static-svg/icons/kimi.svg";
 import minimax from "@lobehub/icons-static-svg/icons/minimax-color.svg";
 import openai from "@lobehub/icons-static-svg/icons/openai.svg";
+import qoder from "@lobehub/icons-static-svg/icons/qoder-color.svg";
 import qwen from "@lobehub/icons-static-svg/icons/qwen-color.svg";
 import step from "@lobehub/icons-static-svg/icons/stepfun-color.svg";
 import glm from "@lobehub/icons-static-svg/icons/zhipu-color.svg";
@@ -63,4 +64,5 @@ export const VENDOR_ICONS: Record<string, BrandIcon> = {
   claude: { src: claude },
   codex: { src: codex },
   codebuddy: { src: codebuddy },
+  qoder: { src: qoder },
 };

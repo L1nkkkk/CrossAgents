@@ -9,6 +9,7 @@
 //!   resumed by its session id.
 //! - [`antigravity_native`]: Antigravity CLI's `agy` stream-json, one process per session,
 //!   resumed by its conversation id.
+//! - [`qoder_native`]: Qoder CLI's `qodercli` on the stream-json control protocol.
 //! - [`acp`]: `acp-generic`, any ACP agent, one process per session.
 //! - [`mcp_config`]: what the CLI's own MCP configuration says, beside what the hub passes.
 //! - [`hooks`]: whether a session may run the CLI's own hooks (off unless the agent allows).
@@ -34,4 +35,5 @@ pub mod launch;
 pub mod locate;
 pub mod mcp_config;
 pub mod process;
+pub mod qoder_native;
 pub mod with_native;

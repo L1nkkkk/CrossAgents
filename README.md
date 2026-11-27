@@ -40,6 +40,7 @@ CrossAgents 是一个本地优先的多 Agent 编码编排器与桌面工作台�
 | **Gemini CLI** | `gemini-native` | 原生驱动支持会话管理与流式输出；也可在配置中切换为 `--experimental-acp` 走通用 ACP |
 | **Cursor CLI** | `cursor-native` | 原生对接 Cursor CLI 会话、权限控制与工作区操作 |
 | **Antigravity CLI** | `antigravity-native` | 对接 `agy`（支持 Google AI Pro / Ultra 个人账号登录与模型调用） |
+| **Qoder CLI** | `qoder-native` | 基于 `qodercli -p` 的 `stream-json` 控制协议，支持会话恢复、跨目录续聊、分叉、逐次审批、上下文拆解与额度查询；保留 `qodercli --acp` 兜底 |
 | **CodeBuddy / With** | `codebuddy-native` / `with-native` | 支持腾讯 CodeBuddy CLI（含[国内站与国际站独立登录](docs/CODEBUDDY-SITES.md)）与 With CLI |
 | **任意 ACP Agent** | `acp-generic` | 任何实现 [ACP 协议](https://agentclientprotocol.com) 的 Agent（如 Goose 等），通过 `config.toml` 或插件目录即可接入 |
 

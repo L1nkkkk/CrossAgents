@@ -65,7 +65,15 @@ Gemini CLI（免费、Google AI Pro、Ultra）；企业 Gemini Code Assist 和�
   `agent_response`、`tool`、`checkpoint`。回答的分片在 `agent_response` 的 `text_delta`，
   流式时先若干 `ACTIVE` 再一个 `DONE`。
 - 工具步骤的 `tool_info` 有 `name`、`parameters`、`output`，失败时 `error:{type,message}`。
-- `result.usage` 是**整个会话的累计**，不是这一轮；`response` 才是这一轮的。
+- `result.usage` 是**整个会话的累计**（包含通过 `--conversation <id>` 跨进程续上的历史轮次），
+  不是单轮增量；`response` 才是这一轮的。
+- **上下文占用与 Token 口径（2026-11-26 实测 `agy 1.5.14`）**：
+  - `step_update.usage`（每个模型请求步）和 `result.usage` 都会上报 `input_tokens`、
+    `output_tokens`、`thinking_tokens`、`cache_read_tokens`、`total_tokens`。
+  - **`input_tokens` 与 `total_tokens` 不包含 `cache_read_tokens`**（实测 Turn 1：`input=9789, cache_read=0, out=1, total=9790`；Turn 2：`input=2116, cache_read=7744, out=1, total=2117`，真实上下文为 `2116 + 7744 + 1 = 9861`）。`thinking_tokens` 是 `output_tokens` 的子集。
+  - `antigravity-native` 因此将单步真实输入计为 `input_tokens + cache_read_tokens`、上下文占用计为最后一步的 `input + cache_read + output`，并在每个 `step_update.usage` 立即上报 `SessionEventKind::Usage`（不再等到整轮结束）；对 `--conversation` 续会话首次 `result.usage` 自动扣除历史基线，避免重连后翻倍计入。
+  - 省略 `--model` 时 `init` 事件不带 `model` 字段，驱动回退读取 `~/.gemini/antigravity-cli/brain/<conversation_id>/.system_generated/logs/transcript.jsonl` 中的 `model` 以推导上下文窗口大小 `size`（GUI 要求 `size > 0` 才显示占用条）。
+  - **上下文分类拆解不可用**：实测 `agy -p /context --output-format json` 返回错误 `"/context is not available in print mode (it opens the interactive context breakdown)"`，headless 模式只能拿到总占用与累计 token，无法像 Claude Code / Qoder 那样按系统提示词 / 工具 / 消息分项拆解。
 - `status`：`SUCCESS`、`ERROR`、`CANCELED`、`INTERRUPTED`、`INVALID`、`WAITING`、`RUNNING`。
 - 退出码：成功 0；失败非 0（`ERROR` 时 `error` 里有原因）。stream-json **输入**模式下，
   控制消息或 CLI 自己处理的斜杠命令（`/model`）会让会话以 2 结束，坏 JSON / 缺 `event`

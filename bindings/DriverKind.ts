@@ -3,4 +3,4 @@
 /**
  * Which driver runs a Profile (`driver = "..."` in its configuration).
  */
-export type DriverKind = "codex-native" | "claude-native" | "codebuddy-native" | "with-native" | "cursor-native" | "gemini-native" | "antigravity-native" | "acp-generic";
+export type DriverKind = "codex-native" | "claude-native" | "codebuddy-native" | "with-native" | "cursor-native" | "gemini-native" | "antigravity-native" | "qoder-native" | "acp-generic";

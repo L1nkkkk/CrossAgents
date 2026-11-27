@@ -883,17 +883,24 @@ impl Drop for CompactingReset<'_> {
 
 impl ClaudeSession {
     /// What fills the context window, by kind (`get_context_usage`, as `/context` shows
-    /// it). Claude Code only: CodeBuddy does not know the request. Best effort.
+    /// it). Supported by Claude Code and Qoder CLI; CodeBuddy does not know the request.
+    /// Best effort.
     async fn refresh_context(&self) {
-        if self.flavor != Flavor::Claude {
+        if !matches!(self.flavor, Flavor::Claude | Flavor::Qoder) {
             return;
         }
         let request = json!({ "subtype": "get_context_usage" });
-        if let Ok(answer) = self.shared.control(request, CLEANUP_TIMEOUT).await
-            && let Some(parts) = wire::context_parts(&answer)
-        {
-            self.shared
-                .emit(SessionEventKind::ContextBreakdown { parts }, Some(&answer));
+        if let Ok(answer) = self.shared.control(request, CLEANUP_TIMEOUT).await {
+            let context_size = self
+                .shared
+                .translator
+                .lock()
+                .expect("translator lock")
+                .context_size();
+            if let Some(parts) = wire::context_parts_for_window(&answer, context_size) {
+                self.shared
+                    .emit(SessionEventKind::ContextBreakdown { parts }, Some(&answer));
+            }
         }
     }
 
@@ -949,24 +956,36 @@ impl ClaudeSession {
             CoreError::Agent(format!("empty {} launch command", flavor.program()))
         })?;
         let program = PathBuf::from(program);
-        if flavor == Flavor::Codebuddy
-            && let Start::Resume(from) | Start::Fork { from, .. } = &start
-        {
-            crate::codebuddy_native::adopt_transcript(from, &spec.agent.cwd, &spec.env);
+        if let Start::Resume(from) | Start::Fork { from, .. } = &start {
+            match flavor {
+                Flavor::Codebuddy => {
+                    crate::codebuddy_native::adopt_transcript(from, &spec.agent.cwd, &spec.env);
+                }
+                Flavor::Qoder => {
+                    crate::qoder_native::adopt_transcript(from, &spec.agent.cwd, &spec.env);
+                }
+                Flavor::Claude => {}
+            }
         }
         let session_id = match &start {
             Start::New(id) | Start::Resume(id) | Start::Fork { id, .. } => id.clone(),
         };
         let mut args = extra.to_vec();
         args.extend(wire::args(&launch, &start, flavor));
-        let mut env = vec![
-            (
-                "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_owned(),
-                "1".to_owned(),
-            ),
-            // Names the sessions' origin in Claude Code's transcripts (usage by origin).
-            ("CLAUDE_CODE_ENTRYPOINT".to_owned(), ENTRYPOINT.to_owned()),
-        ];
+        let mut env = match flavor {
+            Flavor::Qoder => vec![
+                // Without this, Qoder CLI zeroes out every token count in stream-json.
+                ("QODER_EXPOSE_TOKEN_USAGE".to_owned(), "1".to_owned()),
+            ],
+            Flavor::Claude | Flavor::Codebuddy => vec![
+                (
+                    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_owned(),
+                    "1".to_owned(),
+                ),
+                // Names the sessions' origin in Claude Code's transcripts (usage by origin).
+                ("CLAUDE_CODE_ENTRYPOINT".to_owned(), ENTRYPOINT.to_owned()),
+            ],
+        };
         env.extend(system_proxy_env());
         env.extend(spec.env.iter().cloned());
         // The account's egress policy travels in this environment (set by the hub, which
@@ -979,10 +998,10 @@ impl ClaudeSession {
         // `allow_direct` may exempt a host the proxy cannot reach but a direct connection
         // can; `proxy_only` never does, so the account is not exposed (docs/ACCOUNT-RISK.md).
         env.extend(check_proxy(&spec.env, Some(&api_host), egress).await?);
-        let env_remove = if flavor == Flavor::Codebuddy {
-            crate::codebuddy_native::prepare_env(&mut env)
-        } else {
-            Vec::new()
+        let env_remove = match flavor {
+            Flavor::Codebuddy => crate::codebuddy_native::prepare_env(&mut env),
+            Flavor::Qoder => crate::qoder_native::prepare_env(&mut env),
+            Flavor::Claude => Vec::new(),
         };
         let launched = launch::launch(LaunchSpec {
             program,
@@ -1108,12 +1127,21 @@ impl ClaudeSession {
             }
             *last = Some(Instant::now());
         }
-        let request = json!({ "subtype": "get_usage", "skip_behaviors": true });
-        if let Ok(usage) = self.shared.control(request, CLEANUP_TIMEOUT).await
-            && let Some(limits) = wire::usage_limits(&usage)
-        {
-            self.shared
-                .emit(SessionEventKind::RateLimits { limits }, Some(&usage));
+        let request = match self.flavor {
+            Flavor::Qoder => json!({ "subtype": "get_usage_info" }),
+            Flavor::Claude | Flavor::Codebuddy => {
+                json!({ "subtype": "get_usage", "skip_behaviors": true })
+            }
+        };
+        if let Ok(usage) = self.shared.control(request, CLEANUP_TIMEOUT).await {
+            let limits = match self.flavor {
+                Flavor::Qoder => wire::qoder_usage_limits(&usage),
+                Flavor::Claude | Flavor::Codebuddy => wire::usage_limits(&usage),
+            };
+            if let Some(limits) = limits {
+                self.shared
+                    .emit(SessionEventKind::RateLimits { limits }, Some(&usage));
+            }
         }
     }
 }
@@ -1292,6 +1320,22 @@ impl DriverSession for ClaudeSession {
 
     async fn set_model(&self, model: Option<&str>, effort: Option<&str>) -> Result<(), CoreError> {
         self.check_open()?;
+        if self.flavor == Flavor::Qoder {
+            if let Some(model) = model {
+                let mut request = json!({ "subtype": "set_model", "model": model });
+                if let Some(effort) = effort {
+                    request["reasoning_effort"] = json!(effort);
+                }
+                self.shared.control(request, REQUEST_TIMEOUT).await?;
+                return Ok(());
+            }
+            if let Some(effort) = effort {
+                self.shared
+                    .control(wire::set_effort(self.flavor, effort), REQUEST_TIMEOUT)
+                    .await?;
+            }
+            return Ok(());
+        }
         if let Some(model) = model {
             self.shared
                 .control(

@@ -17,6 +17,7 @@ static BUILTIN: LazyLock<Vec<(String, PluginConfig)>> = LazyLock::new(|| {
         ("cursor", include_str!("../agents/cursor.toml")),
         ("gemini", include_str!("../agents/gemini.toml")),
         ("antigravity", include_str!("../agents/antigravity.toml")),
+        ("qoder", include_str!("../agents/qoder.toml")),
     ]
     .into_iter()
     .map(|(name, text)| {
@@ -65,7 +66,8 @@ mod tests {
                 "with",
                 "cursor",
                 "gemini",
-                "antigravity"
+                "antigravity",
+                "qoder"
             ]
         );
         for (name, config) in all() {

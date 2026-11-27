@@ -1605,7 +1605,9 @@ export class MockBridge implements CrossAgentsBridge {
         ? ["CODEX_HOME", "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd", "'resume'"]
         : driver === "codebuddy-native"
           ? ["CODEBUDDY_CONFIG_DIR", "C:\\Users\\me\\AppData\\Roaming\\npm\\codebuddy.cmd", "--resume"]
-          : driver === "cursor-native"
+          : driver === "qoder-native"
+            ? ["QODER_CONFIG_DIR", "C:\\Users\\me\\.qoder\\bin\\qodercli\\qodercli.exe", "--resume"]
+            : driver === "cursor-native"
             ? [null, "C:\\Users\\me\\.local\\bin\\agent.exe", "--resume"]
             : ["CLAUDE_CONFIG_DIR", "C:\\Users\\me\\.local\\bin\\claude.exe", "--resume"];
     const env = [

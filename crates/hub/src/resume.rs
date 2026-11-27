@@ -13,7 +13,12 @@ use crossagents_api_types::{ResumeCommandResponse, ResumeEnv};
 use crossagents_core::DriverKind;
 
 /// Where an account keeps its login: the only account variables a command carries.
-const CONFIG_DIRS: [&str; 3] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "CODEBUDDY_CONFIG_DIR"];
+const CONFIG_DIRS: [&str; 4] = [
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "CODEBUDDY_CONFIG_DIR",
+    "QODER_CONFIG_DIR",
+];
 /// Proxies, as the hub hands them to the CLI.
 const PROXIES: [&str; 5] = [
     "HTTPS_PROXY",
@@ -144,7 +149,9 @@ fn command(f: &Facts, shell: Shell, env: &[ResumeEnv]) -> Result<String, String>
         ));
     }
     let resume: Vec<String> = match kind {
-        DriverKind::ClaudeNative | DriverKind::CodebuddyNative => vec!["--resume".into()],
+        DriverKind::ClaudeNative | DriverKind::CodebuddyNative | DriverKind::QoderNative => {
+            vec!["--resume".into()]
+        }
         DriverKind::CodexNative => vec!["resume".into()],
         DriverKind::CursorNative | DriverKind::GeminiNative => vec!["--resume".into()],
         DriverKind::AntigravityNative => vec!["--conversation".into()],
@@ -262,7 +269,7 @@ fn without_credentials(url: &str) -> (String, bool) {
 fn is_claude_flavor(kind: Option<DriverKind>) -> bool {
     matches!(
         kind,
-        Some(DriverKind::ClaudeNative | DriverKind::CodebuddyNative)
+        Some(DriverKind::ClaudeNative | DriverKind::CodebuddyNative | DriverKind::QoderNative)
     )
 }
 
@@ -296,6 +303,7 @@ pub fn claude_config_dir(kind: DriverKind, env: &[(String, String)]) -> Option<P
     let (var, default) = match kind {
         DriverKind::ClaudeNative => ("CLAUDE_CONFIG_DIR", ".claude"),
         DriverKind::CodebuddyNative => ("CODEBUDDY_CONFIG_DIR", ".codebuddy"),
+        DriverKind::QoderNative => ("QODER_CONFIG_DIR", ".qoder"),
         _ => return None,
     };
     env.iter()
@@ -424,6 +432,23 @@ mod tests {
             r.command.as_deref(),
             Some("cd '/w' && 'agent' --resume '0b5c-11'")
         );
+    }
+
+    #[test]
+    fn qoder_is_resumed_with_its_config_dir_and_session_id() {
+        let mut f = claude(Path::new("/w"));
+        f.kind = Some(DriverKind::QoderNative);
+        f.program = Some(vec!["qodercli".into()]);
+        f.env = vec![
+            ("QODER_CONFIG_DIR".into(), "/h/.qoder-work".into()),
+            ("QODER_PERSONAL_ACCESS_TOKEN".into(), "secret-pat".into()),
+        ];
+        let r = build(&f, Shell::Sh);
+        assert_eq!(
+            r.command.as_deref(),
+            Some("cd '/w' && QODER_CONFIG_DIR='/h/.qoder-work' 'qodercli' --resume '0b5c-11'")
+        );
+        assert!(!r.command.unwrap().contains("secret-pat"));
     }
 
     #[test]

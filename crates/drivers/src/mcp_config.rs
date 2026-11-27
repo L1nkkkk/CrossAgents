@@ -1,14 +1,15 @@
 //! The MCP servers a CLI's own user configuration already has, and the ones the hub passes
 //! (docs/research/multica.md §2.10).
 //!
-//! Both CLIs take `--mcp-config` for the servers a session must have, and both read a
-//! user-level file of their own (`~/.claude.json` for Claude Code, `~/.codebuddy/mcp.json`
-//! for CodeBuddy; each moves with `CLAUDE_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR`). What
-//! differs is what `--strict-mcp-config` does next:
+//! Claude Code, CodeBuddy and Qoder all take `--mcp-config` for the servers a session must
+//! have, and each reads a user-level file of its own (`~/.claude.json` for Claude Code,
+//! `~/.codebuddy/mcp.json` for CodeBuddy, `~/.qoder/settings.json` for Qoder; each moves with
+//! `CLAUDE_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` / `QODER_CONFIG_DIR`). What differs is what
+//! `--strict-mcp-config` does next:
 //!
-//! - **Claude Code** is started with it: only `--mcp-config` counts, so every server the
-//!   person configured for their own `claude` would silently be gone inside a session. We
-//!   therefore read that file here and hand the servers over in `--mcp-config` too.
+//! - **Claude Code** and **Qoder** are started with it: only `--mcp-config` counts, so every
+//!   server the person configured for their own CLI would silently be gone inside a session.
+//!   We therefore read that file here and hand the servers over in `--mcp-config` too.
 //! - **CodeBuddy** is started without it: it loads its own `mcp.json` by itself, so merging
 //!   it here as well would start each of those servers twice. Checked against CodeBuddy
 //!   2.173.0 -- with the flag, `system/init` lists none of the user's servers; without it,
@@ -30,8 +31,8 @@ use serde_json::{Map, Value, json};
 use crate::claude_native::wire::Flavor;
 
 /// Where the CLI keeps the MCP servers its user configured, for the session's environment:
-/// `CLAUDE_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` when the account moves the config dir, the
-/// user's home otherwise.
+/// `CLAUDE_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` / `QODER_CONFIG_DIR` when the account moves
+/// the config dir, the user's home otherwise.
 pub fn user_config(flavor: Flavor, env: &[(String, String)]) -> Option<PathBuf> {
     match flavor {
         Flavor::Claude => match var(env, "CLAUDE_CONFIG_DIR") {
@@ -44,19 +45,23 @@ pub fn user_config(flavor: Flavor, env: &[(String, String)]) -> Option<PathBuf> 
             Some(dir) => Some(dir.join("mcp.json")),
             None => Some(home()?.join(".codebuddy").join("mcp.json")),
         },
+        Flavor::Qoder => match var(env, "QODER_CONFIG_DIR") {
+            Some(dir) => Some(dir.join("settings.json")),
+            None => Some(home()?.join(".qoder").join("settings.json")),
+        },
     }
 }
 
-/// What goes in `--mcp-config`, as the JSON string both CLIs accept: the hub's servers,
-/// plus (Claude Code only) the user's own that the hub does not define. `None` when there is
-/// nothing to pass.
+/// What goes in `--mcp-config`, as the JSON string the CLIs accept: the hub's servers,
+/// plus (Claude Code and Qoder, both started with `--strict-mcp-config`) the user's own that
+/// the hub does not define. `None` when there is nothing to pass.
 pub fn config_arg(
     flavor: Flavor,
     env: &[(String, String)],
     hub: &[McpServerSpec],
 ) -> Option<String> {
     let mut servers = hub_servers(hub);
-    if flavor == Flavor::Claude
+    if matches!(flavor, Flavor::Claude | Flavor::Qoder)
         && let Some(path) = user_config(flavor, env)
     {
         for (name, server) in read_servers(&path) {
@@ -220,6 +225,8 @@ mod tests {
         assert!(!claude.parent().unwrap().as_os_str().is_empty());
         let codebuddy = user_config(Flavor::Codebuddy, &[]).unwrap();
         assert!(codebuddy.ends_with(".codebuddy/mcp.json"), "{codebuddy:?}");
+        let qoder = user_config(Flavor::Qoder, &[]).unwrap();
+        assert!(qoder.ends_with(".qoder/settings.json"), "{qoder:?}");
         // The account's directory wins, whichever case the variable is written in.
         let dir = tempfile::tempdir().unwrap();
         let env = vec![(
@@ -230,5 +237,32 @@ mod tests {
             user_config(Flavor::Claude, &env).unwrap(),
             dir.path().join(".claude.json")
         );
+        let qoder_env = vec![(
+            "QODER_CONFIG_DIR".to_owned(),
+            dir.path().display().to_string(),
+        )];
+        assert_eq!(
+            user_config(Flavor::Qoder, &qoder_env).unwrap(),
+            dir.path().join("settings.json")
+        );
+    }
+
+    #[test]
+    fn qoder_gets_the_users_servers_merged_under_hub_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"mcpServers":{"playwright":{"type":"stdio","command":"npx","args":["playwright"]},"crossagents":{"type":"stdio","command":"mine"}}}"#,
+        )
+        .unwrap();
+        let env = vec![(
+            "QODER_CONFIG_DIR".to_owned(),
+            dir.path().display().to_string(),
+        )];
+        let arg = config_arg(Flavor::Qoder, &env, &[hub("crossagents")]).unwrap();
+        let servers = parsed(&arg);
+        assert_eq!(servers["crossagents"]["command"], "/bin/crossagents");
+        assert_eq!(servers["playwright"]["command"], "npx");
+        assert_eq!(servers.len(), 2);
     }
 }

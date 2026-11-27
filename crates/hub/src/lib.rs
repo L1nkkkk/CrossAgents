@@ -75,6 +75,7 @@ use crossagents_plugins::codebuddy_account::CodebuddyAccounts;
 use crossagents_plugins::codex_account::CodexAccounts;
 use crossagents_plugins::cursor_account::CursorAccounts;
 use crossagents_plugins::gemini_account::GeminiAccounts;
+use crossagents_plugins::qoder_account::QoderAccounts;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -192,6 +193,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 Arc::new(CursorAccounts::default()),
                 Arc::new(GeminiAccounts::with_login(login_helper("gemini-login"))),
                 Arc::new(AntigravityAccounts::with_login(login_helper("agy-login"))),
+                Arc::new(QoderAccounts::default()),
             ],
             paths.accounts(),
         )

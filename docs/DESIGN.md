@@ -382,6 +382,7 @@ delivered → rejected → running          # 同一 Worker 返工
 | `cursor-native` | `agent -p --output-format stream-json --stream-partial-output --resume <id>`（NDJSON，见 [记录](research/cursor-cli.md)）；会话由 Cursor 侧按 chat id 保存，MCP 经会话自己的 `--plugin-dir` 临时 plugin 挂载 | 一轮一进程，轮与轮之间没有进程 | hub 子进程，Job Object 由 hub 持有；hub 重启时正在跑的那一轮丢失，会话本身可续 | Cursor |
 | `gemini-native` | `gemini --prompt=<text> -o stream-json --session-id/--resume <id>`（NDJSON，见 [记录](research/gemini-cli.md)）；会话由 Gemini 侧按项目目录保存，MCP 经会话自己的系统级 settings 文件（`GEMINI_CLI_SYSTEM_SETTINGS_PATH`）挂载 | 一轮一进程，轮与轮之间没有进程 | hub 子进程，Job Object 由 hub 持有；hub 重启时正在跑的那一轮丢失，会话本身可续 | Gemini CLI |
 | `antigravity-native` | `agy --input-format stream-json --output-format stream-json`（NDJSON，见 [记录](research/antigravity-cli.md)）；一轮一条 `user` 消息写进常驻进程的 stdin，会话 id 由 CLI 给（`--conversation <id>` 续）；MCP 无法按会话挂载（CLI 只读 `~/.gemini/config/mcp_config.json`，`--settings` 拒绝 `mcpServers`），能力表报 false | 一进程一会话 | hub 子进程，Job Object 由 hub 持有；打断或崩溃后下一轮用 `--conversation` 重开 | Google Antigravity CLI（个人版 Gemini 账号） |
+| `qoder-native` | `qodercli -p`，同一套 stream-json 控制协议（见 [记录](research/qoder-cli.md)）；包装 `claude-native`（`Flavor::Qoder`），自动注入 `QODER_EXPOSE_TOKEN_USAGE=1` 并补上 `--reasoning-effort`、上下文比例与额度解析、跨目录历史复制与 `--list-models` 发现 | 一进程一会话 | 同 `claude-native` | Qoder CLI |
 | `acp-generic` | 任意 ACP agent | 一进程多会话 | hub 子进程，Job Object 由 hub 持有，hub 退出即清掉 | Goose 等长尾（with-cli 的 `acp` 子命令在 v0.31.0 工具调用全部失败，只作备用） |
 
 包装型驱动（如 `codebuddy-native`）必须把 trait 的每个方法都转发给内层，包括有默认实现的 `adopt`；漏转发不会编译报错，只会让接管静默失效。
@@ -415,7 +416,7 @@ Session（一个会话）
 
 ### 9.3 配置与挂载
 
-- Profile 指定驱动：`driver = "codex-native" | "claude-native" | "codebuddy-native" | "with-native" | "cursor-native" | "gemini-native" | "antigravity-native" | "acp-generic"`，再加模型、账号、`env`（如 Claude Code 经 `ANTHROPIC_BASE_URL` 接 DeepSeek）。
+- Profile 指定驱动：`driver = "codex-native" | "claude-native" | "codebuddy-native" | "with-native" | "cursor-native" | "gemini-native" | "antigravity-native" | "qoder-native" | "acp-generic"`，再加模型、账号、`env`（如 Claude Code 经 `ANTHROPIC_BASE_URL` 接 DeepSeek）。
 - 协议留在代码里，协议以外的东西（去哪找 CLI、怎么装、模型与 effort 档位）写在 **agent 描述文件**里：内置的在 `crates/plugins/agents/*.toml`（`include_str!` 编进 hub），外部 agent 放 `~/.crossagents/plugins/<name>/plugin.toml`，两者同一种格式。加一家 agent 不用改代码。
 - 来源与优先级：内置描述 < 插件目录 `plugin.toml` < `config.toml` 的 `[plugins.<name>]`。`locate` 与 `install` 按字段合并（只改其中一项也行），`command` / `models` / `driver` 等仍整体替换。
 - 协作工具挂载：开会话时把 `crossagents mcp`（带该会话的令牌）加入它的 MCP 列表；原生驱动用各家的 MCP 配置方式传入。
@@ -558,7 +559,7 @@ crossagents events [--follow] | usage [--by ...]
 沿用 v1：`core`、`api-types`、`store-sqlite`、`plugins`、`hub`、`cli`、`mock-agent`；`apps/gui`。变化：
 
 - `core`：新增 `Driver` trait（含 `adopt`）、能力表、统一会话事件、退出原因 `ExitCause`。
-- `drivers`：`codex_native`（见 [N1](tasks/N1.md)）、`claude_native`（见 [N3](tasks/N3.md)）、`codebuddy_native`（包装 `claude_native`）、`cursor_native`（见 [cursor-cli](research/cursor-cli.md)）、`gemini_native`（见 [gemini-cli](research/gemini-cli.md)）、`antigravity_native`（见 [antigravity-cli](research/antigravity-cli.md)）、`acp`（即 `acp-generic`，以后改为一进程多会话）；`claude_native` 直接说 stream-json 控制协议，不需要侧车。
+- `drivers`：`codex_native`（见 [N1](tasks/N1.md)）、`claude_native`（见 [N3](tasks/N3.md)）、`codebuddy_native`（包装 `claude_native`）、`qoder_native`（包装 `claude_native`，见 [qoder-cli](research/qoder-cli.md)）、`cursor_native`（见 [cursor-cli](research/cursor-cli.md)）、`gemini_native`（见 [gemini-cli](research/gemini-cli.md)）、`antigravity_native`（见 [antigravity-cli](research/antigravity-cli.md)）、`acp`（即 `acp-generic`，以后改为一进程多会话）；`claude_native` 直接说 stream-json 控制协议，不需要侧车。
   `host` 是运行时宿主（宿主进程本体 `serve`、帧协议 `wire`、Windows Job Object `job`、hub 侧的 `client`：discover / adopt / leave），`launch` 负责脱离 hub 拉起宿主。
 - `hub`：`runtime` 里的 `recover` 负责重启接管；`cli` 多一个隐藏子命令 `crossagents runtime-host`。
 - `orchestrator`：固定 Pipeline 改为工具驱动的编排 + 停止条件。

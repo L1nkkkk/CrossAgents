@@ -13,6 +13,7 @@ import hunyuan from "@lobehub/icons-static-svg/icons/hunyuan-color.svg";
 import kimi from "@lobehub/icons-static-svg/icons/kimi.svg";
 import minimax from "@lobehub/icons-static-svg/icons/minimax-color.svg";
 import openai from "@lobehub/icons-static-svg/icons/openai.svg";
+import qoder from "@lobehub/icons-static-svg/icons/qoder-color.svg";
 import qwen from "@lobehub/icons-static-svg/icons/qwen-color.svg";
 import step from "@lobehub/icons-static-svg/icons/stepfun-color.svg";
 import glm from "@lobehub/icons-static-svg/icons/zhipu-color.svg";
@@ -64,6 +65,7 @@ const VENDOR_ICONS: Record<string, BrandIcon> = {
   claude: { src: claude },
   codex: { src: codex },
   codebuddy: { src: codebuddy },
+  qoder: { src: qoder },
 };
 
 const GATEWAY_PREFIX = /^(tokenhub|ext|azure|bedrock|vertex|openrouter)[_-]/;
@@ -117,6 +119,7 @@ export function vendorOf(plugin: string): string {
   if (p.startsWith("antigravity")) return "antigravity";
   if (p.startsWith("cursor")) return "cursor";
   if (p.startsWith("gemini")) return "gemini";
+  if (p.startsWith("qoder")) return "qoder";
   return "other";
 }
 
@@ -128,6 +131,7 @@ export function vendorName(plugin: string): string {
   if (v === "antigravity") return "Antigravity";
   if (v === "cursor") return "Cursor";
   if (v === "gemini") return "Gemini";
+  if (v === "qoder") return "Qoder";
   return plugin ? plugin[0].toUpperCase() + plugin.slice(1) : plugin;
 }
 

@@ -1,0 +1,70 @@
+# Qoder CLI (`qodercli`), the built-in agent (docs/DESIGN.md §9.3).
+#
+# It speaks the stream-json control protocol (`initialize`, `can_use_tool`, `set_model`,
+# `apply_flag_settings`, `get_context_usage`, `get_usage_info`, `--strict-mcp-config`,
+# `--permission-prompt-tool stdio`, `--replay-user-messages`), so `qoder-native` runs on
+# `claude-native`'s implementation with Qoder's CLI flags, env, and usage/context parsers.
+# `acp-generic` remains available as a fallback via `qodercli --acp`.
+
+name = "qoder"
+driver = "qoder-native"
+command = ["qodercli", "--acp"]
+# The upstream series the driver was checked against (docs/DESIGN.md §9.4); outside them
+# the CLI still runs, marked unverified.
+verified = ["1.1"]
+
+[models]
+# Built-in Qoder model presets (`qodercli --list-models` replaces this once signed in).
+fallback = [
+    "auto",
+    "ultimate",
+    "performance",
+    "efficient",
+    "lite",
+]
+efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+
+[locate]
+env = "QODER_CLI"
+commands = ["qodercli"]
+# npm's `qodercli.cmd` runs the CLI through `node`; unwrapping it keeps `--mcp-config` and
+# `--settings` JSON away from `cmd.exe`'s quoting (native `qodercli.exe` is untouched).
+shim = "node-script"
+version = ["--version"]
+
+[locate.paths]
+# Native installer locations verified in `@qoder-ai/qodercli` 1.1.99 (`Mil()` / `QEs`).
+windows = ["~/.qoder/bin/qodercli/qodercli.exe"]
+linux = ["~/.local/bin/qodercli", "~/.qoder/bin/qodercli/qodercli"]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
+macos = [
+    "~/.local/bin/qodercli",
+    "~/.qoder/bin/qodercli/qodercli",
+    "/opt/homebrew/bin/qodercli",
+    "/usr/local/bin/qodercli",
+]
+
+[install]
+label = "Qoder"
+hint = "npm install -g @qoder-ai/qodercli"
+login = "then sign in once with `qodercli login` (or set QODER_PERSONAL_ACCESS_TOKEN)"
+docs = "https://docs.qoder.com/cli/quick-start"
+
+[[install.methods]]
+id = "native"
+os = ["windows"]
+run = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://qoder.com/install.ps1 | iex"]
+upgrade = ["qodercli", "update"]
+
+[[install.methods]]
+id = "native"
+os = ["macos", "linux"]
+run = ["bash", "-c", "curl -fsSL https://qoder.com/install | bash"]
+upgrade = ["qodercli", "update"]
+
+[[install.methods]]
+id = "npm"
+requires = ["npm"]
+# https://www.npmjs.com/package/@qoder-ai/qodercli
+run = ["npm", "install", "-g", "@qoder-ai/qodercli"]
+upgrade = ["npm", "install", "-g", "@qoder-ai/qodercli@latest"]

@@ -28,6 +28,7 @@ pub mod codex_account;
 pub mod cursor_account;
 pub mod gemini_account;
 pub mod manifest;
+pub mod qoder_account;
 pub mod version;
 
 use std::collections::{BTreeMap, HashMap};
@@ -43,6 +44,7 @@ use crossagents_drivers::codex_native::CodexNativeDriver;
 use crossagents_drivers::cursor_native::CursorNativeDriver;
 use crossagents_drivers::gemini_native::GeminiNativeDriver;
 use crossagents_drivers::locate::{Cli, Install, Locator};
+use crossagents_drivers::qoder_native::QoderNativeDriver;
 use crossagents_drivers::with_native::WithNativeDriver;
 use serde::Deserialize;
 
@@ -269,6 +271,10 @@ impl Profile {
                 self.config.cli(),
                 self.config.models.clone(),
             )),
+            DriverKind::QoderNative => Arc::new(
+                QoderNativeDriver::new(&self.name, self.config.cli(), self.config.models.clone())
+                    .pinned(self.pinned_models),
+            ),
         };
         drivers.insert(kind, driver.clone());
         Ok(Resolved { driver, warning })
@@ -443,7 +449,7 @@ mod tests {
     /// here changes behaviour, not formatting.
     #[test]
     fn the_built_in_descriptions_say_what_the_functions_said() {
-        assert_eq!(builtin::all().len(), 7);
+        assert_eq!(builtin::all().len(), 8);
 
         let claude = builtin::config("claude").unwrap();
         assert_eq!(
@@ -498,6 +504,7 @@ mod tests {
             ("codebuddy", &["codebuddy"][..]),
             ("cursor", &["agent", "cursor-agent"][..]),
             ("gemini", &["gemini"][..]),
+            ("qoder", &["qodercli"][..]),
             ("with", &["with-cli"][..]),
         ] {
             let locator = builtin::locator(name).unwrap();
@@ -596,6 +603,7 @@ mod tests {
                 "cursor",
                 "gemini",
                 "mock",
+                "qoder",
                 "with"
             ]
         );
@@ -748,6 +756,43 @@ mod tests {
         assert_eq!(
             registry
                 .driver("cursor", Some("acp-generic"))
+                .unwrap()
+                .driver
+                .kind(),
+            DriverKind::AcpGeneric
+        );
+    }
+
+    #[test]
+    fn qoder_is_built_in_and_runs_on_its_native_driver() {
+        let registry = PluginRegistry::with_config(&BTreeMap::new());
+        let driver = registry.get("qoder").unwrap();
+        assert_eq!(driver.kind(), DriverKind::QoderNative);
+        let caps = driver.capabilities();
+        assert!(
+            caps.streaming
+                && caps.interrupt
+                && caps.mcp
+                && caps.resume
+                && caps.move_cwd
+                && caps.fork
+                && caps.set_model
+                && caps.usage
+                && caps.rate_limits
+                && caps.permission_callback
+                && caps.compaction
+        );
+        assert!(!caps.steer);
+        assert!(!driver.models().is_empty());
+        let config = registry.config("qoder").unwrap();
+        assert_eq!(
+            config.efforts,
+            ["none", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(config.command, ["qodercli", "--acp"]);
+        assert_eq!(
+            registry
+                .driver("qoder", Some("acp-generic"))
                 .unwrap()
                 .driver
                 .kind(),

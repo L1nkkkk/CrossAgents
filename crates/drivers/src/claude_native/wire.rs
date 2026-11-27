@@ -64,6 +64,11 @@ pub enum Flavor {
     /// WorkBuddy's CodeBuddy CLI: it routes permission asks over the stream-json channel by
     /// itself and rejects `--permission-prompt-tool`.
     Codebuddy,
+    /// Qoder CLI (`qodercli`): speaks the full stream-json control protocol (`initialize`,
+    /// `can_use_tool`, `set_model`, `get_context_usage`, `get_usage_info`, `--strict-mcp-config`,
+    /// `--permission-prompt-tool stdio`, `--replay-user-messages`), with `--reasoning-effort`
+    /// instead of `--effort`, snake_case `--permission-mode`, and no `--verbose`.
+    Qoder,
 }
 
 /// `CODEBUDDY_*` variables a session keeps when started from inside another CodeBuddy or
@@ -74,27 +79,50 @@ const CODEBUDDY_KEPT_ENV: [&str; 3] = [
     "CODEBUDDY_INTERNET_ENVIRONMENT",
 ];
 
+/// `QODER_*` variables a session keeps when started from inside another Qoder session:
+/// credentials and region selection, never the enclosing session's id or runtime role.
+const QODER_KEPT_ENV: [&str; 5] = [
+    "QODER_PERSONAL_ACCESS_TOKEN",
+    "QODER_SERVICE_ACCOUNT_KEY",
+    "QODERCN_SERVICE_ACCOUNT_KEY",
+    "QODER_SDK_ACCESS_TOKEN",
+    "QODER_REGION",
+];
+
 impl Flavor {
     /// The CLI's name, for messages.
     pub fn program(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codebuddy => "codebuddy",
+            Self::Qoder => "qodercli",
         }
     }
 
     /// Whether an inherited variable is withheld from the CLI. A hub started from a
-    /// WorkBuddy terminal inherits that session's `CODEBUDDY_*` (its MCP config with the
-    /// connector proxy's token, its session id, host, service proxy and `CONFIG_DIR`, the
-    /// folder WorkBuddy keeps its own login in), which would tie the worker to WorkBuddy;
-    /// everything but the sign-in is dropped. An agent's own `env` is applied after this
-    /// and can set any of them again.
+    /// WorkBuddy or Qoder terminal inherits that session's vendor variables (its session id,
+    /// runtime role, or config directory), which would tie the worker to the enclosing
+    /// session; everything but sign-in credentials is dropped. An agent's own `env` is
+    /// applied after this and can set any of them again.
     pub fn withholds(self, key: &str) -> bool {
-        self == Self::Codebuddy
-            && key.to_ascii_uppercase().starts_with("CODEBUDDY_")
-            && !CODEBUDDY_KEPT_ENV
-                .iter()
-                .any(|kept| kept.eq_ignore_ascii_case(key))
+        match self {
+            Self::Codebuddy => {
+                key.to_ascii_uppercase().starts_with("CODEBUDDY_")
+                    && !CODEBUDDY_KEPT_ENV
+                        .iter()
+                        .any(|kept| kept.eq_ignore_ascii_case(key))
+            }
+            Self::Qoder => {
+                let upper = key.to_ascii_uppercase();
+                (upper.starts_with("QODER_")
+                    || upper.starts_with("QODERCLI_")
+                    || upper.starts_with("QODERCN_"))
+                    && !QODER_KEPT_ENV
+                        .iter()
+                        .any(|kept| kept.eq_ignore_ascii_case(key))
+            }
+            Self::Claude => false,
+        }
     }
 
     /// The host this CLI reaches through the proxy, which
@@ -102,13 +130,9 @@ impl Flavor {
     ///
     /// `ANTHROPIC_BASE_URL` wins when the agent's environment sets it: a Profile may point
     /// Claude Code at a gateway instead (see `docs/DESIGN.md`), and the CLI then never
-    /// calls the vendor at all. Otherwise Claude Code calls `api.anthropic.com`, and a
-    /// CodeBuddy login sits on one of two API origins decided by
-    /// `CODEBUDDY_INTERNET_ENVIRONMENT` and the account: a mainland login talks to
-    /// `www.workbuddy.cn`, everything else to `www.codebuddy.ai` (the default when the
-    /// variable is unset). Only the default is named here — a mainland login behind a
-    /// proxy that cannot reach `www.codebuddy.ai` would be reported as broken when it is
-    /// not, which is why the check says which host it could not reach.
+    /// calls the vendor at all. Otherwise Claude Code calls `api.anthropic.com`, a CodeBuddy
+    /// login talks to `www.workbuddy.cn` or `www.codebuddy.ai`, and Qoder CLI talks to
+    /// `api.qoder.sh` (or `gateway.qoder.com.cn` for the mainland site).
     pub fn api_host(self, env: &[(String, String)]) -> String {
         if let Some(host) = base_url_host(env) {
             return host;
@@ -126,6 +150,22 @@ impl Flavor {
                     "www.workbuddy.cn".to_owned()
                 } else {
                     "www.codebuddy.ai".to_owned()
+                }
+            }
+            Self::Qoder => {
+                let region = env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("QODER_REGION"))
+                    .map(|(_, value)| value.clone())
+                    .or_else(|| std::env::var("QODER_REGION").ok());
+                if region
+                    .as_deref()
+                    .is_some_and(|r| r.eq_ignore_ascii_case("cn"))
+                {
+                    "gateway.qoder.com.cn".to_owned()
+                } else {
+                    "api.qoder.sh".to_owned()
                 }
             }
         }
@@ -161,26 +201,26 @@ pub fn args(launch: &Launch, start: &Start, flavor: Flavor) -> Vec<String> {
         "stream-json",
         "--output-format",
         "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--setting-sources",
     ]
     .map(String::from)
     .to_vec();
+    if flavor != Flavor::Qoder {
+        args.push("--verbose".into());
+    }
+    args.push("--include-partial-messages".into());
+    args.push("--setting-sources".into());
     args.push(launch.setting_sources.clone());
     // `--setting-sources project,local` keeps the user's own files out, but the project's
-    // `.claude/settings.json` is one of them and may carry hooks; `--settings` merges over
-    // every file, so this switches hooks off without touching the rest of the settings.
+    // settings.json is one of them and may carry hooks; `--settings` merges over every file,
+    // so this switches hooks off without touching the rest of the settings.
     args.extend(crate::hooks::args(launch.allow_hooks));
     // Only `--mcp-config` counts, so nothing from the CLI's own settings arrives with the
-    // session. Claude Code needs that; CodeBuddy reads its own `mcp.json` and loading it
-    // twice would start those servers twice (docs/research/multica.md §2.10).
-    if flavor == Flavor::Claude {
+    // session. Claude Code and Qoder need that; CodeBuddy reads its own `mcp.json` and loading
+    // it twice would start those servers twice (docs/research/multica.md §2.10).
+    if matches!(flavor, Flavor::Claude | Flavor::Qoder) {
         args.push("--strict-mcp-config".into());
         args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
-        // A steered message is echoed with `isReplay` and the uuid we gave it when the CLI
-        // reads it (verified against claude 2.1.317): that is how the driver tells the
-        // model has seen it.
+        // A steered/replayed message is echoed with `isReplay` and the uuid we gave it.
         args.push("--replay-user-messages".into());
     }
     if let Some(config) = crate::mcp_config::config_arg(flavor, &launch.env, &launch.mcp_servers) {
@@ -190,15 +230,23 @@ pub fn args(launch: &Launch, start: &Start, flavor: Flavor) -> Vec<String> {
     if launch.bypass {
         args.push("--dangerously-skip-permissions".into());
     }
-    for (flag, value) in [
-        ("--model", &launch.model),
-        ("--effort", &launch.effort),
-        ("--permission-mode", &launch.permission_mode),
-    ] {
-        if let Some(value) = value {
-            args.push(flag.into());
-            args.push(value.clone());
-        }
+    if let Some(model) = &launch.model {
+        args.push("--model".into());
+        args.push(model.clone());
+    }
+    if let Some(effort) = &launch.effort {
+        args.push(match flavor {
+            Flavor::Qoder => "--reasoning-effort".into(),
+            Flavor::Claude | Flavor::Codebuddy => "--effort".into(),
+        });
+        args.push(effort.clone());
+    }
+    if let Some(mode) = &launch.permission_mode {
+        args.push("--permission-mode".into());
+        args.push(match flavor {
+            Flavor::Qoder => qoder_permission_mode(mode),
+            Flavor::Claude | Flavor::Codebuddy => mode.clone(),
+        });
     }
     if let Some(instructions) = &launch.instructions {
         args.push("--append-system-prompt".into());
@@ -221,6 +269,18 @@ pub fn args(launch: &Launch, start: &Start, flavor: Flavor) -> Vec<String> {
         }
     }
     args
+}
+
+/// Qoder CLI accepts snake_case choices on `--permission-mode`
+/// (`default`, `accept_edits`, `bypass_permissions`, `dont_ask`, `auto`). Normalize camelCase
+/// values configured in Claude Code's spelling so existing agent configs keep working.
+fn qoder_permission_mode(mode: &str) -> String {
+    match mode {
+        "acceptEdits" => "accept_edits".into(),
+        "bypassPermissions" => "bypass_permissions".into(),
+        "dontAsk" => "dont_ask".into(),
+        other => other.to_owned(),
+    }
 }
 
 /// A user message; `uuid` names it for rewinding and forking.
@@ -265,8 +325,8 @@ pub fn user_content(prompt: &crossagents_core::Prompt) -> Value {
 }
 
 /// The control request that changes a running session's reasoning effort: Claude Code's
-/// `apply_flag_settings`; CodeBuddy has none and takes `set_config` (for this session only,
-/// its settings file is left alone).
+/// `apply_flag_settings`, Qoder's `apply_flag_settings` under `model.reasoningEffort`, and
+/// CodeBuddy's `set_config` (for this session only, its settings file is left alone).
 pub fn set_effort(flavor: Flavor, effort: &str) -> Value {
     match flavor {
         Flavor::Claude => {
@@ -275,6 +335,26 @@ pub fn set_effort(flavor: Flavor, effort: &str) -> Value {
         Flavor::Codebuddy => {
             json!({ "subtype": "set_config", "config": { "reasoningEffort": effort } })
         }
+        Flavor::Qoder => {
+            json!({ "subtype": "apply_flag_settings", "settings": { "model": { "reasoningEffort": effort } } })
+        }
+    }
+}
+
+/// Qoder CLI's token usage spans both its OpenAI-style gateway (where `input_tokens`
+/// already includes `cache_read_input_tokens`) and Anthropic-compatible BYOK (where
+/// `input_tokens` excludes cache read and cache creation). When the cache fields exceed
+/// `input_tokens`, they cannot be a subset and are added on top; otherwise `input_tokens`
+/// is already the whole prompt.
+pub fn qoder_input_tokens(usage: &Value) -> (u64, u64, u64) {
+    let num = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let raw = num("input_tokens");
+    let cache_read = num("cache_read_input_tokens");
+    let cache_write = num("cache_creation_input_tokens");
+    if cache_read + cache_write > raw {
+        (raw + cache_read + cache_write, cache_read, cache_write)
+    } else {
+        (raw, cache_read, cache_write)
     }
 }
 
@@ -621,6 +701,11 @@ pub struct Translator {
     turn_requests: CodebuddyCounts,
     message_request: CodebuddyCounts,
     session_reported: Option<CodebuddyCounts>,
+    /// Qoder only: the latest single-request raw `input_tokens` and `context_usage_ratio`
+    /// (`input_tokens / contextWindow`), used to recover `context_size` because Qoder
+    /// hardcodes `modelUsage[*].contextWindow = 0`.
+    turn_last_raw_input: Option<u64>,
+    context_usage_ratio: Option<f64>,
 }
 
 /// CodeBuddy's usage, which is not Claude Code's although the frames look alike (verified
@@ -670,6 +755,52 @@ impl Translator {
         Self {
             flavor,
             ..Self::default()
+        }
+    }
+
+    /// Last known context window size in tokens (0 if not yet observed).
+    pub fn context_size(&self) -> u64 {
+        self.context_size
+    }
+
+    /// Qoder writes `contextWindow: 0` in `modelUsage` but includes
+    /// `context_usage_ratio = raw_input / contextWindow` on stream usage frames and
+    /// `result.usage`. Invert the ratio against a single request's raw `input_tokens`
+    /// (never the multi-request turn sum) to recover the window size.
+    fn note_qoder_ratio(&mut self, usage: &Value, single_request: bool) {
+        if self.flavor != Flavor::Qoder {
+            return;
+        }
+        if let Some(ratio) = usage.get("context_usage_ratio").and_then(Value::as_f64)
+            && ratio.is_finite()
+            && ratio > 0.0
+        {
+            self.context_usage_ratio = Some(ratio);
+        }
+        let raw_input = usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .filter(|&n| n > 0);
+        if single_request && raw_input.is_some() {
+            self.turn_last_raw_input = raw_input;
+        }
+        let sample_input = if single_request {
+            self.turn_last_raw_input
+        } else {
+            // `result.usage.input_tokens` sums all requests in a turn while its
+            // `context_usage_ratio` belongs to the last request; only fall back to it
+            // when no streamed request reported a single-request input count.
+            self.turn_last_raw_input.or(raw_input)
+        };
+        if let (Some(input), Some(ratio)) = (sample_input, self.context_usage_ratio) {
+            if ratio > 0.0 && ratio < 1.0 {
+                let inferred = (input as f64 / ratio).round() as u64;
+                if inferred >= input {
+                    self.context_size = inferred;
+                }
+            } else if ratio >= 1.0 && self.context_size == 0 {
+                self.context_size = input;
+            }
         }
     }
 
@@ -740,6 +871,12 @@ impl Translator {
                         message.get("attempt").and_then(Value::as_u64).unwrap_or(1)
                     ),
                 }],
+                Some("status") => {
+                    if let Some(usage) = message.get("usage") {
+                        self.note_qoder_ratio(usage, true);
+                    }
+                    Vec::new()
+                }
                 _ => Vec::new(),
             },
             _ => Vec::new(),
@@ -755,6 +892,9 @@ impl Translator {
                 self.turn_requests = self
                     .turn_requests
                     .add(std::mem::take(&mut self.message_request));
+                if let Some(usage) = event.pointer("/message/usage") {
+                    self.note_qoder_ratio(usage, true);
+                }
                 self.streaming = event
                     .pointer("/message/id")
                     .and_then(Value::as_str)
@@ -774,6 +914,10 @@ impl Translator {
                     }
                     // Already the whole prompt; adding the cache fields doubled it.
                     Flavor::Codebuddy => num("input_tokens"),
+                    Flavor::Qoder => {
+                        self.note_qoder_ratio(usage, true);
+                        qoder_input_tokens(usage).0
+                    }
                 };
                 let output = num("output_tokens");
                 // Only a delta that carries the request's input says how much context is in
@@ -953,7 +1097,13 @@ impl Translator {
                 let turn = self.codebuddy_turn(usage);
                 (turn.input, turn.cached, 0, turn.output)
             }
+            Flavor::Qoder => {
+                self.note_qoder_ratio(usage, false);
+                let (input, cached, cache_write) = qoder_input_tokens(usage);
+                (input, cached, cache_write, num(usage, "output_tokens"))
+            }
         };
+        self.turn_last_raw_input = None;
         let output = reported_output.max(streamed);
         self.tokens.input += input;
         self.tokens.cached_input += cached;
@@ -998,6 +1148,7 @@ impl Translator {
             .into_iter()
             .flat_map(|m| m.values())
             .filter_map(|m| m.get("contextWindow").and_then(Value::as_u64))
+            .filter(|&w| w > 0)
             .max()
             .unwrap_or(self.context_size);
         self.context_used = used;
@@ -1246,9 +1397,14 @@ pub fn commands(message: &Value) -> Option<Vec<AgentCommand>> {
 
 /// The categories of a `get_context_usage` answer; `None` without any.
 pub fn context_parts(answer: &Value) -> Option<Vec<ContextPart>> {
-    let parts: Vec<ContextPart> = answer
-        .get("categories")?
-        .as_array()?
+    context_parts_for_window(answer, 0)
+}
+
+/// Like [`context_parts`], also decoding Qoder CLI's percentage-based `get_context_usage`
+/// (`categories: [{ type, percentage }]`) against `context_size`.
+pub fn context_parts_for_window(answer: &Value, context_size: u64) -> Option<Vec<ContextPart>> {
+    let categories = answer.get("categories")?.as_array()?;
+    let claude: Vec<ContextPart> = categories
         .iter()
         .filter_map(|c| {
             Some(ContextPart {
@@ -1263,7 +1419,193 @@ pub fn context_parts(answer: &Value) -> Option<Vec<ContextPart>> {
             })
         })
         .collect();
-    (!parts.is_empty()).then_some(parts)
+    if !claude.is_empty() {
+        return Some(claude);
+    }
+    let window = context_size.max(
+        answer
+            .get("rawContextWindowTokens")
+            .or_else(|| answer.get("maxTokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    );
+    if window == 0 {
+        return None;
+    }
+    let qoder: Vec<ContextPart> = categories
+        .iter()
+        .filter_map(|c| {
+            let kind_type = c.get("type")?.as_str()?;
+            let pct = c.get("percentage")?.as_f64()?;
+            if !pct.is_finite() {
+                return None;
+            }
+            let (id, name, kind) = match kind_type {
+                "system_prompt" => ("system_prompt", "System prompt", "used"),
+                "system_tools" => ("system_tools", "System tools", "used"),
+                "skills" => ("skills", "Skills", "used"),
+                "messages" => ("messages", "Messages", "used"),
+                "other" => ("other", "Other", "used"),
+                "free_space" => ("free_space", "Free space", "free"),
+                "auto_compact" => ("autocompact_buffer", "Autocompact buffer", "buffer"),
+                other => (other, other, "used"),
+            };
+            let tokens = ((pct.clamp(0.0, 100.0) / 100.0) * window as f64).round() as u64;
+            Some(ContextPart {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                tokens,
+                kind: kind.to_owned(),
+            })
+        })
+        .collect();
+    (!qoder.is_empty()).then_some(qoder)
+}
+
+fn qoder_expiry(account: &Value) -> Option<DateTime<Utc>> {
+    let raw = account
+        .get("expiresAt")
+        .or_else(|| account.get("expires_at"))?;
+    match raw {
+        Value::String(s) => s.parse().ok(),
+        v => {
+            let n = v.as_i64()?;
+            if n <= 0 {
+                None
+            } else if n > 1_000_000_000_000 {
+                DateTime::from_timestamp_millis(n)
+            } else {
+                DateTime::from_timestamp(n, 0)
+            }
+        }
+    }
+}
+
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+fn qoder_quota_window(
+    name: &str,
+    q: &Value,
+    resets_at: Option<DateTime<Utc>>,
+) -> Option<RateWindow> {
+    if !q.is_object() {
+        return None;
+    }
+    if q.get("available").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let total = q
+        .get("total")
+        .or_else(|| q.get("cap"))
+        .and_then(Value::as_f64);
+    let used = q.get("used").and_then(Value::as_f64);
+    let remaining = q
+        .get("remaining")
+        .and_then(Value::as_f64)
+        .or_else(|| Some((total? - used?).max(0.0)));
+    if total.is_some_and(|t| t <= 0.0) && remaining.is_none_or(|r| r <= 0.0) {
+        return None;
+    }
+    let used_percent = q
+        .get("percentage")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            let t = total.filter(|&t| t > 0.0)?;
+            let u = used.or_else(|| remaining.map(|r| (t - r).max(0.0)))?;
+            Some(u / t * 100.0)
+        })?
+        .clamp(0.0, 100.0);
+    Some(RateWindow {
+        name: name.into(),
+        used_percent,
+        window_seconds: None,
+        resets_at,
+        remaining: remaining.map(round2),
+        total: total.map(round2),
+    })
+}
+
+/// Subscription expiration timestamp from a Qoder `get_usage_info` answer, if present.
+pub fn qoder_subscription_until(answer: &Value) -> Option<DateTime<Utc>> {
+    let account = answer
+        .get("usage")
+        .or_else(|| answer.get("accountUsage"))
+        .filter(|v| v.is_object())?;
+    qoder_expiry(account)
+}
+
+/// Quota limits from Qoder CLI's `get_usage_info` control response (`{ usage: { ... } }`).
+pub fn qoder_usage_limits(answer: &Value) -> Option<RateLimits> {
+    let account = answer
+        .get("usage")
+        .or_else(|| answer.get("accountUsage"))
+        .filter(|v| v.is_object())?;
+    let resets_at = qoder_expiry(account);
+    let mut windows = Vec::new();
+    for (key, label) in [
+        ("userQuota", "套餐额度"),
+        ("addOnQuota", "加油包额度"),
+        ("orgResourcePackage", "组织额度"),
+    ] {
+        if let Some(q) = account.get(key)
+            && let Some(w) = qoder_quota_window(label, q, resets_at)
+        {
+            windows.push(w);
+        }
+    }
+    if windows.is_empty()
+        && let Some(pct) = account
+            .get("totalUsagePercentage")
+            .and_then(Value::as_f64)
+            .filter(|p| p.is_finite())
+    {
+        windows.push(RateWindow {
+            name: "总额度".into(),
+            used_percent: pct.clamp(0.0, 100.0),
+            window_seconds: None,
+            resets_at,
+            remaining: None,
+            total: None,
+        });
+    }
+    let exceeded = account.get("isQuotaExceeded").and_then(Value::as_bool) == Some(true)
+        || (!windows.is_empty() && windows.iter().all(|w| w.used_percent >= 100.0));
+    let total_remaining: f64 = windows.iter().filter_map(|w| w.remaining).sum();
+    let has_credit_pools = windows.iter().any(|w| w.remaining.is_some());
+    let credits = has_credit_pools.then(|| Credits {
+        has_credits: true,
+        unlimited: false,
+        balance: Some(format!("{:.2}", round2(total_remaining))),
+    });
+    let plan = account
+        .get("userType")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    if windows.is_empty() && plan.is_none() {
+        return None;
+    }
+    let by_limit = if windows.is_empty() {
+        Vec::new()
+    } else {
+        vec![LimitGroup {
+            id: "all".into(),
+            name: None,
+            model: None,
+            windows: windows.clone(),
+            reached: exceeded,
+        }]
+    };
+    Some(RateLimits {
+        windows,
+        credits,
+        plan,
+        reached: exceeded.then(|| "quota_exceeded".to_owned()),
+        by_limit,
+        reset_credits: None,
+    })
 }
 
 /// A full read (`get_usage`): the plan, the five-hour and weekly windows, the per-model weekly
@@ -1455,7 +1797,7 @@ mod tests {
     /// through `--settings`, and a launch that allows them passes no such settings.
     #[test]
     fn hooks_are_disabled_unless_the_launch_allows_them() {
-        for flavor in [Flavor::Claude, Flavor::Codebuddy] {
+        for flavor in [Flavor::Claude, Flavor::Codebuddy, Flavor::Qoder] {
             let off = args(&Launch::default(), &Start::New("s1".into()), flavor);
             let i = off
                 .iter()
@@ -1607,6 +1949,164 @@ mod tests {
             set_effort(Flavor::Codebuddy, "minimal"),
             json!({ "subtype": "set_config", "config": { "reasoningEffort": "minimal" } })
         );
+        assert_eq!(
+            set_effort(Flavor::Qoder, "xhigh"),
+            json!({ "subtype": "apply_flag_settings", "settings": { "model": { "reasoningEffort": "xhigh" } } })
+        );
+    }
+
+    #[test]
+    fn qoder_launch_args_env_withholding_and_api_host() {
+        let launch = Launch {
+            model: Some("ultimate".into()),
+            effort: Some("high".into()),
+            permission_mode: Some("acceptEdits".into()),
+            setting_sources: DEFAULT_SETTING_SOURCES.into(),
+            env: vec![("QODER_CONFIG_DIR".into(), "/nonexistent/qoder".into())],
+            ..Launch::default()
+        };
+        let argv = args(&launch, &Start::New("s1".into()), Flavor::Qoder);
+        assert!(!argv.contains(&"--verbose".to_owned()), "{argv:?}");
+        assert!(argv.contains(&"--strict-mcp-config".to_owned()));
+        assert!(argv.contains(&"--replay-user-messages".to_owned()));
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--permission-prompt-tool", "stdio"])
+        );
+        assert!(argv.windows(2).any(|w| w == ["--reasoning-effort", "high"]));
+        assert!(!argv.contains(&"--effort".to_owned()));
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--permission-mode", "accept_edits"])
+        );
+
+        assert!(Flavor::Qoder.withholds("QODER_CONFIG_DIR"));
+        assert!(Flavor::Qoder.withholds("QODERCLI_SESSION_ID"));
+        assert!(Flavor::Qoder.withholds("QODERCN_RUNTIME"));
+        assert!(!Flavor::Qoder.withholds("QODER_PERSONAL_ACCESS_TOKEN"));
+        assert!(!Flavor::Qoder.withholds("QODER_REGION"));
+        assert!(!Flavor::Qoder.withholds("HTTPS_PROXY"));
+
+        let unset = vec![
+            ("ANTHROPIC_BASE_URL".into(), String::new()),
+            ("QODER_REGION".into(), String::new()),
+        ];
+        assert_eq!(Flavor::Qoder.api_host(&unset), "api.qoder.sh");
+        assert_eq!(
+            Flavor::Qoder.api_host(&[
+                ("ANTHROPIC_BASE_URL".into(), String::new()),
+                ("QODER_REGION".into(), "cn".into()),
+            ]),
+            "gateway.qoder.com.cn"
+        );
+    }
+
+    #[test]
+    fn qoder_recovers_context_window_from_ratio_and_parses_breakdown_and_quota() {
+        let mut t = Translator::new(Flavor::Qoder);
+        // Step 1: 10,000 input at 5% of a 200k window.
+        t.translate(&stream(json!({
+            "type": "message_start",
+            "message": { "id": "m1", "usage": { "input_tokens": 10_000, "context_usage_ratio": 0.05 } }
+        })));
+        let mid = t.translate(&stream(json!({
+            "type": "message_delta",
+            "usage": { "input_tokens": 10_000, "cache_read_input_tokens": 6_000, "output_tokens": 200, "context_usage_ratio": 0.05 }
+        })));
+        let SessionEventKind::Usage { used, size, .. } = &mid[0] else {
+            panic!("{mid:?}");
+        };
+        assert_eq!((*used, *size), (10_200, 200_000));
+
+        // Step 2: 16,000 input at 8% of the same 200k window.
+        t.translate(&stream(json!({
+            "type": "message_start",
+            "message": { "id": "m2" }
+        })));
+        t.translate(&stream(json!({
+            "type": "message_delta",
+            "usage": { "input_tokens": 16_000, "cache_read_input_tokens": 10_000, "output_tokens": 100, "context_usage_ratio": 0.08 }
+        })));
+        // Result sums both steps (26k input) and hardcodes `contextWindow: 0`.
+        // Context size must still recover 200k (16k / 0.08), not 26k / 0.08.
+        let (_, end) = t.turn_end(
+            &json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "usage": {
+                    "input_tokens": 26_000,
+                    "cache_read_input_tokens": 16_000,
+                    "cache_creation_input_tokens": 0,
+                    "output_tokens": 300,
+                    "context_usage_ratio": 0.08
+                },
+                "modelUsage": { "auto": { "contextWindow": 0 } }
+            }),
+            false,
+        );
+        let SessionEventKind::Usage {
+            used, size, tokens, ..
+        } = &end[0]
+        else {
+            panic!("{end:?}");
+        };
+        assert_eq!((*used, *size), (16_100, 200_000));
+        assert_eq!(t.context_size(), 200_000);
+        let tokens = tokens.as_ref().unwrap();
+        assert_eq!(
+            (tokens.input, tokens.cached_input, tokens.output),
+            (26_000, 16_000, 300)
+        );
+
+        // Qoder `get_context_usage` returns percentages; convert using recovered window.
+        let ctx_answer = json!({
+            "model": "auto",
+            "contextWindow": { "usedPercentage": 8.0 },
+            "categories": [
+                { "type": "system_prompt", "percentage": 2.0 },
+                { "type": "system_tools", "percentage": 3.0 },
+                { "type": "messages", "percentage": 3.0 },
+                { "type": "free_space", "percentage": 72.0 },
+                { "type": "auto_compact", "percentage": 20.0 }
+            ]
+        });
+        let parts = context_parts_for_window(&ctx_answer, t.context_size()).unwrap();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0].id, "system_prompt");
+        assert_eq!(parts[0].tokens, 4_000);
+        assert_eq!(parts[3].id, "free_space");
+        assert_eq!(parts[3].kind, "free");
+        assert_eq!(parts[4].id, "autocompact_buffer");
+        assert_eq!(parts[4].kind, "buffer");
+        assert_eq!(parts[4].tokens, 40_000);
+
+        // Qoder `get_usage_info` returns `{ usage: { ... }, session: { ... } }`.
+        let quota = qoder_usage_limits(&json!({
+            "usage": {
+                "userId": "u1",
+                "userType": "pro",
+                "totalUsagePercentage": 42.5,
+                "expiresAt": 1793084400,
+                "isQuotaExceeded": false,
+                "usageType": "credits",
+                "userQuota": { "total": 2000, "used": 850, "remaining": 1150, "percentage": 42.5, "unit": "credits" },
+                "addOnQuota": { "total": 500, "used": 100, "remaining": 400, "percentage": 20.0, "unit": "credits" }
+            },
+            "session": { "total_credits": 1.5, "model_usage": {} }
+        }))
+        .unwrap();
+        assert_eq!(quota.plan.as_deref(), Some("pro"));
+        assert_eq!(quota.windows.len(), 2);
+        assert_eq!(quota.windows[0].used_percent, 42.5);
+        assert_eq!(quota.windows[0].remaining, Some(1150.0));
+        assert_eq!(quota.windows[0].total, Some(2000.0));
+        assert!(quota.windows[0].resets_at.is_some());
+        assert_eq!(
+            quota.credits.as_ref().and_then(|c| c.balance.as_deref()),
+            Some("1550.00")
+        );
+        assert!(quota.reached.is_none());
     }
 
     #[test]

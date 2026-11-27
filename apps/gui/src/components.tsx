@@ -691,7 +691,7 @@ export function colorOf(agent: Agent): string {
   return hueOf(agent.name);
 }
 
-type Vendor = "claude" | "codex" | "codebuddy" | "antigravity" | "cursor" | "gemini" | "other";
+type Vendor = "claude" | "codex" | "codebuddy" | "antigravity" | "cursor" | "gemini" | "qoder" | "other";
 
 /** Which vendor runs a plugin (or account provider). */
 export function vendorOf(plugin: string): Vendor {
@@ -702,13 +702,14 @@ export function vendorOf(plugin: string): Vendor {
   if (p.startsWith("antigravity")) return "antigravity";
   if (p.startsWith("cursor")) return "cursor";
   if (p.startsWith("gemini")) return "gemini";
+  if (p.startsWith("qoder")) return "qoder";
   return "other";
 }
 
-/** "Claude", "Codex", "CodeBuddy", or the plugin's own name. */
+/** "Claude", "Codex", "CodeBuddy", "Qoder", or the plugin's own name. */
 export function vendorName(plugin: string): string {
   const v = vendorOf(plugin);
-  return v === "claude" ? "Claude" : v === "codex" ? "Codex" : v === "codebuddy" ? "CodeBuddy" : v === "antigravity" ? "Antigravity" : v === "cursor" ? "Cursor" : v === "gemini" ? "Gemini" : plugin;
+  return v === "claude" ? "Claude" : v === "codex" ? "Codex" : v === "codebuddy" ? "CodeBuddy" : v === "antigravity" ? "Antigravity" : v === "cursor" ? "Cursor" : v === "gemini" ? "Gemini" : v === "qoder" ? "Qoder" : plugin;
 }
 
 /** An official mark: as an image, or as a mask over the text colour when it is one-colour. */
