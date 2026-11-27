@@ -2889,68 +2889,72 @@ async fn update_run_policy(
         ));
     }
     let id = resolve_run(&state, &key).await?;
-    let mut run = state.store().get_run(id).await?;
-    if let Some(lead_models_update) = req.lead_models {
-        run.config.policy.lead_models = lead_models_update.and_then(|mut m| {
-            m.plan = m.plan.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
-            m.coordinate = m
-                .coordinate
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty());
-            m.verify = m
-                .verify
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty());
-            m.is_set().then_some(m)
-        });
-    }
-    if let Some(update) = req.continuation {
-        if update.enabled {
-            // Kept as a value and edited field by field: a limit the request does not
-            // mention keeps what the run had (or the default when it had no policy), and a
-            // limit added to the policy later does not have to be named here.
-            let mut policy = run.config.policy.continuation.take().unwrap_or_default();
-            if let Some(max_attempts) = update.max_attempts {
-                policy.max_attempts = max_attempts;
-            }
-            if let Some(interval_seconds) = update.interval_seconds {
-                policy.interval_seconds = interval_seconds;
-            }
-            // Stated or not is the question here: `null` turns the stuck report off, while
-            // saying nothing about it keeps the run's own setting.
-            if let Some(stuck_minutes) = update.stuck_minutes {
-                policy.stuck_minutes = stuck_minutes;
-            }
-            run.config.policy.continuation = Some(policy);
-        } else {
-            // Off leaves nothing behind for the clock (or a client) to read as still on.
-            run.config.policy.continuation = None;
-            run.continuation = None;
+    let continuation_to_publish = {
+        let _guard = state.orchestrator.lock_run(id).await;
+        let mut run = state.store().get_run(id).await?;
+        if let Some(lead_models_update) = req.lead_models {
+            run.config.policy.lead_models = lead_models_update.and_then(|mut m| {
+                m.plan = m.plan.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+                m.coordinate = m
+                    .coordinate
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
+                m.verify = m
+                    .verify
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
+                m.is_set().then_some(m)
+            });
         }
-    }
-    if req.reset_attempts
-        && let Some(mut continuation) = run.continuation.take()
-    {
-        // A fresh allowance: the cap is counted from zero, and the fact that the person
-        // was told the old one ran out is forgotten, so the next exhaustion tells again.
-        continuation.attempts = 0;
-        continuation.exhausted_notified = false;
-        // Re-arming also lifts a pause the automation breaker set: the person has looked at
-        // the failing stretch and asked for it to run again, so the counts start over.
-        continuation.health = Default::default();
-        // The clock arms the next wakeup from the interval it reads; it does not fire
-        // one immediately.
-        continuation.next_at = None;
-        run.continuation = Some(continuation);
-    }
-    run.updated_at = Utc::now();
-    state.store().update_run(&run).await?;
-    if let Some(continuation) = run.continuation.as_deref()
+        if let Some(update) = req.continuation {
+            if update.enabled {
+                // Kept as a value and edited field by field: a limit the request does not
+                // mention keeps what the run had (or the default when it had no policy), and a
+                // limit added to the policy later does not have to be named here.
+                let mut policy = run.config.policy.continuation.take().unwrap_or_default();
+                if let Some(max_attempts) = update.max_attempts {
+                    policy.max_attempts = max_attempts;
+                }
+                if let Some(interval_seconds) = update.interval_seconds {
+                    policy.interval_seconds = interval_seconds;
+                }
+                // Stated or not is the question here: `null` turns the stuck report off, while
+                // saying nothing about it keeps the run's own setting.
+                if let Some(stuck_minutes) = update.stuck_minutes {
+                    policy.stuck_minutes = stuck_minutes;
+                }
+                run.config.policy.continuation = Some(policy);
+            } else {
+                // Off leaves nothing behind for the clock (or a client) to read as still on.
+                run.config.policy.continuation = None;
+                run.continuation = None;
+            }
+        }
+        if req.reset_attempts
+            && let Some(mut continuation) = run.continuation.take()
+        {
+            // A fresh allowance: the cap is counted from zero, and the fact that the person
+            // was told the old one ran out is forgotten, so the next exhaustion tells again.
+            continuation.attempts = 0;
+            continuation.exhausted_notified = false;
+            // Re-arming also lifts a pause the automation breaker set: the person has looked at
+            // the failing stretch and asked for it to run again, so the counts start over.
+            continuation.health = Default::default();
+            // The clock arms the next wakeup from the interval it reads; it does not fire
+            // one immediately.
+            continuation.next_at = None;
+            run.continuation = Some(continuation);
+        }
+        run.updated_at = Utc::now();
+        state.store().update_run(&run).await?;
+        run.continuation.as_deref().cloned()
+    };
+    if let Some(continuation) = continuation_to_publish
         && let Err(error) = state
             .bus
             .publish(EventKind::RunContinuationChanged {
                 id,
-                state: continuation.clone(),
+                state: continuation,
             })
             .await
     {

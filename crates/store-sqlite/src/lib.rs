@@ -1041,6 +1041,23 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn update_watch(&self, watch: &Watch) -> Result<(), CoreError> {
+        let result = sqlx::query("UPDATE watches SET owner = ?, data = ? WHERE id = ?")
+            .bind(watch.owner.to_string())
+            .bind(serde_json::to_string(watch).map_err(storage)?)
+            .bind(&watch.id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "watch",
+                id: watch.id.clone(),
+            });
+        }
+        Ok(())
+    }
+
     async fn put_note(&self, note: &Note) -> Result<(), CoreError> {
         sqlx::query(
             "INSERT INTO notes (scope, run_id, key, data) VALUES (?1, ?2, ?3, ?4)

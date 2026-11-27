@@ -1153,12 +1153,30 @@ impl Accounts {
             }
             None => {
                 let mut env = Vec::new();
-                if agent_proxy.is_none()
-                    && let Some(id) = self.account_for(agent).await
+                let mut egress = None;
+                if let Some(id) = self.account_for(agent).await
                     && let Ok(account) = self.store().get_account(&id).await
-                    && let Some(proxy) = account.proxy.as_deref()
                 {
-                    apply_proxy_pairs(&mut env, proxy);
+                    if agent_proxy.is_none()
+                        && let Some(proxy) = account.proxy.as_deref()
+                    {
+                        apply_proxy_pairs(&mut env, proxy);
+                    }
+                    egress = Some(self.egress_for(&account));
+                }
+                let egress = egress.or_else(|| {
+                    let settings = self
+                        .egress
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    settings
+                        .by_provider
+                        .get(&agent.plugin)
+                        .copied()
+                        .or(settings.default)
+                });
+                if let Some(policy) = egress {
+                    env.push((EGRESS_ENV.to_owned(), policy.as_str().to_owned()));
                 }
                 env
             }

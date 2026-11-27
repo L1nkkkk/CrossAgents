@@ -31,9 +31,9 @@ use windows_sys::Win32::System::Console::{
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use crate::launch::{ExitInfo, Killer, LaunchSpec, Launched, ProcessHandle};
@@ -88,15 +88,18 @@ impl Killer for ConPtyKiller {
 
 struct AttrList {
     _buf: Vec<u8>,
+    /// Heap-boxed so its address stays stable across moves while referenced by the attribute list.
+    _handles: Box<[HANDLE; 3]>,
     ptr: LPPROC_THREAD_ATTRIBUTE_LIST,
 }
 
 impl AttrList {
-    fn new(hpc: HPCON) -> io::Result<Self> {
+    fn new(hpc: HPCON, stdio: [HANDLE; 3]) -> io::Result<Self> {
         let mut size: usize = 0;
-        // SAFETY: first call queries required buffer size.
+        // SAFETY: first call queries required buffer size for 2 attributes
+        // (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE + PROC_THREAD_ATTRIBUTE_HANDLE_LIST).
         unsafe {
-            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut size);
+            InitializeProcThreadAttributeList(null_mut(), 2, 0, &mut size);
         }
         if size == 0 {
             return Err(io::Error::last_os_error());
@@ -104,7 +107,7 @@ impl AttrList {
         let mut buf = vec![0u8; size];
         let ptr = buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
         // SAFETY: `buf` is sized as requested by InitializeProcThreadAttributeList.
-        let ok = unsafe { InitializeProcThreadAttributeList(ptr, 1, 0, &mut size) };
+        let ok = unsafe { InitializeProcThreadAttributeList(ptr, 2, 0, &mut size) };
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -124,7 +127,30 @@ impl AttrList {
             unsafe { DeleteProcThreadAttributeList(ptr) };
             return Err(err);
         }
-        Ok(Self { _buf: buf, ptr })
+        // Restrict handle inheritance to only this child's three stdio pipes so concurrent spawns
+        // in the same process never inherit another child's stdin/stdout/stderr handles.
+        let handles = Box::new(stdio);
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                ptr,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_ptr().cast(),
+                std::mem::size_of::<[HANDLE; 3]>(),
+                null_mut(),
+                null_mut(),
+            )
+        };
+        if ok == 0 {
+            let err = io::Error::last_os_error();
+            unsafe { DeleteProcThreadAttributeList(ptr) };
+            return Err(err);
+        }
+        Ok(Self {
+            _buf: buf,
+            _handles: handles,
+            ptr,
+        })
     }
 }
 
@@ -257,7 +283,12 @@ pub(crate) fn spawn_piped(spec: &LaunchSpec, assign_job: bool) -> io::Result<Pip
     drop(pty_in_read);
     drop(pty_out_write);
 
-    let attr_list = AttrList::new(conpty.0)?;
+    let stdio = [
+        stdin_read.as_raw_handle() as HANDLE,
+        stdout_write.as_raw_handle() as HANDLE,
+        stderr_write.as_raw_handle() as HANDLE,
+    ];
+    let attr_list = AttrList::new(conpty.0, stdio)?;
     const STARTF_USESHOWWINDOW: u32 = 0x0000_0001;
     let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;

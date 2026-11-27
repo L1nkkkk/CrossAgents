@@ -1716,25 +1716,9 @@ impl Orchestrator {
         if task.status == TaskStatus::Stalled {
             self.transition(&mut task, TaskStatus::Passed).await?;
         }
-        // Before the merge is announced, so whoever reads the run on that event sees it.
+        // Before the merge is announced, so whoever reads the run or expertise on that event
+        // sees it settled.
         self.sync_resolved(&mut run, &task).await?;
-        self.transition(&mut task, TaskStatus::Merged).await?;
-        // The waiting-for-acceptance notice is done: it no longer wakes the lead.
-        self.settle_accept_notice(
-            task.issuer_or(run.planner),
-            &task,
-            &format!("#{} was accepted and merged.", task.key),
-        )
-        .await;
-        // Where the workflow goes next (multica §2.12): the step `spec.next` names is
-        // released, or opened for the teammate it names, before the schedule pass starts it.
-        let next = self.after_accept(&run, &task).await?;
-        self.schedule(&mut run).await?;
-        let verified_word = if unchecked.is_empty() {
-            json!("verified")
-        } else {
-            json!("forced")
-        };
         // How this task ended lands on the expertise entries it used (EXPERTISE §4.6). The
         // merge is done: a profile that cannot be updated must not make an accepted task look
         // refused to its issuer.
@@ -1753,6 +1737,23 @@ impl Orchestrator {
         {
             tracing::warn!(task = %task.key, error = %err, "cannot propose an expertise candidate");
         }
+        self.transition(&mut task, TaskStatus::Merged).await?;
+        // The waiting-for-acceptance notice is done: it no longer wakes the lead.
+        self.settle_accept_notice(
+            task.issuer_or(run.planner),
+            &task,
+            &format!("#{} was accepted and merged.", task.key),
+        )
+        .await;
+        // Where the workflow goes next (multica §2.12): the step `spec.next` names is
+        // released, or opened for the teammate it names, before the schedule pass starts it.
+        let next = self.after_accept(&run, &task).await?;
+        self.schedule(&mut run).await?;
+        let verified_word = if unchecked.is_empty() {
+            json!("verified")
+        } else {
+            json!("forced")
+        };
         Ok(json!({
             "merged": true,
             "task": task_json(&task),
@@ -1939,6 +1940,12 @@ impl Orchestrator {
             TaskStatus::Cancelled
         };
         crate::attempts::close_open(&mut task, TaskRunOutcome::Cancelled, a.reason.clone());
+        // What it used counts as dropped, requeued or not (EXPERTISE §4.6), before the drop
+        // event is announced so readers on that event see the settled stats. The drop itself
+        // stands even when the profile cannot be updated.
+        if let Err(err) = self.settle_usage(&task, UsageOutcome::Dropped).await {
+            tracing::warn!(task = %task.key, error = %err, "cannot settle expertise usage");
+        }
         self.transition(&mut task, to).await?;
         self.settle_accept_notice(
             task.issuer_or(run.planner),
@@ -1946,11 +1953,6 @@ impl Orchestrator {
             &format!("#{} was dropped.", task.key),
         )
         .await;
-        // What it used counts as dropped, requeued or not (EXPERTISE §4.6), and the drop
-        // itself stands even when the profile cannot be updated.
-        if let Err(err) = self.settle_usage(&task, UsageOutcome::Dropped).await {
-            tracing::warn!(task = %task.key, error = %err, "cannot settle expertise usage");
-        }
         self.schedule(&mut run).await?;
         Ok(json!({ "task": task_json(&task) }))
     }

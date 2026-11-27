@@ -443,6 +443,12 @@ pub trait Store: Send + Sync {
             id: id.to_owned(),
         })
     }
+    /// Replaces an existing watch record atomically; returns [`CoreError::NotFound`] if the
+    /// watch was already removed.
+    async fn update_watch(&self, watch: &Watch) -> Result<(), CoreError> {
+        self.delete_watch(&watch.id).await?;
+        self.insert_watch(watch).await
+    }
     /// Inserts or replaces a note (by scope, run and key).
     async fn put_note(&self, note: &Note) -> Result<(), CoreError> {
         let _ = note;

@@ -511,6 +511,9 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             let _ = services_task.await;
             // Running tool calls end with the hub; their results are lost (docs/EXTENSIONS.md §3).
             stopping_runner.shutdown().await;
+            let observer: Arc<dyn crossagents_drivers::launch::SystemHostObserver> =
+                terminals.clone();
+            crossagents_drivers::launch::clear_system_host_observer(&observer);
             terminals.stop_all();
             if stop_agents.load(Ordering::SeqCst) {
                 runtime.stop_all().await;

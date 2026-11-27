@@ -340,6 +340,12 @@ impl Orchestrator {
         lock.lock_owned().await
     }
 
+    /// Acquires `run`'s per-run mutex so read-modify-write updates outside the orchestrator
+    /// (e.g. policy updates) cannot race a concurrent continuation pass and be overwritten.
+    pub async fn lock_run(&self, run: RunId) -> OwnedMutexGuard<()> {
+        self.lock(run).await
+    }
+
     /// One answer or dismissal of card `id` at a time: deciding a Work card starts a run,
     /// which takes seconds, and two decisions must not both act. The entry goes when the
     /// last holder or waiter lets go.

@@ -100,6 +100,19 @@ pub fn set_system_host_observer(observer: Arc<dyn SystemHostObserver>) {
         .unwrap_or_else(|e| e.into_inner()) = Some(observer);
 }
 
+/// Drops the global observer if it still points to `observer`, so a stopped hub is not retained.
+pub fn clear_system_host_observer(observer: &Arc<dyn SystemHostObserver>) {
+    let mut slot = SYSTEM_HOST_OBSERVER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, observer))
+    {
+        *slot = None;
+    }
+}
+
 fn notify_system_host(spec: &LaunchSpec, launched: &Launched) {
     let observer = SYSTEM_HOST_OBSERVER
         .lock()

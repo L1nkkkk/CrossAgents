@@ -82,16 +82,15 @@ pub fn account_trigger(watch: &mut Watch, now: DateTime<Utc>) -> Trigger {
     Trigger::Wake
 }
 
-/// Writes a rule back after its chain or health moved. The store keeps one row per id and has
-/// no update of its own: the record is small, so it is replaced. A rule that vanished under us
-/// (cancelled, or closed with its task) stays gone rather than coming back stale.
+/// Writes a rule back after its chain or health moved, atomically in place so concurrent
+/// readers never see a vanished row. A rule that vanished under us (cancelled, or closed with
+/// its task) stays gone rather than coming back stale.
 pub async fn save_rule(
     store: &dyn crossagents_core::Store,
     watch: &Watch,
 ) -> Result<(), crossagents_core::CoreError> {
-    match store.delete_watch(&watch.id).await {
-        Ok(()) => store.insert_watch(watch).await,
-        Err(crossagents_core::CoreError::NotFound { .. }) => Ok(()),
+    match store.update_watch(watch).await {
+        Ok(()) | Err(crossagents_core::CoreError::NotFound { .. }) => Ok(()),
         Err(err) => Err(err),
     }
 }

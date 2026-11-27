@@ -560,16 +560,17 @@ impl Terminals {
         }
     }
 
-    /// The hub is stopping: terminals do not outlive it.
+    /// The hub is stopping: user terminals do not outlive it.
+    ///
+    /// Observed system hosts belong to `Runtime`, which stops (or leaves) them in the next
+    /// shutdown step; killing them here would cut off graceful agent shutdown and, when several
+    /// hubs share a process (tests), kill another hub's agents observed through the global hook.
     pub fn stop_all(&self) {
         let all: Vec<_> = lock(&self.map).drain().map(|(_, t)| t).collect();
         for terminal in all {
             terminal.kill();
         }
-        let hosts: Vec<_> = lock(&self.system_hosts).drain().map(|(_, h)| h).collect();
-        for host in hosts {
-            (host.killer)();
-        }
+        lock(&self.system_hosts).clear();
     }
 }
 
