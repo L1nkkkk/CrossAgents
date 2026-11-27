@@ -305,13 +305,17 @@ pub fn user_content(prompt: &crossagents_core::Prompt) -> Value {
     }
     let mut blocks = vec![json!({ "type": "text", "text": prompt.text })];
     for a in &prompt.attachments {
-        let bytes = (a.is_image() || a.is_pdf())
+        let native_image = matches!(
+            a.mime.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        );
+        let bytes = (native_image || a.is_pdf())
             .then(|| std::fs::read(&a.path).ok())
             .flatten();
         let block = match bytes {
             Some(bytes) => {
                 let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-                let kind = if a.is_image() { "image" } else { "document" };
+                let kind = if native_image { "image" } else { "document" };
                 json!({ "type": kind, "source": { "type": "base64", "media_type": a.mime, "data": data } })
             }
             None => match a.inline_text() {

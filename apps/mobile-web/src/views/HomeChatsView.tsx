@@ -33,8 +33,21 @@ import {
   wsKey,
   wsName,
 } from "../store";
-import type { LinkStatus } from "../transport";
+import type { HubTransport, LinkStatus } from "../transport";
 import type { Agent, HubInfo, HumanItem, RemoteNodeInfo, UserProfile } from "../types";
+
+interface MobileSearchHit {
+  agent_id: string;
+  agent_name: string;
+  topic?: string | null;
+  cwd: string;
+  archived: boolean;
+  message_id?: string | null;
+  role: string;
+  snippet: string;
+  ts: string;
+  seq: number;
+}
 
 type FilterMode = "active" | "running" | "archived";
 
@@ -82,6 +95,7 @@ export function HomeChatsView({
   snapshotSavedAt,
   isConnected,
   linkStatus,
+  transport,
   refreshing,
   onRefresh,
   onOpenAgent,
@@ -100,6 +114,7 @@ export function HomeChatsView({
   snapshotSavedAt?: string;
   isConnected: boolean;
   linkStatus?: LinkStatus;
+  transport: HubTransport | null;
   refreshing: boolean;
   onRefresh: () => void;
   onOpenAgent: (agentId: string) => void;
@@ -112,6 +127,42 @@ export function HomeChatsView({
   const [filter, setFilter] = useState<FilterMode>("active");
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
+  const [contentHits, setContentHits] = useState<MobileSearchHit[]>([]);
+  const [contentSearching, setContentSearching] = useState(false);
+
+  useEffect(() => {
+    const q = query.trim();
+    if (!transport || !isConnected || q.length < 2) {
+      setContentHits([]);
+      setContentSearching(false);
+      return;
+    }
+    let live = true;
+    setContentSearching(true);
+    const timer = window.setTimeout(() => {
+      void transport
+        .request("GET", `/v1/search/sessions?q=${encodeURIComponent(q)}&archived=true&limit=12`)
+        .then((res) => {
+          if (!live) return;
+          if (res.status < 400) {
+            const parsed = JSON.parse(res.body) as { hits?: MobileSearchHit[] };
+            setContentHits(parsed.hits ?? []);
+          } else {
+            setContentHits([]);
+          }
+          setContentSearching(false);
+        })
+        .catch(() => {
+          if (!live) return;
+          setContentHits([]);
+          setContentSearching(false);
+        });
+    }, 240);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [query, transport, isConnected]);
 
   useEffect(() => {
     if (filter === "archived") onEnsureArchivedAvatars();
@@ -378,7 +429,7 @@ export function HomeChatsView({
           <div className="search-bar">
             <Search size={14} />
             <input
-              placeholder="搜索对话、项目、模型或机器…"
+              placeholder="搜索对话、项目、模型或历史消息…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -401,6 +452,34 @@ export function HomeChatsView({
             </button>
           </div>
         </div>
+
+        {searching && query.trim().length >= 2 && (contentSearching || contentHits.length > 0) && (
+          <section className="m-search-hits" aria-label="历史消息命中">
+            <div className="m-search-hits-head">
+              <span>历史消息命中</span>
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                {contentSearching ? "检索中…" : `${contentHits.length} 条`}
+              </span>
+            </div>
+            {contentHits.map((hit, i) => (
+              <button
+                key={`${hit.agent_id}-${hit.seq}-${i}`}
+                type="button"
+                className="m-search-hit-row"
+                onClick={() => onOpenAgent(hit.agent_id)}
+              >
+                <div className="m-search-hit-top">
+                  <span className="m-search-hit-name">{hit.agent_name}</span>
+                  <span className="chip tiny">{hit.role === "user" ? "你" : hit.role === "topic" ? "主题" : "AI"}</span>
+                  {hit.archived && <span className="chip tiny">归档</span>}
+                  <span style={{ flex: 1 }} />
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>{relativeTime(hit.ts)}</span>
+                </div>
+                <div className="m-search-hit-snippet">{hit.snippet}</div>
+              </button>
+            ))}
+          </section>
+        )}
 
         {filter === "archived" ? (
           archivedList.length === 0 ? (

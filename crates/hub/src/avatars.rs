@@ -99,6 +99,8 @@ pub fn read(home: &Path, id: &str) -> Option<AttachmentContent> {
         mime: sniff(&bytes).to_owned(),
         size: bytes.len() as u64,
         data: STANDARD.encode(bytes),
+        offset: None,
+        eof: None,
     })
 }
 

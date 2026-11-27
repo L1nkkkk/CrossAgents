@@ -5,6 +5,7 @@ import type { HubInfo } from "@bindings/HubInfo";
 import type { RemoteNodeInfo } from "@bindings/RemoteNodeInfo";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { SessionSearchHit } from "@bindings/SessionSearchHit";
 import type { Work } from "@bindings/Work";
 import type { WorkDetail } from "@bindings/WorkDetail";
 import { deliveryOf, lastError, markAllSeen, useActivity, useDelivery, useUnread } from "./activity";
@@ -461,6 +462,8 @@ export function Sidebar({ route }: { route: string[] }) {
   const lessons = useFeatureSupport("lessons");
   const work = useFeatureSupport("work");
   const [query, setQuery] = useState("");
+  const [contentHits, setContentHits] = useState<SessionSearchHit[]>([]);
+  const [contentSearching, setContentSearching] = useState(false);
   const everyone = agents.data ?? [];
   usePulseSeeds(everyone);
   const archiving = useArchiveNote();
@@ -468,6 +471,36 @@ export function Sidebar({ route }: { route: string[] }) {
   const works = useWorks(work.show && !work.disabled);
   const workList = works.data ?? [];
   const searching = !!query.trim();
+
+  // Cross-session full-text search across past messages & topics (debounced).
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) {
+      setContentHits([]);
+      setContentSearching(false);
+      return;
+    }
+    let live = true;
+    setContentSearching(true);
+    const timer = window.setTimeout(() => {
+      void api.searchSessions(q, { archived: true, limit: 15 }).then(
+        (res) => {
+          if (!live) return;
+          setContentHits(res.hits);
+          setContentSearching(false);
+        },
+        () => {
+          if (!live) return;
+          setContentHits([]);
+          setContentSearching(false);
+        },
+      );
+    }, 220);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [query]);
   // A run or work event can change a round a row shows: mark what was read stale, and reread the
   // details whose rounds are open — only those. The list itself is refreshed by `useWorks`.
   useEffect(() => {
@@ -813,7 +846,40 @@ export function Sidebar({ route }: { route: string[] }) {
               );
             })}
             {archived.length > 0 && <div hidden={searching}><Archived agents={archived} isSession={isSession} /></div>}
-            {searching && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
+            {searching && query.trim().length >= 2 && (contentSearching || contentHits.length > 0) && (
+              <section className="sidebar-search-hits" aria-label="跨会话消息搜索结果">
+                <div className="sidebar-hits-head">
+                  <span>消息内容命中</span>
+                  <span className="muted tiny">
+                    {contentSearching ? "检索中…" : `${contentHits.length} 条`}
+                  </span>
+                </div>
+                {contentHits.map((hit, idx) => {
+                  const href = hit.message_id
+                    ? `#/s/${encodeURIComponent(hit.agent_id)}/m/${encodeURIComponent(hit.message_id)}`
+                    : `#/s/${encodeURIComponent(hit.agent_id)}`;
+                  const roleTag = hit.role === "user" ? "你" : hit.role === "topic" ? "主题" : "AI";
+                  return (
+                    <a
+                      key={`${hit.agent_id}-${hit.seq}-${idx}`}
+                      href={href}
+                      className="sidebar-hit-row"
+                      title={`${hit.agent_name} · ${hit.cwd}`}
+                    >
+                      <div className="sidebar-hit-top">
+                        <span className="sidebar-hit-name">{hit.agent_name}</span>
+                        <span className={`sidebar-hit-role ${hit.role}`}>{roleTag}</span>
+                        {hit.archived && <span className="sidebar-hit-role archived">归档</span>}
+                        <span className="spacer" />
+                        <span className="muted tiny">{ago(hit.ts)}</span>
+                      </div>
+                      <div className="sidebar-hit-snippet">{hit.snippet}</div>
+                    </a>
+                  );
+                })}
+              </section>
+            )}
+            {searching && !shown.length && !contentSearching && !contentHits.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
             {!query && loaded && !groups.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
           </div>
           {renameTarget && (

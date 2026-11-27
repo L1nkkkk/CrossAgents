@@ -15,14 +15,19 @@ import type { GitStatusResponse } from "@bindings/GitStatusResponse";
 import type { CliInstallAccepted } from "@bindings/CliInstallAccepted";
 import type { AttachmentContent } from "@bindings/AttachmentContent";
 import type { ListAvatarsResponse } from "@bindings/ListAvatarsResponse";
+import type { ListCouncilsResponse } from "@bindings/ListCouncilsResponse";
+import type { SearchSessionsResponse } from "@bindings/SearchSessionsResponse";
+import type { StartCouncilRequest } from "@bindings/StartCouncilRequest";
 import type { UploadAvatarsRequest } from "@bindings/UploadAvatarsRequest";
 import type { UploadAvatarsResponse } from "@bindings/UploadAvatarsResponse";
 import type { ImageContent } from "@bindings/ImageContent";
+import type { MediaContent } from "@bindings/MediaContent";
 import type { Task } from "@bindings/Task";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Agent } from "@bindings/Agent";
 import type { AgentSettingsRequest } from "@bindings/AgentSettingsRequest";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
+import type { CouncilRecord } from "@bindings/CouncilRecord";
 import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
 import type { ImportAccountRequest } from "@bindings/ImportAccountRequest";
 import type { ImportAccountsResponse } from "@bindings/ImportAccountsResponse";
@@ -382,6 +387,25 @@ export const api = {
   connectAgent: (key: string) => request<ConnectInfo>("POST", `/v1/agents/${enc(key)}/connect`),
   notes: (scope: "run" | "team", run?: string) =>
     request<ListNotesResponse>("GET", `/v1/notes?scope=${scope}${run ? `&run=${enc(run)}` : ""}`),
+  /** Full-text search across user inputs, assistant replies and conversation topics. */
+  searchSessions: (
+    q: string,
+    opts?: { agent?: string; cwd?: string; archived?: boolean; limit?: number },
+  ) => {
+    const p = new URLSearchParams({ q });
+    if (opts?.agent) p.set("agent", opts.agent);
+    if (opts?.cwd) p.set("cwd", opts.cwd);
+    if (opts?.archived) p.set("archived", "true");
+    if (opts?.limit !== undefined) p.set("limit", String(opts.limit));
+    return request<SearchSessionsResponse>("GET", `/v1/search/sessions?${p}`);
+  },
+  /** Lists recent multi-model council consultations, newest first. */
+  listCouncils: (limit = 25) => request<ListCouncilsResponse>("GET", `/v1/council?limit=${limit}`),
+  /** Fetches one multi-model council record (including live per-seat progress). */
+  getCouncil: (id: string) => request<CouncilRecord>("GET", `/v1/council/${enc(id)}`),
+  /** Starts a multi-model council consultation (wait=false returns immediately for live polling). */
+  startCouncil: (body: StartCouncilRequest, wait = false) =>
+    request<CouncilRecord>("POST", `/v1/council?wait=${wait ? "true" : "false"}`, body),
   /** The agents' reminders and watches, and the tasks being verified now (the 后台 tab). */
   background: () => request<BackgroundResponse>("GET", "/v1/background"),
   /** Cancels an agent's reminder, as `remind_cancel` does. */
@@ -390,8 +414,14 @@ export const api = {
   /** Which Claude settings the agent loads, from its next session. */
   agentSettings: (key: string, req: AgentSettingsRequest) => request<Agent>("POST", `/v1/agents/${enc(key)}/settings`, req),
   transcript: (key: string) => request<Transcript>("GET", `/v1/agents/${enc(key)}/transcript`),
-  /** One file sent to the agent, base64. */
-  attachment: (key: string, id: string) => request<AttachmentContent>("GET", `/v1/agents/${enc(key)}/attachments/${enc(id)}`),
+  /** One file sent to the agent, base64 (supports optional chunked offset/limit). */
+  attachment: (key: string, id: string, opts?: { offset?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.offset !== undefined) q.set("offset", String(opts.offset));
+    if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return request<AttachmentContent>("GET", `/v1/agents/${enc(key)}/attachments/${enc(id)}${qs ? `?${qs}` : ""}`);
+  },
   turnDiff: (key: string, messageId: string) =>
     request<TurnDiffResponse>("GET", `/v1/agents/${enc(key)}/turns/${enc(messageId)}/diff`),
   listPlugins: (node?: string) =>
@@ -615,6 +645,15 @@ export const api = {
    * directory or the system temp directory; anything else is an ApiError with the reason. */
   agentImage: (key: string, path: string) =>
     request<ImageContent>("GET", `/v1/agents/${enc(key)}/files/image?path=${enc(path)}`),
+  /** Any supported media or document (image, audio, video, PDF, text, file) referenced in a
+   * reply, fetched in base64 chunks so local desktop, remote desktop and mobile clients all play
+   * or preview it directly without local filesystem access. */
+  agentMedia: (key: string, path: string, opts?: { offset?: number; limit?: number }) => {
+    const q = new URLSearchParams({ path });
+    if (opts?.offset !== undefined) q.set("offset", String(opts.offset));
+    if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
+    return request<MediaContent>("GET", `/v1/agents/${enc(key)}/files/media?${q}`);
+  },
 };
 
 export function errorText(err: unknown): string {

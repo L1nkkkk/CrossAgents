@@ -450,20 +450,12 @@ pub struct SendMessageRequest {
 
 /// Limits on a message's files, the same in the hub and the GUI.
 pub const MAX_ATTACHMENTS: usize = 8;
-pub const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_ATTACHMENTS_TOTAL: usize = 20 * 1024 * 1024;
+pub const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+pub const MAX_ATTACHMENTS_TOTAL: usize = 40 * 1024 * 1024;
 
 /// Whether a file of this type can be sent with a message.
 pub fn attachment_mime_ok(mime: &str) -> bool {
-    matches!(
-        mime,
-        "image/png"
-            | "image/jpeg"
-            | "image/gif"
-            | "image/webp"
-            | "application/pdf"
-            | "application/json"
-    ) || mime.starts_with("text/")
+    crossagents_core::AttachmentKind::of_mime(mime).is_some()
 }
 
 /// A file as the client sends it.
@@ -486,6 +478,52 @@ pub struct AttachmentContent {
     pub size: u64,
     /// The bytes, base64.
     pub data: String,
+    /// Byte offset of `data` when fetched in chunks (`?offset=&limit=`); absent for whole-file reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub offset: Option<u64>,
+    /// Whether this chunk reaches the end of the file (`true` for whole-file reads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub eof: Option<bool>,
+}
+
+/// Coarse media classification for inline playback/preview on desktop and mobile clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    Audio,
+    Video,
+    Pdf,
+    Text,
+    File,
+}
+
+/// `GET /v1/agents/{key}/files/media?path=&offset=&limit=`: any supported media or document
+/// referenced in a reply (image, audio, video, PDF, text, file), served as base64 chunks so
+/// desktop bridges, remote tunnels, and mobile WebRTC/iroh clients can play or preview it
+/// directly without local filesystem access.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MediaContent {
+    /// Canonical path on the machine that owns the file.
+    pub path: String,
+    /// Base file name for UI display and downloads.
+    pub name: String,
+    pub mime: String,
+    pub kind: MediaKind,
+    /// Total file size in bytes.
+    #[ts(type = "number")]
+    pub size: u64,
+    /// Byte offset of `data` inside the file.
+    #[ts(type = "number")]
+    pub offset: u64,
+    /// Chunk bytes, base64 (standard alphabet, padded).
+    pub data: String,
+    /// `true` once `offset + decoded(data).len() >= size`.
+    pub eof: bool,
 }
 
 /// `GET /v1/agents/{key}/files/image?path=`: an image a tool call named by a path (a
@@ -2200,8 +2238,8 @@ pub struct LandRequest {
 }
 
 /// `POST /v1/runs/{key}/policy`: a person changes how an already started run continues by
-/// itself, and may hand its allowance out again. Only the continuation policy moves; every
-/// other part of the run's policy stays as it was. Absent fields keep what the run has.
+/// itself, hands its allowance out again, or sets phase-based lead models. Absent fields keep
+/// what the run has.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct UpdateRunPolicyRequest {
@@ -2214,6 +2252,48 @@ pub struct UpdateRunPolicyRequest {
     /// false.
     #[serde(default)]
     pub reset_attempts: bool,
+    /// Absent: keep the run's current `lead_models`. `null`: clear phase model switching.
+    #[serde(
+        default,
+        deserialize_with = "stated",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(optional)]
+    pub lead_models: Option<Option<crossagents_core::LeadPhaseModels>>,
+}
+
+/// `GET /v1/search/sessions`: full-text matches across user inputs, assistant replies and topics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SearchSessionsResponse {
+    pub query: String,
+    pub hits: Vec<crossagents_core::SessionSearchHit>,
+}
+
+/// `POST /v1/council`: consult 2..=5 models or teammates in parallel on one question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StartCouncilRequest {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub mode: crossagents_core::CouncilMode,
+    pub members: Vec<crossagents_core::CouncilMemberSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub requested_by: Option<AgentId>,
+}
+
+/// `GET /v1/council`: recent council records, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListCouncilsResponse {
+    pub councils: Vec<crossagents_core::CouncilRecord>,
 }
 
 /// Automatic continuation for a run that is already going: on or off, and its limits. The
@@ -3748,12 +3828,24 @@ pub struct NodeRpcCall {
     pub op: NodeRpcOp,
 }
 
+/// Request to read a chunk of a media/document file from a remote node (confined to `cwd` or temp).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeReadMediaRequest {
+    pub cwd: String,
+    pub path: String,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
 /// Remote operation executed by a connected node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NodeRpcOp {
     Exec(NodeExecRequest),
     ReadFile(NodeReadFileRequest),
+    ReadMedia(NodeReadMediaRequest),
     WriteFile(NodeWriteFileRequest),
     EditFile(NodeEditFileRequest),
     ListFiles(NodeListFilesRequest),
@@ -3882,6 +3974,10 @@ mod tests {
         crossagents_core::Candidate::export_all(&cfg).unwrap();
         crossagents_core::PermissionPolicy::export_all(&cfg).unwrap();
         crossagents_core::TaskBudget::export_all(&cfg).unwrap();
+        crossagents_core::LeadPhaseModels::export_all(&cfg).unwrap();
+        crossagents_core::SessionSearchHit::export_all(&cfg).unwrap();
+        crossagents_core::CouncilRecord::export_all(&cfg).unwrap();
+        crossagents_core::CouncilMemberSpec::export_all(&cfg).unwrap();
     }
 
     /// The list `/v1/info` carries: a hub that predates the field omits it, and the GUI hides

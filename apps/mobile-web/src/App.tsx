@@ -722,6 +722,7 @@ export function App() {
           snapshotSavedAt={snapshotSavedAt}
           isConnected={isConnected}
           linkStatus={linkStatus}
+          transport={transport}
           refreshing={refreshing}
           onRefresh={() => (transport ? void bootstrap(transport) : void connect(pairing))}
           onOpenAgent={(id) => setOpenAgentId(id)}

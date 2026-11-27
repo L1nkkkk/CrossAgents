@@ -7,4 +7,12 @@ export type AttachmentContent = { id: string, mime: string, size: number,
 /**
  * The bytes, base64.
  */
-data: string, };
+data: string, 
+/**
+ * Byte offset of `data` when fetched in chunks (`?offset=&limit=`); absent for whole-file reads.
+ */
+offset?: number, 
+/**
+ * Whether this chunk reaches the end of the file (`true` for whole-file reads).
+ */
+eof?: boolean, };

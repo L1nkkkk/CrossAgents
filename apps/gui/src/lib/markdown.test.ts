@@ -111,3 +111,18 @@ test("inline: links to local files become file nodes, with their line", () => {
   assert.deepEqual(parseInline("[x](file:///etc/passwd)"), [{ t: "text", text: "[x](file:///etc/passwd)" }]);
   assert.deepEqual(parseInline("[x](vbscript:msgbox)"), [{ t: "text", text: "[x](vbscript:msgbox)" }]);
 });
+
+test("inline: audio, video, pdf and text embeds become media nodes", () => {
+  assert.deepEqual(parseInline("听这段 ![TTS 语音](out/tts.mp3)"), [
+    { t: "text", text: "听这段 " },
+    { t: "media", kind: "audio", alt: "TTS 语音", path: "out/tts.mp3" },
+  ]);
+  assert.deepEqual(parseInline("点播 [演示录音](C:/tmp/voice.wav)"), [
+    { t: "text", text: "点播 " },
+    { t: "media", kind: "audio", alt: "演示录音", path: "C:/tmp/voice.wav" },
+  ]);
+  assert.deepEqual(parseInline("![演示](demo.mp4)"), [{ t: "media", kind: "video", alt: "演示", path: "demo.mp4" }]);
+  assert.deepEqual(parseInline("![报告](docs/report.pdf)"), [{ t: "media", kind: "pdf", alt: "报告", path: "docs/report.pdf" }]);
+  assert.deepEqual(parseInline("![摘要](summary.txt)"), [{ t: "media", kind: "text", alt: "摘要", path: "summary.txt" }]);
+  assert.deepEqual(parseInline("![打包](dist/out.zip)"), [{ t: "media", kind: "file", alt: "打包", path: "dist/out.zip" }]);
+});

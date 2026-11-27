@@ -122,6 +122,54 @@ impl TaskBudget {
     }
 }
 
+/// Automatic phase-based model switching for a run's lead (docs/tasks/COORDINATION.md §9):
+/// use a stronger model for planning and final verification while switching to a faster/cheaper
+/// model during worker coordination. Any omitted field leaves the lead's current model unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct LeadPhaseModels {
+    /// Model while planning (start of run and if a plan is rejected back to planning).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Model while coordinating workers (once a plan is approved and tasks run).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinate: Option<String>,
+    /// Model when all tasks end for final review/verification/landing (falls back to `plan` if omitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify: Option<String>,
+}
+
+/// Which phase of a run the lead is entering, for [`LeadPhaseModels`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeadPhase {
+    Plan,
+    Coordinate,
+    Verify,
+}
+
+impl LeadPhaseModels {
+    pub fn is_set(&self) -> bool {
+        self.plan.as_deref().is_some_and(|s| !s.trim().is_empty())
+            || self
+                .coordinate
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || self.verify.as_deref().is_some_and(|s| !s.trim().is_empty())
+    }
+
+    pub fn model_for(&self, phase: LeadPhase) -> Option<&str> {
+        fn clean(s: &Option<String>) -> Option<&str> {
+            s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        }
+        match phase {
+            LeadPhase::Plan => clean(&self.plan),
+            LeadPhase::Coordinate => clean(&self.coordinate),
+            LeadPhase::Verify => clean(&self.verify).or_else(|| clean(&self.plan)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RunPolicy {
@@ -151,6 +199,10 @@ pub struct RunPolicy {
     /// Models a recruit may run (exact ids); absent: any model a logged-in account can run.
     #[serde(default)]
     pub spawn_models: Option<Vec<String>>,
+    /// Automatic lead model switching by phase (`plan` / `coordinate` / `verify`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub lead_models: Option<LeadPhaseModels>,
     /// Whether assignees may split their tasks and hand parts on (H1-5).
     #[serde(default)]
     pub delegate: bool,
@@ -193,6 +245,7 @@ impl Default for RunPolicy {
             spawn: yes(),
             max_agents: default_max_agents(),
             spawn_models: None,
+            lead_models: None,
             delegate: false,
             approvals: ApprovalPolicy::default(),
             rework_new_session_tokens: None,
@@ -299,5 +352,25 @@ mod tests {
         assert_eq!(effective.max_minutes, Some(45));
         assert_eq!(effective.max_idle_minutes, Some(20));
         assert!(!TaskBudget::default().is_set());
+    }
+
+    #[test]
+    fn lead_phase_models_falls_back_from_verify_to_plan_and_ignores_blanks() {
+        let m = LeadPhaseModels {
+            plan: Some("claude-opus-4-6".into()),
+            coordinate: Some("claude-sonnet-4-6".into()),
+            verify: Some("   ".into()),
+        };
+        assert!(m.is_set());
+        assert_eq!(m.model_for(LeadPhase::Plan), Some("claude-opus-4-6"));
+        assert_eq!(m.model_for(LeadPhase::Coordinate), Some("claude-sonnet-4-6"));
+        assert_eq!(m.model_for(LeadPhase::Verify), Some("claude-opus-4-6"));
+
+        let explicit = LeadPhaseModels {
+            verify: Some("gpt-5.4".into()),
+            ..m
+        };
+        assert_eq!(explicit.model_for(LeadPhase::Verify), Some("gpt-5.4"));
+        assert!(!LeadPhaseModels::default().is_set());
     }
 }

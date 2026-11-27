@@ -200,11 +200,11 @@ impl Driver for CodexNativeDriver {
             rate_limits: true,
             permission_callback: true,
             compaction: true,
-            // Images go as `localImage`; text is inlined or named by path. Codex has no
-            // document input, so a PDF would only be a path it cannot read as one.
+            // Images go as `localImage`; text is inlined; PDFs, audio, video and other files are
+            // passed as path references so Codex can inspect or process them with tools.
             attachments: Some(AttachmentSupport {
                 image: true,
-                pdf: false,
+                pdf: true,
                 text: true,
             }),
         }

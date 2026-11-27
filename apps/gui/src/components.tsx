@@ -55,7 +55,8 @@ import type { RunStatus } from "@bindings/RunStatus";
 import type { TaskStatus } from "@bindings/TaskStatus";
 import { api, errorText } from "./api";
 import { useHubData } from "./hub";
-import { parseBlocks, parseInline, softBreaks, type Block, type Inline } from "./lib/markdown";
+import { parseBlocks, parseInline, softBreaks, type Block, type Inline, type InlineMediaKind } from "./lib/markdown";
+import { MediaCard } from "./MediaCard";
 import { codeFileTarget, docLinkPath } from "./lib/filelinks";
 import type { FileScope } from "./api";
 import { openFile } from "./FileViewer";
@@ -441,6 +442,8 @@ function renderInline(spans: Inline[]): ReactNode[] {
         );
       case "image":
         return <ProseImage key={i} alt={s.alt} src={s.src} path={s.path} />;
+      case "media":
+        return <ProseMedia key={i} kind={s.kind} alt={s.alt} path={s.path} />;
       case "br":
         return <br key={i} />;
     }
@@ -507,6 +510,13 @@ function ProseImage({ alt, src, path }: { alt: string; src?: string; path?: stri
   if (path && !agent) return <FileLink path={path}>{alt || path}</FileLink>;
   if (loaded?.error) return <span className="tool-image-error">{path}：{loaded.error}</span>;
   return <span className="tool-image-loading">{path}：加载中…</span>;
+}
+
+/** `![alt](path)` or `[label](audio/video)` in a reply: inline player or preview card via hub media API. */
+function ProseMedia({ kind, alt, path }: { kind: InlineMediaKind; alt: string; path: string }) {
+  const agent = useContext(AgentImageContext);
+  if (!agent) return <FileLink path={path}>{alt || path}</FileLink>;
+  return <MediaCard source={{ kind: "agentMedia", agent, path }} mediaKind={kind} label={alt || path} />;
 }
 
 /** `git diff --stat` with the +/- bars coloured. */

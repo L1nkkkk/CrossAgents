@@ -13,9 +13,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, Attachment, ClaimRole, CoreError, Envelope, EventBus,
-    EventKind, HandoffKind, HumanItemKind, ISSUE_PREFIX, LeadPlace, MessageId, MessageSource,
-    NoteScope, NoticeClass, PlannedTask, Role, Run, RunConfig, RunId, RunMode, RunPolicy,
-    RunStatus, StopReason, Store, Task, TaskId, TaskReport, TaskRunOutcome, TaskStatus,
+    EventKind, HandoffKind, HumanItemKind, ISSUE_PREFIX, LeadPhase, LeadPlace, MessageId,
+    MessageSource, NoteScope, NoticeClass, PlannedTask, Role, Run, RunConfig, RunId, RunMode,
+    RunPolicy, RunStatus, StopReason, Store, Task, TaskId, TaskReport, TaskRunOutcome, TaskStatus,
     WorkspaceVcs,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -961,6 +961,9 @@ impl Orchestrator {
             attachments: new.attachments,
             ..Envelope::new(kickoff_from, kickoff_text)
         };
+        // If the run configures automatic phase model switching, put the lead on its planning
+        // model before delivering the kickoff turn.
+        self.apply_lead_phase_model(&run, LeadPhase::Plan).await;
         let host = self.host.clone();
         let lead = run.planner;
         // A round the lead asked for opens a new session. The lead is idle when the round
@@ -1600,6 +1603,8 @@ impl Orchestrator {
         // for the task that names it, so the plan writes the workflow once.
         self.link_next(run).await?;
         self.set_run_status(run, RunStatus::Running, None).await?;
+        self.apply_lead_phase_model(run, LeadPhase::Coordinate)
+            .await;
         let mut text = format!(
             "The plan of run {} was approved: {} task(s) start as their dependencies allow.
 Who does each task: {}
@@ -1637,6 +1642,7 @@ The person changed: {}",
         run.plan.clear();
         self.set_run_status(&mut run, RunStatus::Planning, Some(reason.clone()))
             .await?;
+        self.apply_lead_phase_model(&run, LeadPhase::Plan).await;
         // The person's words, as they wrote them.
         self.deliver(
             run.planner,
@@ -1722,6 +1728,75 @@ The person changed: {}",
         Ok(run)
     }
 
+    /// Switches the run's lead to the model configured for `phase` in `run.config.policy.lead_models`,
+    /// when set and different from the lead's current model. Failures are logged and noted without
+    /// blocking the run transition.
+    pub(crate) async fn apply_lead_phase_model(&self, run: &Run, phase: LeadPhase) {
+        let Some(target) = run
+            .config
+            .policy
+            .lead_models
+            .as_ref()
+            .and_then(|m| m.model_for(phase))
+        else {
+            return;
+        };
+        let current = match self.store.get_agent(&AgentKey::Id(run.planner)).await {
+            Ok(agent) => agent.model,
+            Err(err) => {
+                tracing::warn!(run = %run.id, lead = %run.planner, error = %err, "cannot read lead before phase model switch");
+                return;
+            }
+        };
+        if current.as_deref() == Some(target) {
+            return;
+        }
+        let phase_name = match phase {
+            LeadPhase::Plan => "planning",
+            LeadPhase::Coordinate => "coordination",
+            LeadPhase::Verify => "verification & landing",
+        };
+        match self.host.set_model(run.planner, Some(target.to_owned())).await {
+            Ok(_) => {
+                tracing::info!(
+                    run = %run.id,
+                    lead = %run.planner,
+                    phase = phase_name,
+                    model = target,
+                    "switched lead model for run phase"
+                );
+                let _ = self
+                    .host
+                    .tell_later(
+                        run.planner,
+                        &format!("run:{}:phase_model", run.id),
+                        &format!("Lead model switched to `{target}` for {phase_name}."),
+                    )
+                    .await;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    run = %run.id,
+                    lead = %run.planner,
+                    phase = phase_name,
+                    model = target,
+                    error = %err,
+                    "phase model switch failed; keeping current lead model"
+                );
+                let _ = self
+                    .host
+                    .tell_later(
+                        run.planner,
+                        &format!("run:{}:phase_model", run.id),
+                        &format!(
+                            "Could not switch lead model to `{target}` for {phase_name} ({err}); staying on current model."
+                        ),
+                    )
+                    .await;
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------------------
     // Scheduling
 
@@ -1783,6 +1858,7 @@ The person changed: {}",
         // Every task ended: the lead lands and closes the run (run_land, run_finish).
         let tasks = self.store.list_tasks(run.id).await?;
         if !tasks.is_empty() && tasks.iter().all(|t| t.status.is_terminal()) {
+            self.apply_lead_phase_model(run, LeadPhase::Verify).await;
             let merged = tasks
                 .iter()
                 .filter(|t| t.status == TaskStatus::Merged)

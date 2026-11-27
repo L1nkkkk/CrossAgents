@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::account::{Account, EgressRecord};
 use crate::claim::AgentClaim;
+use crate::council::CouncilRecord;
 use crate::error::CoreError;
 use crate::event::{Event, EventKind};
 use crate::expertise::{
@@ -29,6 +30,36 @@ impl AgentKey {
         s.parse()
             .map_or_else(|_| Self::Name(s.to_owned()), Self::Id)
     }
+}
+
+/// Filters for cross-session full-text search (`Store::search_sessions`).
+#[derive(Debug, Clone, Default)]
+pub struct SessionSearchQuery {
+    pub query: String,
+    pub agent: Option<AgentId>,
+    pub cwd: Option<String>,
+    pub include_archived: bool,
+    pub limit: usize,
+}
+
+/// One matching message or topic across all stored conversations.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SessionSearchHit {
+    pub agent_id: AgentId,
+    pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    pub cwd: String,
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<MessageId>,
+    /// `"user"` | `"assistant"` | `"topic"`
+    pub role: String,
+    pub snippet: String,
+    pub ts: chrono::DateTime<chrono::Utc>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub seq: u64,
 }
 
 #[async_trait]
@@ -613,5 +644,34 @@ pub trait Store: Send + Sync {
     ) -> Result<Option<(Option<MessageId>, String)>, CoreError> {
         let _ = id;
         Ok(None)
+    }
+
+    /// Full-text search over user inputs, assistant replies and topics across sessions.
+    async fn search_sessions(
+        &self,
+        query: &SessionSearchQuery,
+    ) -> Result<Vec<SessionSearchHit>, CoreError> {
+        let _ = query;
+        Ok(Vec::new())
+    }
+
+    /// Inserts or updates a persisted multi-model council record.
+    async fn upsert_council(&self, council: &CouncilRecord) -> Result<(), CoreError> {
+        let _ = council;
+        Err(CoreError::Unsupported("councils".into()))
+    }
+
+    /// Loads one persisted multi-model council record by id.
+    async fn get_council(&self, id: &str) -> Result<CouncilRecord, CoreError> {
+        Err(CoreError::NotFound {
+            kind: "council",
+            id: id.to_owned(),
+        })
+    }
+
+    /// Lists persisted council records, newest first.
+    async fn list_councils(&self, limit: usize) -> Result<Vec<CouncilRecord>, CoreError> {
+        let _ = limit;
+        Ok(Vec::new())
     }
 }

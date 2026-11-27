@@ -27,9 +27,10 @@ use crossagents_api_types::{
     FileSearchResponse, FileStatusEntry, FileStatusResponse, FileTreeResponse, ListNodesResponse,
     NodeDirEntry, NodeDirsResponse, NodeEditFileRequest, NodeEditFileResponse, NodeExecRequest,
     NodeExecResponse, NodeListFilesRequest, NodeListFilesResponse, NodeReadFileRequest,
-    NodeReadFileResponse, NodeRpcOp, NodeRpcReply, NodeSearchFilesRequest, NodeSearchFilesResponse,
-    NodeWriteFileRequest, NodeWriteFileResponse, RemoteNodeInfo, ResolvePathsRequest,
-    ResolvePathsResponse, ResolvedPath, ToolInfo,
+    NodeReadFileResponse, NodeReadMediaRequest, NodeRpcOp, NodeRpcReply, NodeSearchFilesRequest,
+    NodeSearchFilesResponse, NodeWriteFileRequest, NodeWriteFileResponse, RemoteNodeInfo,
+    ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, ToolInfo,
+    MediaContent,
 };
 use crossagents_core::{Agent, CoreError, Device, DeviceKind, DeviceLevel, DeviceOs};
 use futures::Stream;
@@ -631,6 +632,30 @@ pub(crate) async fn remote_agent_files_content(
         }
         Err(err) => Err(err.into()),
     }
+}
+
+pub(crate) async fn remote_agent_files_media(
+    state: &AppState,
+    agent: &Agent,
+    raw_path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> ApiResult<Json<MediaContent>> {
+    let (info, root, _is_windows) = resolve_remote_agent_node(state, agent).await?;
+    let content: MediaContent = state
+        .remote_nodes
+        .call(
+            &info.id,
+            NodeRpcOp::ReadMedia(NodeReadMediaRequest {
+                cwd: root,
+                path: raw_path.to_owned(),
+                offset,
+                limit,
+            }),
+            FILE_OP_TIMEOUT,
+        )
+        .await?;
+    Ok(Json(content))
 }
 
 pub(crate) async fn remote_agent_files_status(

@@ -1,3 +1,5 @@
+import { Scale } from "lucide-react";
+import { CouncilModal } from "../CouncilModal";
 import { writeClipboard } from "../lib/clipboard";
 import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { shortcut, shortcutPlatform } from "../lib/shortcuts";
@@ -127,6 +129,7 @@ export function SessionView({
   onClose,
   onClosePane,
   questionId,
+  focusMessageId,
   header,
   top,
   bottom,
@@ -136,6 +139,7 @@ export function SessionView({
 }: {
   name: string;
   questionId?: string;
+  focusMessageId?: string;
   onClose?: () => void;
   /** Closes this conversation's half of a split; unlike `onClose`, it is still the main one. */
   onClosePane?: () => void;
@@ -151,6 +155,7 @@ export function SessionView({
   const tree = useRunTree();
   const agents = useAgents();
   const [draft, setDraft] = useState("");
+  const [councilOpen, setCouncilOpen] = useState(false);
   const agentId = transcript?.agent.id;
   const ledRuns = useRunsLedBy(agentId);
   const execution = useHubData(
@@ -313,12 +318,12 @@ export function SessionView({
     <CiteContext.Provider value={agent.archived_at ? undefined : citeText}>
     <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
       <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)} onFocusCapture={() => focusSession(name)}>
-        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose ?? onClosePane} />}
+        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onOpenCouncil={() => setCouncilOpen(true)} onClose={onClose ?? onClosePane} />}
         <WorkContext name={name} agent={agent} tasks={tasks} led={led} agents={everyone} execution={execution.data?.execution} />
         <ExecutionBar agent={agent} execution={execution.data?.execution} reload={execution.reload} />
         <NoticeBar agent={agent} />
         <LiveInfo.Provider value={live}>
-        <Conversation key={agent.id} agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top} rounds={rounds}>
+        <Conversation key={agent.id} agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top} rounds={rounds} focusMessageId={focusMessageId}>
           {outgoing.map((m) => (
             <Sending key={m.key} message={m} agent={agent} />
           ))}
@@ -372,6 +377,14 @@ export function SessionView({
             <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} delivery={transcript.delivery} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
           )}
         </div>
+        {councilOpen && (
+          <CouncilModal
+            agent={agent}
+            initialQuestion={draft}
+            onClose={() => setCouncilOpen(false)}
+            onSendDigest={(md) => setDraft(md)}
+          />
+        )}
       </section>
     </SideSlot.Provider>
     </CiteContext.Provider>
@@ -545,6 +558,7 @@ function Header({
   driver,
   tasks,
   rail,
+  onOpenCouncil,
   onClose,
 }: {
   agent: Agent;
@@ -554,6 +568,7 @@ function Header({
   tasks: { run: Run; task: RunDetail["tasks"][number] }[];
   /** The info rail is showing the model, context and tasks: the header leaves them out. */
   rail: boolean;
+  onOpenCouncil?: () => void;
   onClose?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -633,6 +648,20 @@ function Header({
               <Icon name="shrink" size={13} />
               {/* Compacting is under way: that word stays even on a narrow topbar. */}
               <span className={compact.busy ? undefined : "topbar-label"}>{compact.busy ? "压缩中…" : "压缩上下文"}</span>
+            </span>
+          </button>
+        )}
+        {onOpenCouncil && (
+          <button
+            type="button"
+            className="ghost small"
+            onClick={onOpenCouncil}
+            title="发起多模型 Council（并行对比 / 2 轮交叉互评）"
+            aria-label="多模型 Council"
+          >
+            <span className="row" style={{ gap: 5 }}>
+              <Scale size={13} />
+              <span className="topbar-label">Council</span>
             </span>
           </button>
         )}
@@ -935,6 +964,7 @@ function Conversation({
   tree,
   top,
   rounds,
+  focusMessageId,
   children,
 }: {
   agent: Agent;
@@ -949,6 +979,8 @@ function Conversation({
   top?: ReactNode;
   /** A work group's rounds, marked where each began (docs/tasks/G1.md §3.5). */
   rounds?: RoundMark[];
+  /** Cross-session search jump target: load earlier turns if needed and scroll/highlight it. */
+  focusMessageId?: string;
   children?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -987,6 +1019,9 @@ function Conversation({
     const target = findTurn(el, id);
     if (target) {
       target.scrollIntoView({ block: "start", behavior: "smooth" });
+      target.classList.remove("turn-flash");
+      void target.offsetWidth;
+      target.classList.add("turn-flash");
       return;
     }
     const index = turns.findIndex((turn) => turn.message_id === id);
@@ -994,6 +1029,14 @@ function Conversation({
     pendingScroll.current = { id };
     setFirstTurn(turns[Math.max(0, index - 10)].message_id);
   }
+
+  const jumpedRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!focusMessageId || jumpedRef.current === focusMessageId) return;
+    if (!turns.some((t) => t.message_id === focusMessageId)) return;
+    jumpedRef.current = focusMessageId;
+    jumpTo(focusMessageId);
+  }, [focusMessageId, turns]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -1003,8 +1046,12 @@ function Conversation({
       pendingScroll.current = null;
       const target = findTurn(el, pending.id);
       if (!target) return;
-      if (pending.offset === undefined) target.scrollIntoView({ block: "start" });
-      else el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - pending.offset;
+      if (pending.offset === undefined) {
+        target.scrollIntoView({ block: "start" });
+        target.classList.remove("turn-flash");
+        void target.offsetWidth;
+        target.classList.add("turn-flash");
+      } else el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - pending.offset;
     } else if (stick.current) {
       el.scrollTop = el.scrollHeight;
     }

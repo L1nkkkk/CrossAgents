@@ -5,6 +5,9 @@
 // markdown.test.ts.
 
 import { fileLinkTarget } from "./filelinks.ts";
+import { mediaKindOfPath } from "./attachments.ts";
+
+export type InlineMediaKind = "audio" | "video" | "pdf" | "text" | "file";
 
 export type Inline =
   | { t: "text"; text: string }
@@ -15,6 +18,8 @@ export type Inline =
   | { t: "file"; path: string; line?: number; children: Inline[] }
   /** `![alt](target)`: an embedded image, or a local file the hub is asked for. */
   | { t: "image"; alt: string; src?: string; path?: string }
+  /** `![label](path)` (or `[label](audio/video)`): inline playable audio/video or previewable document. */
+  | { t: "media"; kind: InlineMediaKind; alt: string; path: string }
   | { t: "br" };
 
 export type ListItem = { text: string; children: Block[] };
@@ -182,12 +187,15 @@ export function softBreaks(text: string): string {
 
 const INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|~~([\s\S]+?)~~|\*([^\s*](?:[\s\S]*?[^\s*])?)\*|(?<![\w])_([^\s_](?:[\s\S]*?[^\s_])?)_(?![\w])|!\[([^\]]*)\]\(([^)\s]+)\)|\[([^\]]+)\]\(([^)\s]+)\)|\n/;
 
-/** An image reference as a node; a web address stays a link, since the page loads no remote images. */
+/** An embedded media or image reference; web addresses stay links since the page loads no remote media. */
 function imageNode(alt: string, target: string, all: string): Inline {
   if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(target)) return { t: "image", alt, src: target };
   if (/^https?:/i.test(target)) return { t: "link", href: target, children: [{ t: "text", text: alt || target }] };
   const file = fileLinkTarget(target);
-  return file ? { t: "image", alt, path: file.path } : { t: "text", text: all };
+  if (!file) return { t: "text", text: all };
+  const kind = mediaKindOfPath(file.path);
+  if (kind && kind !== "image") return { t: "media", kind, alt, path: file.path };
+  return { t: "image", alt, path: file.path };
 }
 
 /** Inline spans of `text`. Links keep only http(s) and mailto targets and local files; others stay text. */
@@ -211,8 +219,18 @@ export function parseInline(text: string): Inline[] {
       if (/^(https?:|mailto:)/i.test(href)) out.push({ t: "link", href, children: parseInline(label) });
       else {
         const file = fileLinkTarget(href);
-        if (file) out.push(file.line ? { t: "file", path: file.path, line: file.line, children: parseInline(label) } : { t: "file", path: file.path, children: parseInline(label) });
-        else out.push({ t: "text", text: all });
+        if (file) {
+          const kind = !file.line ? mediaKindOfPath(file.path) : undefined;
+          if (kind === "audio" || kind === "video") {
+            out.push({ t: "media", kind, alt: label, path: file.path });
+          } else {
+            out.push(
+              file.line
+                ? { t: "file", path: file.path, line: file.line, children: parseInline(label) }
+                : { t: "file", path: file.path, children: parseInline(label) },
+            );
+          }
+        } else out.push({ t: "text", text: all });
       }
     } else out.push({ t: "br" });
     rest = rest.slice(m.index + all.length);

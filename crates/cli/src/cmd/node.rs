@@ -811,11 +811,30 @@ pub async fn execute_op(default_cwd: &Path, op: NodeRpcOp) -> NodeRpcReply {
     match op {
         NodeRpcOp::Exec(req) => to_reply(exec_local(default_cwd, req).await),
         NodeRpcOp::ReadFile(req) => to_reply(read_local(default_cwd, req)),
+        NodeRpcOp::ReadMedia(req) => to_reply(read_media_local(default_cwd, req)),
         NodeRpcOp::WriteFile(req) => to_reply(write_local(default_cwd, req)),
         NodeRpcOp::EditFile(req) => to_reply(edit_local(default_cwd, req)),
         NodeRpcOp::ListFiles(req) => to_reply(list_local(default_cwd, req)),
         NodeRpcOp::SearchFiles(req) => to_reply(search_local(default_cwd, req)),
     }
+}
+
+fn read_media_local(
+    default_cwd: &Path,
+    req: crossagents_api_types::NodeReadMediaRequest,
+) -> Result<crossagents_api_types::MediaContent> {
+    let root = if req.cwd.trim().is_empty() {
+        default_cwd.to_path_buf()
+    } else {
+        resolve_path(default_cwd, &req.cwd)
+    };
+    let normalized = crossagents_hub::media::normalize_input_path(&req.path);
+    crossagents_hub::paths::refuse_remote(&root, &normalized)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let abs = crossagents_hub::media::locate(&root, None, &req.path)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    crossagents_hub::media::load_chunk(&abs, &req.path, req.offset, req.limit)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn to_reply<T: serde::Serialize>(res: Result<T>) -> NodeRpcReply {

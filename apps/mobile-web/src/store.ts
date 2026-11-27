@@ -523,6 +523,37 @@ export async function compressImageForUpload(
   };
 }
 
+export async function prepareFileForUpload(
+  file: File,
+  mime: string,
+): Promise<{ previewUrl?: string; size: number; upload: AttachmentUpload }> {
+  if (/^image\/(png|jpeg|webp)$/i.test(mime)) {
+    const compressed = await compressImageForUpload(file);
+    return {
+      previewUrl: compressed.previewUrl,
+      size: Math.floor((compressed.upload.data.length * 3) / 4),
+      upload: compressed.upload,
+    };
+  }
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`));
+    reader.readAsDataURL(file);
+  });
+  const comma = dataUrl.indexOf(",");
+  const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  return {
+    previewUrl: mime.startsWith("image/") ? dataUrl : undefined,
+    size: file.size,
+    upload: {
+      name: file.name || "attachment",
+      mime,
+      data: base64,
+    },
+  };
+}
+
 export function extractErrorMessage(status: number, body: string): string {
   try {
     const parsed = JSON.parse(body) as { error?: { message?: string } };

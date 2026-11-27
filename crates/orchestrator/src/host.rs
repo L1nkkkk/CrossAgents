@@ -225,6 +225,20 @@ pub trait AgentHost: Send + Sync {
         let _ = agent;
         Ok(false)
     }
+    /// Runs a multi-model council consultation (2..=5 seats in parallel, with an optional
+    /// cross-critique round) and returns the persisted record.
+    async fn run_council(
+        &self,
+        caller: AgentId,
+        question: String,
+        context: Option<String>,
+        mode: crossagents_core::CouncilMode,
+        members: Vec<crossagents_core::CouncilMemberSpec>,
+        cwd: Option<String>,
+    ) -> Result<crossagents_core::CouncilRecord, CoreError> {
+        let _ = (caller, question, context, mode, members, cwd);
+        Err(CoreError::Unsupported("council".into()))
+    }
 }
 
 /// One tool of an enabled extension, as the orchestrator lists it for an agent

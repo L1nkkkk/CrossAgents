@@ -226,6 +226,22 @@ const zhCN = {
   "worker.notLoggedIn": "未登录",
   "worker.notInstalled": "CLI 未安装",
   "worker.unknownPick": "认不出这个人选：{pick}",
+
+  "phaseModels.summary": "阶段换档 · {parts}",
+  "phaseModels.off": "阶段换档：未启用（始终使用主导当前模型）",
+  "phaseModels.planTag": "规划 {model}",
+  "phaseModels.coordinateTag": "协调 {model}",
+  "phaseModels.verifyTag": "验收 {model}",
+  "phaseModels.hint": "自动随 Run 阶段切换主导{lead}的模型：规划用强模型，协调期换快模型省费，验收切回强模型。",
+  "phaseModels.planLabel": "规划 (Plan)",
+  "phaseModels.coordinateLabel": "协调 (Coordinate)",
+  "phaseModels.verifyLabel": "验收 (Verify)",
+  "phaseModels.unchanged": "不切换",
+  "phaseModels.followPlan": "沿用规划 ({model})",
+  "phaseModels.saving": "保存中…",
+  "phaseModels.save": "保存换档",
+  "phaseModels.clear": "清空",
+  "phaseModels.saved": "已保存",
 } as const;
 
 export type Key = keyof typeof zhCN;

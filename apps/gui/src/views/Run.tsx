@@ -419,6 +419,7 @@ export function RunRail({
       <RailCard id="run-policy" title="策略与预算">
         <PolicyChip run={run} />
         <ContinuationMeta key={run.id} run={run} agents={agents} onDone={onPolicyChange} />
+        <LeadPhaseModelsCard key={`${run.id}:pm`} run={run} agents={agents} onDone={onPolicyChange} />
       </RailCard>
       <RailCard id="run-cost" title="费用">
         <RunCostBar runId={run.id} />
@@ -613,6 +614,125 @@ function ContinuationMeta({ run, agents, onDone }: { run: Run; agents?: Agent[];
         {note && <span className="small muted">{t(note)}</span>}
       </div>
       {!canReset(run) && <p className="small muted">{t("continuation.resetDisabled")}</p>}
+      <ErrorBox error={error} />
+    </details>
+  );
+}
+
+/**
+ * Phase-based lead model switching: lets the user assign distinct models to the lead agent for
+ * Planning (deep reasoning), Coordination (fast/cheap while workers run), and Verification
+ * (reviewing final results; blank falls back to Planning).
+ */
+function LeadPhaseModelsCard({ run, agents, onDone }: { run: Run; agents?: Agent[]; onDone: () => void }) {
+  const plugins = usePlugins();
+  const lead = agents?.find((a) => a.id === run.planner);
+  const current = run.config.policy.lead_models;
+  const [plan, setPlan] = useState(current?.plan ?? "");
+  const [coordinate, setCoordinate] = useState(current?.coordinate ?? "");
+  const [verify, setVerify] = useState(current?.verify ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [saved, setSaved] = useState(false);
+
+  const pluginInfo = plugins.data?.find((p) => p.name === lead?.plugin);
+  const offered = pluginInfo?.models ?? [];
+  const optionsFor = (val: string) => {
+    const list = [...offered];
+    if (val && !list.includes(val)) list.unshift(val);
+    return list;
+  };
+  const hasAny = Boolean(current?.plan || current?.coordinate || current?.verify);
+  const summaryParts = [
+    current?.plan ? t("phaseModels.planTag", { model: prettyModel(current.plan) }) : null,
+    current?.coordinate ? t("phaseModels.coordinateTag", { model: prettyModel(current.coordinate) }) : null,
+    current?.verify ? t("phaseModels.verifyTag", { model: prettyModel(current.verify) }) : null,
+  ].filter(Boolean);
+  const dirty =
+    plan.trim() !== (current?.plan ?? "") ||
+    coordinate.trim() !== (current?.coordinate ?? "") ||
+    verify.trim() !== (current?.verify ?? "");
+
+  async function save(next: { plan: string; coordinate: string; verify: string }) {
+    setBusy(true);
+    setError(undefined);
+    setSaved(false);
+    try {
+      const p = next.plan.trim() || null;
+      const c = next.coordinate.trim() || null;
+      const v = next.verify.trim() || null;
+      const payload = !p && !c && !v ? null : { plan: p, coordinate: c, verify: v };
+      await api.updateRunPolicy(run.id, { reset_attempts: false, lead_models: payload });
+      setPlan(p ?? "");
+      setCoordinate(c ?? "");
+      setVerify(v ?? "");
+      setSaved(true);
+      onDone();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <details className="phase-models muted">
+      <summary>
+        {hasAny ? t("phaseModels.summary", { parts: summaryParts.join(" / ") }) : t("phaseModels.off")}
+      </summary>
+      <p className="small muted phase-models-hint">
+        {t("phaseModels.hint", { lead: lead ? ` (${lead.name} · ${vendorLabel(lead.plugin)}) ` : " " })}
+      </p>
+      <div className="phase-models-grid">
+        <label className="phase-models-row">
+          <span>{t("phaseModels.planLabel")}</span>
+          <select value={plan} disabled={busy} onChange={(e) => { setPlan(e.target.value); setSaved(false); }}>
+            <option value="">{t("phaseModels.unchanged")}</option>
+            {optionsFor(plan).map((m) => (
+              <option key={m} value={m}>{prettyModel(m)}</option>
+            ))}
+          </select>
+        </label>
+        <label className="phase-models-row">
+          <span>{t("phaseModels.coordinateLabel")}</span>
+          <select value={coordinate} disabled={busy} onChange={(e) => { setCoordinate(e.target.value); setSaved(false); }}>
+            <option value="">{t("phaseModels.unchanged")}</option>
+            {optionsFor(coordinate).map((m) => (
+              <option key={m} value={m}>{prettyModel(m)}</option>
+            ))}
+          </select>
+        </label>
+        <label className="phase-models-row">
+          <span>{t("phaseModels.verifyLabel")}</span>
+          <select value={verify} disabled={busy} onChange={(e) => { setVerify(e.target.value); setSaved(false); }}>
+            <option value="">{plan ? t("phaseModels.followPlan", { model: prettyModel(plan) }) : t("phaseModels.unchanged")}</option>
+            {optionsFor(verify).map((m) => (
+              <option key={m} value={m}>{prettyModel(m)}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="phase-models-actions">
+        <button
+          type="button"
+          className="small"
+          disabled={busy || !dirty}
+          onClick={() => void save({ plan, coordinate, verify })}
+        >
+          {busy ? t("phaseModels.saving") : t("phaseModels.save")}
+        </button>
+        {hasAny && (
+          <button
+            type="button"
+            className="ghost small"
+            disabled={busy}
+            onClick={() => void save({ plan: "", coordinate: "", verify: "" })}
+          >
+            {t("phaseModels.clear")}
+          </button>
+        )}
+        {saved && <span className="small muted">{t("phaseModels.saved")}</span>}
+      </div>
       <ErrorBox error={error} />
     </details>
   );

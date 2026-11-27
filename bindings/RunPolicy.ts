@@ -4,6 +4,7 @@ import type { AskPolicy } from "./AskPolicy";
 import type { Budget } from "./Budget";
 import type { ContinuationPolicy } from "./ContinuationPolicy";
 import type { LandPolicy } from "./LandPolicy";
+import type { LeadPhaseModels } from "./LeadPhaseModels";
 import type { PlanApproval } from "./PlanApproval";
 import type { TaskBudget } from "./TaskBudget";
 
@@ -28,6 +29,10 @@ spawn: boolean, max_agents: number,
  * Models a recruit may run (exact ids); absent: any model a logged-in account can run.
  */
 spawn_models: Array<string> | null, 
+/**
+ * Automatic lead model switching by phase (`plan` / `coordinate` / `verify`).
+ */
+lead_models?: LeadPhaseModels, 
 /**
  * Whether assignees may split their tasks and hand parts on (H1-5).
  */

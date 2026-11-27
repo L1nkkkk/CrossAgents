@@ -7,6 +7,7 @@ pub mod attachment;
 pub mod bus;
 pub mod claim;
 pub mod cli;
+pub mod council;
 pub mod device;
 pub mod driver;
 pub use device::{Device, DeviceKind, DeviceLevel, DeviceOs};
@@ -38,6 +39,9 @@ pub use bus::EventBus;
 pub use bus::{ViewerGuard, Viewers};
 pub use claim::{AgentClaim, AgentNow, ClaimRole, NowKind, SessionOf};
 pub use cli::{CliSource, CliStatus, Located};
+pub use council::{
+    CouncilMemberResponse, CouncilMemberSpec, CouncilMode, CouncilRecord, CouncilStatus,
+};
 pub use driver::{
     AgentCommand, AgentCommandKind, Capabilities, ContextPart, Driver, DriverKind, DriverSession,
     ExitCause, FileChange, McpServerSpec, OutputStream, PermissionDecision, PermissionHandler,
@@ -73,8 +77,8 @@ pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{NoticeClass, PendingNotice, Reminder, Watch, WatchOn, WatchTarget};
 pub use policy::{
     ApprovalPolicy, AskPolicy, Budget, ContinuationPolicy, DEFAULT_REWORK_NEW_SESSION_TOKENS,
-    LandPolicy, PlanApproval, RunPolicy, TaskBudget,
+    LandPolicy, LeadPhase, LeadPhaseModels, PlanApproval, RunPolicy, TaskBudget,
 };
 pub use state::TaskStatus;
-pub use store::{AgentKey, Store};
+pub use store::{AgentKey, SessionSearchHit, SessionSearchQuery, Store};
 pub use tool::ToolInfo;

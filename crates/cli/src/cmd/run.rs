@@ -298,6 +298,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
                     },
                 }),
                 reset_attempts: reset,
+                lead_models: None,
             };
             let detail: RunDetail = client.post(&format!("/v1/runs/{run}/policy"), &req).await?;
             if ctx.json {

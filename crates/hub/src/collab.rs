@@ -603,6 +603,34 @@ impl AgentHost for HubHost {
     async fn renew_session(&self, agent: AgentId) -> Result<bool, CoreError> {
         self.runtime.renew(&AgentKey::Id(agent)).await
     }
+
+    async fn run_council(
+        &self,
+        caller: AgentId,
+        question: String,
+        context: Option<String>,
+        mode: crossagents_core::CouncilMode,
+        members: Vec<crossagents_core::CouncilMemberSpec>,
+        cwd: Option<String>,
+    ) -> Result<crossagents_core::CouncilRecord, CoreError> {
+        let (_initial, handle) = crate::council::start_council(
+            self.runtime.clone(),
+            self.bus.clone(),
+            crate::council::CouncilParams {
+                question,
+                context,
+                mode,
+                members,
+                cwd,
+                requested_by: Some(caller),
+                home: self.home.clone(),
+            },
+        )
+        .await?;
+        handle
+            .await
+            .map_err(|e| CoreError::Agent(format!("council task panicked: {e}")))
+    }
 }
 
 #[cfg(test)]

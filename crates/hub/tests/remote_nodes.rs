@@ -387,6 +387,24 @@ fn handle_mock_node_op(root: &std::path::Path, op: NodeRpcOp) -> NodeRpcReply {
                 error: None,
             }
         }
+        NodeRpcOp::ReadMedia(req) => {
+            match crossagents_hub::media::locate(std::path::Path::new(&req.cwd), None, &req.path)
+                .and_then(|abs| {
+                    crossagents_hub::media::load_chunk(&abs, &req.path, req.offset, req.limit)
+                })
+            {
+                Ok(media) => NodeRpcReply {
+                    ok: true,
+                    payload: serde_json::to_value(media).ok(),
+                    error: None,
+                },
+                Err(err) => NodeRpcReply {
+                    ok: false,
+                    payload: None,
+                    error: Some(err.to_string()),
+                },
+            }
+        }
     }
 }
 

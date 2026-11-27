@@ -150,6 +150,71 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "session_search",
+        description: "Full-text search across past conversations of all sessions (user inputs, assistant replies, and conversation topics; supports English and Chinese). Returns snippets with agent_id, agent_name, and message_id so you can inspect full context via session_read.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "query": { "type": "string", "description": "Keywords or phrase to search for." },
+                    "agent": { "type": "string", "description": "Optional agent name or id to restrict search to one session." },
+                    "cwd": { "type": "string", "description": "Optional workspace path filter (pass \"current\" to restrict to your own workspace)." },
+                    "include_archived": { "type": "boolean", "description": "Include archived sessions (default true)." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Maximum matches to return (default 10)." }
+                }),
+                &["query"],
+            )
+        },
+    },
+    ToolDef {
+        name: "session_read",
+        description: "Read turns from a session's transcript (useful after session_search). Pass `message_id` to center on a specific turn, or omit it to read the latest turns.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "agent": { "type": "string", "description": "Agent name or id." },
+                    "message_id": { "type": "string", "description": "Optional message_id from session_search to center around." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Number of turns to return (default 8)." }
+                }),
+                &["agent"],
+            )
+        },
+    },
+    ToolDef {
+        name: "council_consult",
+        description: "Consult 2 to 5 models or teammates in parallel on the same question. In `independent` mode each seat answers without seeing the others; in `debate` mode a second round shares anonymized Round 1 answers so each seat critiques blind spots and refines its stance. Fails clearly per seat if a requested model is unavailable—never silently substitutes another model.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "question": { "type": "string", "description": "The core question, decision, or review prompt for every council seat." },
+                    "context": { "type": "string", "description": "Optional shared background context, constraints, or code excerpts." },
+                    "mode": { "type": "string", "enum": ["independent", "debate"], "description": "independent (1 round, default) or debate (2 rounds with anonymized cross-critique)." },
+                    "members": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 5,
+                        "description": "2 to 5 council seats (specify model + optional plugin, or an existing teammate name in agent).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string" },
+                                "plugin": { "type": "string", "description": "Plugin name (e.g. claude-native, codex-native, cursor-native, gemini-native). Optional if model or agent identifies it." },
+                                "model": { "type": "string", "description": "Exact model id to run." },
+                                "agent": { "type": "string", "description": "Existing teammate/session name or id to clone cleanly for this seat." },
+                                "effort": { "type": "string", "description": "Optional reasoning effort override." },
+                                "perspective": { "type": "string", "description": "Optional framing/angle for this seat (e.g. security reviewer, performance focus)." }
+                            }
+                        }
+                    },
+                    "cwd": { "type": "string", "description": "Optional working directory for council sessions (defaults to yours)." }
+                }),
+                &["question", "members"],
+            )
+        },
+    },
+    ToolDef {
         name: "remind_set",
         description: "Wake yourself later with a note: after_minutes, or at (RFC 3339). With task and only_if_open, it fires only if that task has not ended by then. A wait is cut to 7 days; when it was, the wake says the thing you waited for did not happen. The reminder arrives in your notices. At most 20 at a time.",
         groups: ALL,
@@ -1451,11 +1516,239 @@ impl Orchestrator {
                 }
                 self.call_extension(caller, &a.tool, a.input).await
             }
+            "session_search" => self.session_search_tool(caller, input).await,
+            "session_read" => self.session_read_tool(input).await,
+            "council_consult" => self.council_consult_tool(caller, input).await,
             browser if crate::browser::is_browser_tool(browser) => {
                 self.browser_tool(caller, browser, input).await
             }
             _ => unreachable!("every tool in TOOLS is handled"),
         }
+    }
+
+    async fn session_search_tool(&self, caller: &Agent, input: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct A {
+            query: String,
+            #[serde(default)]
+            agent: Option<String>,
+            #[serde(default)]
+            cwd: Option<String>,
+            #[serde(default = "default_true")]
+            include_archived: bool,
+            #[serde(default)]
+            limit: Option<usize>,
+        }
+        fn default_true() -> bool {
+            true
+        }
+        let a: A = args(input)?;
+        let query = a.query.trim().to_owned();
+        if query.is_empty() {
+            return Err(CoreError::InvalidName("query cannot be empty".into()));
+        }
+        let agent = match a.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(key) => Some(
+                self.store
+                    .get_agent(&crossagents_core::AgentKey::parse(key))
+                    .await?
+                    .id,
+            ),
+            None => None,
+        };
+        let cwd = a
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if s.eq_ignore_ascii_case("current") {
+                    caller.cwd.to_string_lossy().into_owned()
+                } else {
+                    s.to_owned()
+                }
+            });
+        let hits = self
+            .store
+            .search_sessions(&crossagents_core::SessionSearchQuery {
+                query: query.clone(),
+                agent,
+                cwd,
+                include_archived: a.include_archived,
+                limit: a.limit.unwrap_or(10).clamp(1, 30),
+            })
+            .await?;
+        Ok(json!({
+            "query": query,
+            "count": hits.len(),
+            "hits": hits,
+        }))
+    }
+
+    async fn session_read_tool(&self, input: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct A {
+            agent: String,
+            #[serde(default)]
+            message_id: Option<String>,
+            #[serde(default)]
+            limit: Option<usize>,
+        }
+        let a: A = args(input)?;
+        let agent = self
+            .store
+            .get_agent(&crossagents_core::AgentKey::parse(a.agent.trim()))
+            .await?;
+        let target_msg: Option<crossagents_core::MessageId> = match a
+            .message_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => Some(raw.parse().map_err(|_| {
+                CoreError::InvalidName(format!("invalid message_id: {raw:?}"))
+            })?),
+            None => None,
+        };
+        let limit = a.limit.unwrap_or(8).clamp(1, 20);
+
+        struct TurnBuf {
+            message_id: crossagents_core::MessageId,
+            sent_at: chrono::DateTime<chrono::Utc>,
+            input: String,
+            output: String,
+        }
+        let mut turns: Vec<TurnBuf> = Vec::new();
+        let mut by_msg: std::collections::HashMap<crossagents_core::MessageId, usize> =
+            std::collections::HashMap::new();
+        let mut active: Option<usize> = None;
+
+        let mut after = 0u64;
+        loop {
+            let batch = self.store.agent_events(agent.id, after, 1000).await?;
+            if batch.is_empty() {
+                break;
+            }
+            for ev in &batch {
+                after = ev.seq;
+                match &ev.kind {
+                    crossagents_core::EventKind::AgentInput {
+                        message_id, text, ..
+                    } => {
+                        let idx = turns.len();
+                        turns.push(TurnBuf {
+                            message_id: *message_id,
+                            sent_at: ev.ts,
+                            input: text.clone(),
+                            output: String::new(),
+                        });
+                        by_msg.insert(*message_id, idx);
+                        active.get_or_insert(idx);
+                    }
+                    crossagents_core::EventKind::AgentTurnStarted { message_id, .. } => {
+                        if let Some(&idx) = by_msg.get(message_id) {
+                            active = Some(idx);
+                        }
+                    }
+                    crossagents_core::EventKind::AgentOutput {
+                        stream: crossagents_core::OutputStream::Text,
+                        text,
+                        ..
+                    } => {
+                        if let Some(idx) = active
+                            && let Some(turn) = turns.get_mut(idx)
+                        {
+                            turn.output.push_str(text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if batch.len() < 1000 {
+                break;
+            }
+        }
+
+        let total_turns = turns.len();
+        let slice_range = if let Some(mid) = target_msg {
+            if let Some(&pos) = by_msg.get(&mid) {
+                let half = limit / 2;
+                let start = pos.saturating_sub(half);
+                let end = (start + limit).min(total_turns);
+                let start = end.saturating_sub(limit);
+                start..end
+            } else {
+                total_turns.saturating_sub(limit)..total_turns
+            }
+        } else {
+            total_turns.saturating_sub(limit)..total_turns
+        };
+
+        const MAX_TOTAL_CHARS: usize = 12_000;
+        let per_turn_cap = (MAX_TOTAL_CHARS / limit.max(1)).max(800);
+        let clip = |s: &str, max_chars: usize| -> String {
+            if s.chars().count() <= max_chars {
+                s.to_owned()
+            } else {
+                let head: String = s.chars().take(max_chars).collect();
+                format!("{head}… (truncated)")
+            }
+        };
+
+        let out_turns: Vec<Value> = turns[slice_range.clone()]
+            .iter()
+            .map(|t| {
+                json!({
+                    "message_id": t.message_id,
+                    "sent_at": t.sent_at,
+                    "input": clip(&t.input, per_turn_cap / 2),
+                    "output": clip(&t.output, per_turn_cap),
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "agent_id": agent.id,
+            "agent_name": agent.name,
+            "topic": agent.topic,
+            "cwd": agent.cwd,
+            "archived": agent.archived_at.is_some(),
+            "total_turns": total_turns,
+            "showing_range": [slice_range.start, slice_range.end],
+            "turns": out_turns,
+        }))
+    }
+
+    async fn council_consult_tool(&self, caller: &Agent, input: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct A {
+            question: String,
+            #[serde(default)]
+            context: Option<String>,
+            #[serde(default)]
+            mode: crossagents_core::CouncilMode,
+            members: Vec<crossagents_core::CouncilMemberSpec>,
+            #[serde(default)]
+            cwd: Option<String>,
+        }
+        let a: A = args(input)?;
+        if a.question.trim().is_empty() {
+            return Err(CoreError::InvalidName("question cannot be empty".into()));
+        }
+        if !(2..=5).contains(&a.members.len()) {
+            return Err(CoreError::InvalidName(
+                "council requires between 2 and 5 members".into(),
+            ));
+        }
+        let cwd = a
+            .cwd
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| Some(caller.cwd.to_string_lossy().into_owned()));
+        let record = self
+            .host
+            .run_council(caller.id, a.question, a.context, a.mode, a.members, cwd)
+            .await?;
+        serde_json::to_value(record).map_err(|e| CoreError::Storage(e.to_string()))
     }
 }
 

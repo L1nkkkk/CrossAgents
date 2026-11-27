@@ -29,9 +29,9 @@ const LINGER: Duration = Duration::from_secs(30 * 60);
 const LINGER_CONNECTED: Duration = Duration::from_secs(30);
 /// Output still in the pipes when the agent exits (its children may hold them open).
 const DRAIN: Duration = Duration::from_secs(2);
-// The HTTP message body is capped at ~27.7 MiB (20 MiB raw attachments in
-// base64 plus 1 MiB). 64 MiB leaves room for JSON envelopes and internal prompts.
-const INPUT_BUDGET: usize = 64 * 1024 * 1024;
+// The HTTP message body is capped at ~54.3 MiB (40 MiB raw attachments in
+// base64 plus 1 MiB). 96 MiB leaves room for JSON envelopes and internal prompts.
+const INPUT_BUDGET: usize = 96 * 1024 * 1024;
 // A byte budget alone permits millions of tiny frames and their allocation overhead.
 const INPUT_FRAME_LIMIT: usize = 4096;
 // The outer host JSON quotes the driver's JSON line; escaping can double it.

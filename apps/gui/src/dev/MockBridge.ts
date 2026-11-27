@@ -924,7 +924,43 @@ export class MockBridge implements CrossAgentsBridge {
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/attachments\/([^/]+)$/))) {
         const file = s.files.get(decodeURIComponent(m[2]));
-        return file ? json(200, { id: m[2], mime: file.mime, size: file.data.length, data: file.data }) : notFound("attachment");
+        return file ? json(200, { id: m[2], mime: file.mime, size: Math.floor((file.data.length * 3) / 4), data: file.data, offset: 0, eof: true }) : notFound("attachment");
+      }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/files\/media$/))) {
+        const path = url.searchParams.get("path") ?? "";
+        const name = path.split(/[\\/]/).pop() || "file";
+        return json(200, { path, name, mime: "text/plain", kind: "text", size: 0, offset: 0, data: "", eof: true });
+      }
+      if (p === "/v1/search/sessions") {
+        const q = (url.searchParams.get("q") ?? "").trim();
+        return json(200, { query: q, hits: [] });
+      }
+      if (p === "/v1/council") {
+        if ((method as string) === "POST") {
+          const req = (body ?? {}) as { question?: string; mode?: "independent" | "debate"; members?: { label?: string; plugin?: string; model?: string }[] };
+          const now = new Date().toISOString();
+          return json(200, {
+            id: "council-mock",
+            question: req.question ?? "",
+            mode: req.mode ?? "independent",
+            status: "completed",
+            members: (req.members ?? []).map((mem, i) => ({
+              seat: String.fromCharCode(65 + i),
+              label: mem.label || mem.model || `Seat ${i + 1}`,
+              plugin: mem.plugin || "claude-native",
+              model: mem.model ?? null,
+              status: "ok",
+              round1: `Mock response from ${mem.label || mem.model || `Seat ${i + 1}`}.`,
+              duration_ms: 420,
+            })),
+            created_at: now,
+            updated_at: now,
+          });
+        }
+        return json(200, { councils: [] });
+      }
+      if ((m = p.match(/^\/v1\/council\/([^/]+)$/))) {
+        return notFound("council");
       }
       if (p === "/v1/runs") return json(200, { runs: s.runs.map((d) => d.run) });
       if (p === "/v1/works") return json(200, { works: s.works ?? [] });
@@ -1361,6 +1397,7 @@ export class MockBridge implements CrossAgentsBridge {
             stuck_minutes?: number | null;
           };
           reset_attempts?: boolean;
+          lead_models?: { plan?: string | null; coordinate?: string | null; verify?: string | null } | null;
         };
         if (req.continuation?.enabled) {
           const had = d.run.config.policy.continuation ?? { max_attempts: 3, interval_seconds: 60, stuck_minutes: null };
@@ -1374,6 +1411,13 @@ export class MockBridge implements CrossAgentsBridge {
         } else if (req.continuation) {
           d.run.config.policy.continuation = null;
           d.run.continuation = null;
+        }
+        if ("lead_models" in req) {
+          const lm = req.lead_models;
+          d.run.config.policy.lead_models =
+            lm && (lm.plan || lm.coordinate || lm.verify)
+              ? { plan: lm.plan ?? null, coordinate: lm.coordinate ?? null, verify: lm.verify ?? null }
+              : undefined;
         }
         if (req.reset_attempts && d.run.continuation) {
           d.run.continuation = { ...d.run.continuation, attempts: 0, next_at: null, exhausted_notified: false };

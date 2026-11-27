@@ -7,9 +7,10 @@ import type { AttachmentSupport } from "@bindings/AttachmentSupport";
 import type { AttachmentUpload } from "@bindings/AttachmentUpload";
 import { api } from "./api";
 import { Icon, ImageThumb } from "./components";
+import { MediaCard } from "./MediaCard";
 
 export { ImageThumb };
-import { IMAGE_SEND_BYTES, acceptFor, bytes, isImage, mimeOf, refusal, shrinkPlan, shrunkName, supportNote } from "./lib/attachments";
+import { IMAGE_SEND_BYTES, acceptFor, bytes, isImage, kindOf, mimeOf, refusal, shrinkPlan, shrunkName, supportNote } from "./lib/attachments";
 
 /** A file in the composer: what goes to the hub, and a preview for images. */
 export type Held = AttachmentUpload & { key: number; size: number; preview?: string };
@@ -130,7 +131,7 @@ export function useHeld(onError: (why: string | undefined) => void, support?: At
           className="ghost icon"
           onClick={() => input.current?.click()}
           disabled={!canAttach}
-          title={canAttach ? (note ?? "附加图片或文件（也可以粘贴截图、拖进来）") : (note ?? "这个 agent 不收文件")}
+          title={canAttach ? (note ?? "附加图片、音频、视频、PDF 或文本文件（可粘贴或拖入）") : (note ?? "这个 agent 不收文件")}
           aria-label={canAttach ? "附加文件" : "附加文件（不可用）"}
         >
           <Icon name="attach" size={15} />
@@ -169,12 +170,25 @@ export function HeldFiles({ files, onRemove }: { files: Held[]; onRemove: (key: 
   );
 }
 
-/** Files a sent message carried: images as thumbnails (fetched from the hub), others as cards. */
+/** Files a sent message carried: images as thumbnails, audio/video/PDF/text as inline playable/previewable cards. */
 export function TurnFiles({ agent, files }: { agent: string; files: Attachment[] }) {
   if (!files.length) return null;
   return (
     <div className="turn-files-list">
-      {files.map((f) => (isImage(f.mime) ? <Thumb key={f.id + f.name} agent={agent} file={f} /> : <FileCard key={f.id + f.name} file={f} />))}
+      {files.map((f) => {
+        if (isImage(f.mime)) return <Thumb key={f.id + f.name} agent={agent} file={f} />;
+        const k = kindOf(f.mime) ?? kindOf(mimeOf(f.name, f.mime)) ?? "file";
+        if (k === "image") return <Thumb key={f.id + f.name} agent={agent} file={f} />;
+        return (
+          <MediaCard
+            key={f.id + f.name}
+            source={{ kind: "attachment", agent, id: f.id, mime: f.mime }}
+            mediaKind={k}
+            label={f.name}
+            sizeHint={f.size}
+          />
+        );
+      })}
     </div>
   );
 }

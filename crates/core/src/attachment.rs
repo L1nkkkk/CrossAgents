@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 /// by path instead.
 pub const INLINE_TEXT_LIMIT: u64 = 256 * 1024;
 
-/// A kind of file, as drivers treat them (docs/TODO.md §7): an image goes as an image to
-/// drivers that take them, a PDF as a document, text goes into the prompt itself.
+/// A kind of file, as drivers and clients treat them: images go as image blocks to drivers that
+/// take them, PDFs as document blocks or path references, small text inline in the prompt, and
+/// audio/video/documents by path reference so agents can read or process them with tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
@@ -19,52 +20,152 @@ pub enum AttachmentKind {
     Pdf,
     /// Text and JSON: small ones are inlined, longer ones named by path.
     Text,
+    Audio,
+    Video,
+    /// Office documents, archives, and other allowed binary files passed by path.
+    File,
 }
 
 impl AttachmentKind {
     /// The kind of an allowed `mime` (`api_types::attachment_mime_ok`); `None` for others.
     pub fn of_mime(mime: &str) -> Option<Self> {
-        match mime {
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp" => Some(Self::Image),
+        let bare = mime.split(';').next().unwrap_or(mime).trim().to_ascii_lowercase();
+        match bare.as_str() {
+            "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/bmp"
+            | "image/svg+xml" => Some(Self::Image),
             "application/pdf" => Some(Self::Pdf),
-            "application/json" => Some(Self::Text),
-            _ if mime.starts_with("text/") => Some(Self::Text),
+            "application/json"
+            | "application/ld+json"
+            | "application/xml"
+            | "application/javascript"
+            | "application/x-javascript"
+            | "application/typescript"
+            | "application/yaml"
+            | "application/x-yaml"
+            | "application/toml"
+            | "application/sql"
+            | "application/x-sh"
+            | "application/rtf" => Some(Self::Text),
+            "audio/mpeg"
+            | "audio/mp3"
+            | "audio/wav"
+            | "audio/x-wav"
+            | "audio/wave"
+            | "audio/mp4"
+            | "audio/x-m4a"
+            | "audio/m4a"
+            | "audio/ogg"
+            | "audio/opus"
+            | "audio/webm"
+            | "audio/flac"
+            | "audio/x-flac"
+            | "audio/aac" => Some(Self::Audio),
+            "video/mp4"
+            | "video/webm"
+            | "video/quicktime"
+            | "video/x-m4v"
+            | "video/ogg"
+            | "video/x-matroska" => Some(Self::Video),
+            "application/zip"
+            | "application/x-zip-compressed"
+            | "application/gzip"
+            | "application/x-gzip"
+            | "application/x-tar"
+            | "application/msword"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.ms-excel"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.ms-powerpoint"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "application/epub+zip" => Some(Self::File),
+            _ if bare.starts_with("text/") => Some(Self::Text),
             _ => None,
         }
     }
 
-    /// How a person names it in a message ("image", "PDF", "text").
+    /// How a person names it in a message ("image", "PDF", "text", "audio", "video", "file").
     pub fn noun(self) -> &'static str {
         match self {
             Self::Image => "image",
             Self::Pdf => "PDF",
             Self::Text => "text",
+            Self::Audio => "audio",
+            Self::Video => "video",
+            Self::File => "file",
         }
     }
 }
 
-/// The extension a stored file is kept under, from its type: images, PDF and JSON by their
-/// `mime`, text by the suffix its name carries (`txt` when it has none). Only the
-/// extension is taken from the name, never the name itself, so nothing a person calls a
-/// file can decide where it is written.
+/// The extension a stored file is kept under, from its type: images, audio, video, PDF and JSON
+/// by their `mime`, text and generic files by the suffix their name carries (`txt`/`bin` when
+/// missing). Only the extension is taken from the name, never the name itself, so nothing a
+/// person calls a file can decide where it is written.
 ///
 /// It matters because some CLIs (with-cli, Codex) open a file handed to them by its
 /// extension and drop one that has none: `unsupported image format: , only PNG/JPG/...`.
 pub fn ext_for<'a>(mime: &str, name: &'a str) -> &'a str {
-    match mime {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        "application/pdf" => "pdf",
-        "application/json" => "json",
-        _ if mime.starts_with("text/") => name
-            .rsplit_once('.')
+    let safe_name_ext = || {
+        name.rsplit_once('.')
             .map(|(_, ext)| ext)
             .filter(|ext| {
                 !ext.is_empty() && ext.len() <= 16 && ext.bytes().all(|b| b.is_ascii_alphanumeric())
             })
-            .unwrap_or("txt"),
+    };
+    let bare = mime.split(';').next().unwrap_or(mime).trim();
+    match bare {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/bmp" => "bmp",
+        "image/svg+xml" => "svg",
+        "application/pdf" => "pdf",
+        "application/json" | "application/ld+json" => "json",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/mp4" | "audio/x-m4a" | "audio/m4a" => "m4a",
+        "audio/ogg" => "ogg",
+        "audio/opus" => "opus",
+        "audio/webm" => "weba",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/aac" => "aac",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        "video/x-m4v" => "m4v",
+        "video/ogg" => "ogv",
+        "video/x-matroska" => "mkv",
+        "application/zip" | "application/x-zip-compressed" => "zip",
+        "application/gzip" | "application/x-gzip" => "gz",
+        "application/x-tar" => "tar",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.ms-powerpoint" => "ppt",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/rtf" => "rtf",
+        "application/epub+zip" => "epub",
+        _ if bare.starts_with("text/")
+            || matches!(
+                bare,
+                "application/xml"
+                    | "application/javascript"
+                    | "application/x-javascript"
+                    | "application/typescript"
+                    | "application/yaml"
+                    | "application/x-yaml"
+                    | "application/toml"
+                    | "application/sql"
+                    | "application/x-sh"
+            ) =>
+        {
+            safe_name_ext().unwrap_or("txt")
+        }
         // Not offered for messages; named all the same rather than left bare.
         _ => "bin",
     }
@@ -97,7 +198,12 @@ impl AttachmentSupport {
         match kind {
             AttachmentKind::Image => self.image,
             AttachmentKind::Pdf => self.pdf,
-            AttachmentKind::Text => self.text,
+            // Audio, video and general files are handed as local file references when the driver
+            // accepts text prompts, so agents can inspect, transcribe or process them via tools.
+            AttachmentKind::Text
+            | AttachmentKind::Audio
+            | AttachmentKind::Video
+            | AttachmentKind::File => self.text,
         }
     }
 
@@ -137,19 +243,24 @@ pub struct Attachment {
 
 impl Attachment {
     pub fn is_image(&self) -> bool {
-        matches!(
-            self.mime.as_str(),
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-        )
+        self.kind() == Some(AttachmentKind::Image)
     }
 
     pub fn is_pdf(&self) -> bool {
-        self.mime == "application/pdf"
+        self.kind() == Some(AttachmentKind::Pdf)
+    }
+
+    pub fn is_audio(&self) -> bool {
+        self.kind() == Some(AttachmentKind::Audio)
+    }
+
+    pub fn is_video(&self) -> bool {
+        self.kind() == Some(AttachmentKind::Video)
     }
 
     /// Text a driver can put in the prompt as it is.
     pub fn is_text(&self) -> bool {
-        self.mime.starts_with("text/") || self.mime == "application/json"
+        self.kind() == Some(AttachmentKind::Text)
     }
 
     /// The kind drivers think in (docs/TODO.md §7).
@@ -299,10 +410,28 @@ mod tests {
             AttachmentKind::of_mime("application/json"),
             Some(AttachmentKind::Text)
         );
-        assert_eq!(AttachmentKind::of_mime("application/zip"), None);
-        assert_eq!(AttachmentKind::of_mime("image/bmp"), None);
+        assert_eq!(
+            AttachmentKind::of_mime("audio/mpeg"),
+            Some(AttachmentKind::Audio)
+        );
+        assert_eq!(
+            AttachmentKind::of_mime("video/mp4"),
+            Some(AttachmentKind::Video)
+        );
+        assert_eq!(
+            AttachmentKind::of_mime("application/zip"),
+            Some(AttachmentKind::File)
+        );
+        assert_eq!(
+            AttachmentKind::of_mime("image/bmp"),
+            Some(AttachmentKind::Image)
+        );
+        assert_eq!(AttachmentKind::of_mime("application/x-msdownload"), None);
 
         assert!(AttachmentSupport::ALL.allows(AttachmentKind::Pdf));
+        assert!(AttachmentSupport::TEXT_ONLY.allows(AttachmentKind::Audio));
+        assert!(AttachmentSupport::TEXT_ONLY.allows(AttachmentKind::Video));
+        assert!(AttachmentSupport::TEXT_ONLY.allows(AttachmentKind::File));
         assert!(!AttachmentSupport::TEXT_ONLY.allows(AttachmentKind::Image));
         assert!(AttachmentSupport::TEXT_ONLY.allows(AttachmentKind::Text));
         assert_eq!(

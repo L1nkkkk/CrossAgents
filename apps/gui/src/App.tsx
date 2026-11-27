@@ -104,13 +104,13 @@ export function runAgents(detail: RunDetail, agents: Agent[]): Agent[] {
 const SPLIT_COLLAPSE = 180;
 
 /** The routed session, and a second one beside it when one is open. */
-function Sessions({ primary, question }: { primary: string; question?: string }) {
+function Sessions({ primary, question, messageId }: { primary: string; question?: string; messageId?: string }) {
   const { beside, ratio } = usePanes();
   const { focus } = useLayout();
   const ref = useRef<HTMLDivElement>(null);
   const [doomed, setDoomed] = useState<"primary" | "beside" | null>(null);
-  useEffect(() => { if (question) focusSession(primary); }, [primary, question]);
-  if (!beside || beside === primary) return <SessionView key={primary} name={primary} questionId={question} />;
+  useEffect(() => { if (question || messageId) focusSession(primary); }, [primary, question, messageId]);
+  if (!beside || beside === primary) return <SessionView key={primary} name={primary} questionId={question} focusMessageId={messageId} />;
 
   /** The left half goes: the one beside becomes the routed session. */
   const closePrimary = () => {
@@ -148,7 +148,7 @@ function Sessions({ primary, question }: { primary: string; question?: string })
 
   return (
     <div className={`split ${focusedOf(primary, beside, focus) === beside ? "split-focus-beside" : "split-focus-primary"}`} ref={ref} style={{ gridTemplateColumns: `minmax(0, ${ratio}fr) 6px minmax(0, ${1 - ratio}fr)` }}>
-      <div className={`split-session split-primary ${doomed === "primary" ? "doomed" : ""}`}><SessionView key={primary} name={primary} questionId={question} onClosePane={closePrimary} /><button className="split-switch" onClick={() => focusSession(beside)}>切换到另一会话</button></div>
+      <div className={`split-session split-primary ${doomed === "primary" ? "doomed" : ""}`}><SessionView key={primary} name={primary} questionId={question} focusMessageId={messageId} onClosePane={closePrimary} /><button className="split-switch" onClick={() => focusSession(beside)}>切换到另一会话</button></div>
       <div className="divider" onPointerDown={drag} onDoubleClick={() => setRatio(0.5)} title="拖动调整宽度，双击平分；拖到边上关闭那一栏" role="separator" aria-orientation="vertical" />
       <div className={`split-session split-beside ${doomed === "beside" ? "doomed" : ""}`}><SessionView key={beside} name={beside} onClose={closeBeside} /><button className="split-switch" onClick={() => focusSession(primary)}>切换到另一会话</button></div>
     </div>
@@ -291,7 +291,15 @@ export function App() {
       else if (a) tools = { run: a, onClose: closeTools };
       break;
     case "s":
-      main = a ? <Sessions primary={a} question={b === "questions" ? c : undefined} /> : <HomeView />;
+      main = a ? (
+        <Sessions
+          primary={a}
+          question={b === "questions" ? c : undefined}
+          messageId={b === "m" ? c : undefined}
+        />
+      ) : (
+        <HomeView />
+      );
       if (a) tools = { follow: focusedOf(a, state.beside, focus), onClose: closeTools };
       break;
     case "w":

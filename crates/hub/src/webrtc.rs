@@ -52,8 +52,8 @@ const MAX_V6_SOCKETS: usize = 2;
 /// Maximum SCTP chunk payload size kept safely below Safari/WebKit's 16 KiB–64 KiB limits.
 const CHUNK_BYTES: usize = 14_000;
 
-/// Maximum reassembled inbound request body (matches attachment upload limits).
-const MAX_INBOUND_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum reassembled inbound request body (matches 40 MiB attachment upload limits in base64).
+const MAX_INBOUND_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum concurrent SSE streams per WebRTC session.
 const MAX_SSE_PER_SESSION: usize = 4;

@@ -11,10 +11,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, Agent, AgentClaim, AgentId, AgentKey, AgentProfile, AgentStatus, Candidate,
-    CandidateStatus, CoreError, EVENT_SCHEMA_VERSION, Event, EventKind, ExpertiseEntry, HumanItem,
-    IssueRef, Lesson, LessonStatus, MessageId, NameSource, Note, NoteScope, NoticeClass, OwnerKind,
-    PendingNotice, Project, Reminder, Run, RunId, Store, Task, TaskId, Triage, TriageRecord,
-    TriageStep, UsageOutcome, UsageRecord, Watch,
+    CandidateStatus, CoreError, CouncilRecord, EVENT_SCHEMA_VERSION, Event, EventKind,
+    ExpertiseEntry, HumanItem, IssueRef, Lesson, LessonStatus, MessageId, NameSource, Note,
+    NoteScope, NoticeClass, OutputStream, OwnerKind, PendingNotice, Project, Reminder, Run, RunId,
+    SessionSearchHit, SessionSearchQuery, Store, Task, TaskId, Triage, TriageRecord, TriageStep,
+    UsageOutcome, UsageRecord, Watch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -528,6 +529,18 @@ impl Store for SqliteStore {
             .await
             .map_err(storage)?;
         sqlx::query("DELETE FROM pending_notices WHERE agent = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        sqlx::query(
+            "DELETE FROM session_search_fts WHERE id IN (SELECT id FROM session_search_docs WHERE agent_id = ?)",
+        )
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        sqlx::query("DELETE FROM session_search_docs WHERE agent_id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
             .await
@@ -2362,6 +2375,520 @@ impl Store for SqliteStore {
             })
             .collect()
     }
+
+    async fn search_sessions(
+        &self,
+        query: &SessionSearchQuery,
+    ) -> Result<Vec<SessionSearchHit>, CoreError> {
+        let trimmed = query.query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.sync_session_search_index().await?;
+
+        let terms: Vec<String> = trimmed
+            .split_whitespace()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .take(8)
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = query.limit.clamp(1, 50);
+        // Fetch extra candidates so post-filtering (cwd normalization / secondary terms) still yields `limit`.
+        let fetch_limit = (limit * 4).min(200) as i64;
+        let agent_filter = query.agent.map(|id| id.to_string());
+        let archived_sql = if query.include_archived {
+            ""
+        } else {
+            " AND a.archived_at IS NULL"
+        };
+        let cwd_norm = query.cwd.as_deref().map(normalize_path_for_match);
+
+        let (long, short): (Vec<&str>, Vec<&str>) = terms
+            .iter()
+            .map(String::as_str)
+            .partition(|t| t.chars().count() >= 3);
+
+        let mut rows: Vec<SqliteRow> = Vec::new();
+        if !long.is_empty() {
+            let fts_and = long
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let sql = format!(
+                "SELECT d.id, d.agent_id, d.message_id, d.seq, d.role, d.ts, d.text,
+                        a.name AS agent_name, a.topic AS agent_topic, a.cwd AS agent_cwd, a.archived_at AS agent_archived
+                 FROM session_search_fts f
+                 JOIN session_search_docs d ON d.id = f.id
+                 JOIN agents a ON a.id = d.agent_id
+                 WHERE session_search_fts MATCH ?1
+                   AND (?2 IS NULL OR d.agent_id = ?2){archived_sql}
+                 ORDER BY bm25(session_search_fts), d.seq DESC
+                 LIMIT ?3"
+            );
+            rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+                .bind(&fts_and)
+                .bind(&agent_filter)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?;
+
+            if rows.is_empty() && long.len() > 1 {
+                let fts_or = long
+                    .iter()
+                    .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+                    .bind(&fts_or)
+                    .bind(&agent_filter)
+                    .bind(fetch_limit)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(storage)?;
+            }
+        } else if let Some(first_short) = short.first() {
+            let pattern = like_pattern(first_short);
+            let sql = format!(
+                "SELECT d.id, d.agent_id, d.message_id, d.seq, d.role, d.ts, d.text,
+                        a.name AS agent_name, a.topic AS agent_topic, a.cwd AS agent_cwd, a.archived_at AS agent_archived
+                 FROM session_search_docs d
+                 JOIN agents a ON a.id = d.agent_id
+                 WHERE d.text LIKE ?1 ESCAPE '\\'
+                   AND (?2 IS NULL OR d.agent_id = ?2){archived_sql}
+                 ORDER BY d.seq DESC
+                 LIMIT ?3"
+            );
+            rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+                .bind(&pattern)
+                .bind(&agent_filter)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?;
+        }
+
+        let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+        let short_lower: Vec<String> = short.iter().map(|s| s.to_lowercase()).collect();
+        let mut hits = Vec::new();
+        for row in rows {
+            if hits.len() >= limit {
+                break;
+            }
+            let text: String = row.try_get("text").map_err(storage)?;
+            if !short_lower.is_empty() {
+                let lower = text.to_lowercase();
+                if !short_lower.iter().all(|s| lower.contains(s.as_str())) {
+                    continue;
+                }
+            }
+            let agent_cwd: String = row.try_get("agent_cwd").map_err(storage)?;
+            if let Some(ref want_cwd) = cwd_norm {
+                let norm = normalize_path_for_match(&agent_cwd);
+                if norm != *want_cwd && !norm.starts_with(&format!("{want_cwd}/")) {
+                    continue;
+                }
+            }
+            let agent_id_raw: String = row.try_get("agent_id").map_err(storage)?;
+            let Ok(agent_id) = agent_id_raw.parse::<AgentId>() else {
+                continue;
+            };
+            let message_id: Option<MessageId> = row
+                .try_get::<Option<String>, _>("message_id")
+                .map_err(storage)?
+                .and_then(|s| s.parse().ok());
+            let ts_raw: String = row.try_get("ts").map_err(storage)?;
+            let ts = DateTime::parse_from_rfc3339(&ts_raw)
+                .map(|t| t.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let seq: i64 = row.try_get("seq").map_err(storage)?;
+            let role: String = row.try_get("role").map_err(storage)?;
+            let agent_name: String = row.try_get("agent_name").map_err(storage)?;
+            let topic: Option<String> = row.try_get("agent_topic").map_err(storage)?;
+            let archived: bool = row
+                .try_get::<Option<String>, _>("agent_archived")
+                .map_err(storage)?
+                .is_some();
+
+            hits.push(SessionSearchHit {
+                agent_id,
+                agent_name,
+                topic,
+                cwd: agent_cwd,
+                archived,
+                message_id,
+                role,
+                snippet: extract_snippet(&text, &term_refs, 180),
+                ts,
+                seq: seq.max(0) as u64,
+            });
+        }
+        Ok(hits)
+    }
+
+    async fn upsert_council(&self, council: &CouncilRecord) -> Result<(), CoreError> {
+        let data = serde_json::to_string(council).map_err(storage)?;
+        sqlx::query(
+            "INSERT INTO councils (id, created_at, updated_at, data) VALUES (?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, data = excluded.data",
+        )
+        .bind(&council.id)
+        .bind(council.created_at.to_rfc3339())
+        .bind(council.updated_at.to_rfc3339())
+        .bind(data)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn get_council(&self, id: &str) -> Result<CouncilRecord, CoreError> {
+        let row: Option<String> = sqlx::query_scalar("SELECT data FROM councils WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        let Some(data) = row else {
+            return Err(CoreError::NotFound {
+                kind: "council",
+                id: id.to_owned(),
+            });
+        };
+        serde_json::from_str(&data).map_err(storage)
+    }
+
+    async fn list_councils(&self, limit: usize) -> Result<Vec<CouncilRecord>, CoreError> {
+        let limit = limit.clamp(1, 100) as i64;
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT data FROM councils ORDER BY created_at DESC LIMIT ?")
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+}
+
+const MAX_INDEXED_DOC_BYTES: usize = 128 * 1024;
+
+impl SqliteStore {
+    /// Incrementally brings `session_search_docs` and `session_search_fts` up to date with the
+    /// latest `events.seq`. Batches streaming `agent.output` chunks per message in memory so
+    /// catching up even thousands of chunks takes a single transaction and zero overhead on writes.
+    async fn sync_session_search_index(&self) -> Result<(), CoreError> {
+        let last_seq: i64 = sqlx::query_scalar(
+            "SELECT CAST(value AS INTEGER) FROM session_search_meta WHERE key = 'last_seq'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .unwrap_or(0);
+        let max_seq: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM events")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(storage)?;
+        if last_seq >= max_seq {
+            return Ok(());
+        }
+
+        // Seed the active turn's message_id per agent so output chunks arriving after `last_seq`
+        // attach to the right turn even when `agent.turn_started` was in an earlier sync.
+        let mut active_turn: std::collections::HashMap<AgentId, MessageId> =
+            std::collections::HashMap::new();
+        if last_seq > 0 {
+            let prev_turns = sqlx::query(
+                "SELECT data FROM events
+                 WHERE seq IN (
+                     SELECT MAX(seq) FROM events
+                     WHERE seq <= ?1 AND type IN ('agent.turn_started', 'agent.input')
+                     GROUP BY json_extract(data, '$.id')
+                 )",
+            )
+            .bind(last_seq)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
+            for row in prev_turns {
+                let raw: String = row.try_get("data").map_err(storage)?;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
+                    && let (Some(aid), Some(mid)) = (
+                        v.get("id").and_then(|x| x.as_str()).and_then(|s| s.parse().ok()),
+                        v.get("message_id")
+                            .and_then(|x| x.as_str())
+                            .and_then(|s| s.parse().ok()),
+                    )
+                {
+                    active_turn.insert(aid, mid);
+                }
+            }
+        }
+
+        let mut cursor = last_seq;
+        while cursor < max_seq {
+            let batch = sqlx::query(
+                "SELECT seq, ts, type, data FROM events
+                 WHERE seq > ?1 AND seq <= ?2
+                 ORDER BY seq LIMIT 4000",
+            )
+            .bind(cursor)
+            .bind(max_seq)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
+            if batch.is_empty() {
+                break;
+            }
+            let batch_end: i64 = batch.last().unwrap().try_get("seq").map_err(storage)?;
+
+            struct DocDelta {
+                agent_id: String,
+                message_id: Option<String>,
+                seq: i64,
+                role: &'static str,
+                ts: String,
+                text: String,
+                append: bool,
+            }
+
+            let mut deltas: std::collections::HashMap<String, DocDelta> =
+                std::collections::HashMap::new();
+            for row in batch {
+                let event_type: String = row.try_get("type").map_err(storage)?;
+                if event_type != "agent.input"
+                    && event_type != "agent.turn_started"
+                    && event_type != "agent.output"
+                    && event_type != "agent.updated"
+                {
+                    continue;
+                }
+                let seq: i64 = row.try_get("seq").map_err(storage)?;
+                let ts: String = row.try_get("ts").map_err(storage)?;
+                let raw_data: String = row.try_get("data").map_err(storage)?;
+                let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw_data) else {
+                    continue;
+                };
+                let wrapped = serde_json::json!({ "type": event_type, "data": data });
+                let Ok(kind) = serde_json::from_value::<EventKind>(wrapped) else {
+                    continue;
+                };
+                match kind {
+                    EventKind::AgentTurnStarted { id, message_id } => {
+                        active_turn.insert(id, message_id);
+                    }
+                    EventKind::AgentInput {
+                        id,
+                        message_id,
+                        text,
+                        ..
+                    } => {
+                        active_turn.entry(id).or_insert(message_id);
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        let doc_id = format!("in:{id}:{message_id}");
+                        deltas.insert(
+                            doc_id,
+                            DocDelta {
+                                agent_id: id.to_string(),
+                                message_id: Some(message_id.to_string()),
+                                seq,
+                                role: "user",
+                                ts,
+                                text: truncate_utf8(&text, MAX_INDEXED_DOC_BYTES).to_owned(),
+                                append: false,
+                            },
+                        );
+                    }
+                    EventKind::AgentOutput {
+                        id,
+                        stream: OutputStream::Text,
+                        text,
+                    } => {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let msg_id = active_turn.get(&id).copied();
+                        let doc_id = match msg_id {
+                            Some(mid) => format!("out:{id}:{mid}"),
+                            None => format!("out:{id}:unattributed"),
+                        };
+                        deltas
+                            .entry(doc_id)
+                            .and_modify(|d| {
+                                if d.text.len() < MAX_INDEXED_DOC_BYTES {
+                                    let room = MAX_INDEXED_DOC_BYTES - d.text.len();
+                                    d.text.push_str(truncate_utf8(&text, room));
+                                }
+                                d.seq = seq;
+                                d.ts = ts.clone();
+                            })
+                            .or_insert_with(|| DocDelta {
+                                agent_id: id.to_string(),
+                                message_id: msg_id.map(|m| m.to_string()),
+                                seq,
+                                role: "assistant",
+                                ts,
+                                text: truncate_utf8(&text, MAX_INDEXED_DOC_BYTES).to_owned(),
+                                append: true,
+                            });
+                    }
+                    EventKind::AgentUpdated { agent } => {
+                        if let Some(topic) = agent.topic.as_deref()
+                            && !topic.trim().is_empty()
+                        {
+                            let doc_id = format!("topic:{}", agent.id);
+                            deltas.insert(
+                                doc_id,
+                                DocDelta {
+                                    agent_id: agent.id.to_string(),
+                                    message_id: None,
+                                    seq,
+                                    role: "topic",
+                                    ts,
+                                    text: truncate_utf8(topic, 2048).to_owned(),
+                                    append: false,
+                                },
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut tx = self.pool.begin().await.map_err(storage)?;
+            for (doc_id, delta) in deltas {
+                let final_text = if delta.append {
+                    let prev: Option<String> =
+                        sqlx::query_scalar("SELECT text FROM session_search_docs WHERE id = ?")
+                            .bind(&doc_id)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .map_err(storage)?;
+                    if let Some(mut existing) = prev {
+                        if existing.len() < MAX_INDEXED_DOC_BYTES {
+                            let room = MAX_INDEXED_DOC_BYTES - existing.len();
+                            existing.push_str(truncate_utf8(&delta.text, room));
+                        }
+                        existing
+                    } else {
+                        delta.text
+                    }
+                } else {
+                    delta.text
+                };
+
+                sqlx::query(
+                    "INSERT INTO session_search_docs (id, agent_id, message_id, seq, role, ts, text)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(id) DO UPDATE SET
+                       seq = excluded.seq,
+                       ts = excluded.ts,
+                       text = excluded.text",
+                )
+                .bind(&doc_id)
+                .bind(&delta.agent_id)
+                .bind(&delta.message_id)
+                .bind(delta.seq)
+                .bind(delta.role)
+                .bind(&delta.ts)
+                .bind(&final_text)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+
+                sqlx::query("DELETE FROM session_search_fts WHERE id = ?")
+                    .bind(&doc_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+                sqlx::query("INSERT INTO session_search_fts (id, text) VALUES (?, ?)")
+                    .bind(&doc_id)
+                    .bind(&final_text)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+            }
+
+            sqlx::query(
+                "INSERT INTO session_search_meta (key, value) VALUES ('last_seq', ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(batch_end.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+            tx.commit().await.map_err(storage)?;
+            cursor = batch_end;
+        }
+        Ok(())
+    }
+}
+
+fn like_pattern(term: &str) -> String {
+    format!(
+        "%{}%",
+        term.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
+
+fn normalize_path_for_match(p: &str) -> String {
+    p.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn extract_snippet(text: &str, terms: &[&str], max_chars: usize) -> String {
+    // Collapse whitespace so multi-line messages read cleanly in search results.
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = collapsed.chars().collect();
+    if chars.len() <= max_chars {
+        return collapsed;
+    }
+    let lower_chars: Vec<char> = collapsed.to_lowercase().chars().collect();
+    let mut hit_pos: Option<usize> = None;
+    for term in terms {
+        let needle: Vec<char> = term.to_lowercase().chars().collect();
+        if needle.is_empty() || needle.len() > lower_chars.len() {
+            continue;
+        }
+        if let Some(pos) = lower_chars.windows(needle.len()).position(|w| w == needle.as_slice()) {
+            hit_pos = Some(match hit_pos {
+                Some(prev) => prev.min(pos),
+                None => pos,
+            });
+        }
+    }
+    let anchor = hit_pos.unwrap_or(0);
+    let half = max_chars / 2;
+    let start = anchor.saturating_sub(half);
+    let end = (start + max_chars).min(chars.len());
+    let start = end.saturating_sub(max_chars);
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
 }
 
 fn device_row(row: sqlx::sqlite::SqliteRow) -> Result<crossagents_core::Device, CoreError> {
@@ -3780,5 +4307,205 @@ mod tests {
         // A write after the delete does not bring the run back.
         store.upsert_run_history(&history_of(&run)).await.unwrap();
         assert!(store.list_run_history(None).await.unwrap()[0].deleted);
+    }
+
+    #[tokio::test]
+    async fn session_search_indexes_english_cjk_streaming_chunks_and_filters() {
+        use crossagents_core::{
+            CouncilMemberResponse, CouncilMode, CouncilRecord, CouncilStatus, MessageId,
+            MessageSource, OutputStream, Role,
+        };
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let now = Utc::now();
+        let make_agent = |name: &str, cwd: &str, archived: bool| Agent {
+            id: AgentId::new(),
+            name: name.into(),
+            name_source: NameSource::Chosen,
+            plugin: "codex-native".into(),
+            driver: None,
+            model: Some("gpt-5.4".into()),
+            role: Role::Worker,
+            cwd: PathBuf::from(cwd),
+            home: PathBuf::from(cwd),
+            node: None,
+            status: AgentStatus::Idle,
+            config: serde_json::Value::Null,
+            profile: AgentProfile::default(),
+            topic: None,
+            archived_at: archived.then_some(now),
+            created_at: now,
+        };
+        let a1 = make_agent("alpha", "C:\\work\\proj-a", false);
+        let a2 = make_agent("beta", "C:\\work\\proj-b", true);
+        store.insert_agent(&a1).await.unwrap();
+        store.insert_agent(&a2).await.unwrap();
+
+        let m1 = MessageId::new();
+        let m2 = MessageId::new();
+        store
+            .append_event(EventKind::AgentInput {
+                id: a1.id,
+                message_id: m1,
+                text: "请帮我检查 WebRTC 分块传输音频的逻辑".into(),
+                queued: false,
+                queued_reason: None,
+                from: Some(MessageSource::Human),
+                reply_to: None,
+                thread: None,
+                reply_excerpt: None,
+                attachments: Vec::new(),
+                notices: Vec::new(),
+            })
+            .await
+            .unwrap();
+        store
+            .append_event(EventKind::AgentTurnStarted {
+                id: a1.id,
+                message_id: m1,
+            })
+            .await
+            .unwrap();
+        // Streamed output chunks should merge into one searchable document.
+        store
+            .append_event(EventKind::AgentOutput {
+                id: a1.id,
+                stream: OutputStream::Text,
+                text: "已生成语音回复，路径是 ".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .append_event(EventKind::AgentOutput {
+                id: a1.id,
+                stream: OutputStream::Text,
+                text: "out/tts_demo.mp3，可以直接播放。".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .append_event(EventKind::AgentInput {
+                id: a2.id,
+                message_id: m2,
+                text: "archived WebRTC note".into(),
+                queued: false,
+                queued_reason: None,
+                from: Some(MessageSource::Human),
+                reply_to: None,
+                thread: None,
+                reply_excerpt: None,
+                attachments: Vec::new(),
+                notices: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        // English FTS5 trigram match
+        let hits = store
+            .search_sessions(&SessionSearchQuery {
+                query: "WebRTC".into(),
+                include_archived: false,
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].agent_id, a1.id);
+        assert_eq!(hits[0].message_id, Some(m1));
+        assert_eq!(hits[0].role, "user");
+
+        // Short 2-char Chinese substring match across merged streaming chunks
+        let hits = store
+            .search_sessions(&SessionSearchQuery {
+                query: "语音".into(),
+                include_archived: false,
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].role, "assistant");
+        assert!(hits[0].snippet.contains("tts_demo.mp3"));
+
+        // Include archived returns both sessions
+        let hits = store
+            .search_sessions(&SessionSearchQuery {
+                query: "WebRTC".into(),
+                include_archived: true,
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+
+        // CWD filter matches normalized slash paths
+        let hits = store
+            .search_sessions(&SessionSearchQuery {
+                query: "WebRTC".into(),
+                cwd: Some("C:/work/proj-b".into()),
+                include_archived: true,
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].agent_id, a2.id);
+
+        // Special characters never break FTS5 syntax
+        let hits = store
+            .search_sessions(&SessionSearchQuery {
+                query: "\"tts_demo.mp3\" (OR)".into(),
+                include_archived: true,
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(hits.len() <= 1);
+
+        // Deleting an agent cleans up its search index rows
+        store.delete_agent(a1.id).await.unwrap();
+        let hits = store
+            .search_sessions(&SessionSearchQuery {
+                query: "tts_demo".into(),
+                include_archived: true,
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
+
+        // Councils round-trip in SQLite
+        let council = CouncilRecord {
+            id: "cnc-1".into(),
+            question: "Should we use SQLite FTS5 trigram?".into(),
+            context: None,
+            mode: CouncilMode::Independent,
+            status: CouncilStatus::Completed,
+            requested_by: None,
+            cwd: Some("/repo".into()),
+            members: vec![CouncilMemberResponse {
+                seat: "A".into(),
+                label: "Claude".into(),
+                plugin: "claude-native".into(),
+                model: Some("claude-opus-4-6".into()),
+                agent_id: None,
+                status: "ok".into(),
+                round1: Some("Yes, trigram handles CJK cleanly.".into()),
+                round2: None,
+                error: None,
+                duration_ms: Some(1200),
+            }],
+            summary: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store.upsert_council(&council).await.unwrap();
+        assert_eq!(store.get_council("cnc-1").await.unwrap(), council);
+        assert_eq!(store.list_councils(10).await.unwrap().len(), 1);
     }
 }

@@ -34,9 +34,15 @@ teammates by their names; the model a teammate runs on is an attribute that can 
 When you mention a file, write its path relative to your working directory's root, with \
 forward slashes, optionally with `:line`, e.g. `crates/x/src/a.rs:12` or \
 [a.rs](crates/x/src/a.rs:12): the person can click it to open the file.\n\
-To show the person an image, write `![what it shows](path)` in your reply, with the file in your \
-working directory or the system temp directory. Opening an image with a tool shows it to you, \
-not to them.\n\
+To show the person an image, audio (`.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`), video \
+(`.mp4`, `.webm`, `.mov`), PDF or downloadable file directly in your reply (playable/previewable \
+on both desktop and mobile), write `![what it shows](path)` with the file in your working \
+directory or the system temp directory (a markdown link `[label](path)` to an audio or video \
+file also renders an inline player). Opening a file with a tool shows it to you, not to them.\n\
+To search past conversations across all sessions (including archived ones) for prior decisions, \
+code pointers or context, call `session_search` and read full turns with `session_read`. \
+To get independent perspectives or a cross-critique from multiple models or teammates on a hard \
+design or review question, call `council_consult`.\n\
 Tool calls that do not depend on each other go in one message, so they run in parallel; call \
 one after another only when a call needs the result of the one before.";
 

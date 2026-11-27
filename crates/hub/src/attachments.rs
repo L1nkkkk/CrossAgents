@@ -46,6 +46,9 @@ pub fn check_support(
                 AttachmentKind::Image => "images",
                 AttachmentKind::Pdf => "PDFs",
                 AttachmentKind::Text => "text",
+                AttachmentKind::Audio => "audio",
+                AttachmentKind::Video => "video",
+                AttachmentKind::File => "files",
             })
             .collect();
         let takes = if takes.is_empty() {
@@ -57,6 +60,9 @@ pub fn check_support(
             AttachmentKind::Image => "images",
             AttachmentKind::Pdf => "PDFs",
             AttachmentKind::Text => "text files",
+            AttachmentKind::Audio => "audio files",
+            AttachmentKind::Video => "video files",
+            AttachmentKind::File => "files",
         };
         return Err(Refused(format!(
             "{name}: {agent} cannot take {refused} (its {driver} driver takes {takes})"
@@ -83,7 +89,7 @@ pub fn store(
         let name = clean_name(&upload.name);
         if !attachment_mime_ok(&upload.mime) {
             return Err(Refused(format!(
-                "{name}: files of type {} cannot be sent (images, PDF, JSON and text can)",
+                "{name}: files of type {} cannot be sent (images, audio, video, PDF, text and common documents can)",
                 upload.mime
             )));
         }
@@ -148,6 +154,21 @@ pub fn remove(home: &Path, agent: AgentId) -> std::io::Result<()> {
 
 /// One stored file of `agent`'s; `None` for anything else (bad id, another session's file).
 pub fn read(home: &Path, agent: AgentId, id: &str) -> Option<AttachmentContent> {
+    read_range(home, agent, id, None, None)
+}
+
+/// Reads either the whole attachment (when `offset` and `limit` are both `None`) or one chunk
+/// starting at `offset` of at most `limit` bytes, so mobile and remote clients can stream large
+/// audio/video attachments without hitting single-request size or timeout caps.
+pub fn read_range(
+    home: &Path,
+    agent: AgentId,
+    id: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> Option<AttachmentContent> {
+    use std::io::{Read, Seek, SeekFrom};
+
     if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
@@ -161,12 +182,40 @@ pub fn read(home: &Path, agent: AgentId, id: &str) -> Option<AttachmentContent> 
     // junctions are resolved, never another drive or share.
     let file_name = path.file_name()?.to_str()?;
     let confined = crate::paths::confine(&dir, file_name, crate::paths::PathSource::Agent).ok()?;
-    let bytes = std::fs::read(&confined.abs).ok()?;
+    let meta = std::fs::metadata(&confined.abs).ok()?;
+    let total_size = meta.len();
+    let mut file = std::fs::File::open(&confined.abs).ok()?;
+    let mut head = [0u8; 64];
+    let head_len = file.read(&mut head).ok()?;
+    let mime = sniff_with_path(&confined.abs, &head[..head_len]).to_owned();
+
+    if offset.is_none() && limit.is_none() {
+        file.seek(SeekFrom::Start(0)).ok()?;
+        let mut bytes = Vec::with_capacity(total_size as usize);
+        file.read_to_end(&mut bytes).ok()?;
+        return Some(AttachmentContent {
+            id,
+            mime,
+            size: total_size,
+            data: STANDARD.encode(bytes),
+            offset: None,
+            eof: None,
+        });
+    }
+
+    let start = offset.unwrap_or(0).min(total_size);
+    let max_chunk = limit.unwrap_or(2 * 1024 * 1024).clamp(1, 12 * 1024 * 1024);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::with_capacity((total_size.saturating_sub(start)).min(max_chunk) as usize);
+    file.take(max_chunk).read_to_end(&mut bytes).ok()?;
+    let eof = start + bytes.len() as u64 >= total_size;
     Some(AttachmentContent {
         id,
-        mime: sniff(&bytes).to_owned(),
-        size: bytes.len() as u64,
+        mime,
+        size: total_size,
         data: STANDARD.encode(bytes),
+        offset: Some(start),
+        eof: Some(eof),
     })
 }
 
@@ -196,28 +245,76 @@ fn stored_path(dir: &Path, id: &str) -> Option<PathBuf> {
         .or_else(|| bare.exists().then_some(bare))
 }
 
+/// The type of stored bytes, from their extension and first bytes.
+pub(crate) fn sniff_with_path(path: &Path, head: &[u8]) -> &'static str {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        match ext.to_ascii_lowercase().as_str() {
+            "png" => return "image/png",
+            "jpg" | "jpeg" => return "image/jpeg",
+            "gif" => return "image/gif",
+            "webp" => return "image/webp",
+            "bmp" => return "image/bmp",
+            "svg" => return "image/svg+xml",
+            "pdf" => return "application/pdf",
+            "json" => return "application/json",
+            "md" => return "text/markdown",
+            "csv" => return "text/csv",
+            "html" | "htm" => return "text/html",
+            "css" => return "text/css",
+            "mp3" => return "audio/mpeg",
+            "wav" => return "audio/wav",
+            "m4a" => return "audio/mp4",
+            "ogg" | "oga" => return "audio/ogg",
+            "opus" => return "audio/opus",
+            "weba" => return "audio/webm",
+            "flac" => return "audio/flac",
+            "aac" => return "audio/aac",
+            "mp4" => return "video/mp4",
+            "webm" => return "video/webm",
+            "mov" => return "video/quicktime",
+            "m4v" => return "video/x-m4v",
+            "ogv" => return "video/ogg",
+            "mkv" => return "video/x-matroska",
+            "zip" => return "application/zip",
+            "gz" => return "application/gzip",
+            "tar" => return "application/x-tar",
+            "doc" => return "application/msword",
+            "docx" => {
+                return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+            }
+            "xls" => return "application/vnd.ms-excel",
+            "xlsx" => {
+                return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+            }
+            "ppt" => return "application/vnd.ms-powerpoint",
+            "pptx" => {
+                return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+            }
+            "rtf" => return "application/rtf",
+            "epub" => return "application/epub+zip",
+            _ => {}
+        }
+    }
+    sniff(head)
+}
+
 /// The type of stored bytes, from their first bytes (the store keeps bytes only).
 pub(crate) fn sniff(bytes: &[u8]) -> &'static str {
     match bytes {
         [0x89, b'P', b'N', b'G', ..] => "image/png",
         [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
         [b'G', b'I', b'F', b'8', ..] => "image/gif",
-        [
-            b'R',
-            b'I',
-            b'F',
-            b'F',
-            _,
-            _,
-            _,
-            _,
-            b'W',
-            b'E',
-            b'B',
-            b'P',
-            ..,
-        ] => "image/webp",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'A', b'V', b'E', ..] => "audio/wav",
+        [b'B', b'M', ..] => "image/bmp",
         [b'%', b'P', b'D', b'F', ..] => "application/pdf",
+        [b'I', b'D', b'3', ..] => "audio/mpeg",
+        [0xFF, b, ..] if (b & 0xE0) == 0xE0 => "audio/mpeg",
+        [b'O', b'g', b'g', b'S', ..] => "audio/ogg",
+        [b'f', b'L', b'a', b'C', ..] => "audio/flac",
+        [_, _, _, _, b'f', b't', b'y', b'p', ..] => "video/mp4",
+        [0x1A, 0x45, 0xDF, 0xA3, ..] => "video/webm",
+        [b'P', b'K', 0x03 | 0x05 | 0x07, 0x04 | 0x06 | 0x08, ..] => "application/zip",
         _ => "text/plain",
     }
 }

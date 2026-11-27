@@ -6,7 +6,7 @@ import {
   ChevronUp,
   Copy,
   Hand,
-  ImagePlus,
+  Paperclip,
   RefreshCw,
   Square,
   X,
@@ -24,11 +24,22 @@ import {
   vendorName,
 } from "../brands";
 import { DiffView, MarkdownView } from "../components/MarkdownView";
+import { MobileMediaCard } from "../components/MobileMediaCard";
+import {
+  formatBytes,
+  inferMime,
+  mediaKindOfMime,
+  mediaKindOfPath,
+  MOBILE_FILE_ACCEPT,
+  MOBILE_MAX_FILE_BYTES,
+  MOBILE_MAX_FILES,
+  MOBILE_MAX_TOTAL_BYTES,
+} from "../media";
 import {
   availableEfforts,
-  compressImageForUpload,
   extractErrorMessage,
   nodeDisplayName,
+  prepareFileForUpload,
   relativeTime,
 } from "../store";
 import type { HubTransport } from "../transport";
@@ -49,9 +60,10 @@ import type {
 const INITIAL_TURN_LIMIT = 12;
 const OLDER_PAGE_SIZE = 15;
 
-interface PendingPhoto {
+interface PendingAttachment {
   id: string;
-  previewUrl: string;
+  previewUrl?: string;
+  size: number;
   upload: AttachmentUpload;
 }
 
@@ -87,7 +99,7 @@ export function SessionScreen({
   onAnsweredQuestion: (item: HumanItem) => void;
 }) {
   const [draft, setDraft] = useState("");
-  const [photos, setPhotos] = useState<PendingPhoto[]>([]);
+  const [photos, setPhotos] = useState<PendingAttachment[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [sending, setSending] = useState(false);
@@ -299,13 +311,29 @@ export function SessionScreen({
   async function onPickFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
     setError(undefined);
-    const remaining = Math.max(0, 4 - photos.length);
+    const remaining = Math.max(0, MOBILE_MAX_FILES - photos.length);
+    if (remaining === 0) {
+      setError(`一条消息最多带 ${MOBILE_MAX_FILES} 个文件`);
+      return;
+    }
     const chosen = Array.from(files).slice(0, remaining);
     try {
-      const next: PendingPhoto[] = [];
+      const next: PendingAttachment[] = [];
+      let total = photos.reduce((acc, p) => acc + p.size, 0);
       for (const f of chosen) {
-        const compressed = await compressImageForUpload(f);
-        next.push({ id: crypto.randomUUID(), ...compressed });
+        const mime = inferMime(f.name, f.type);
+        if (!mediaKindOfMime(mime)) {
+          throw new Error(`${f.name}：暂不支持的文件类型（${mime || "未知"}）`);
+        }
+        if (f.size > MOBILE_MAX_FILE_BYTES) {
+          throw new Error(`${f.name} 超过单个文件 ${formatBytes(MOBILE_MAX_FILE_BYTES)} 上限`);
+        }
+        const prepared = await prepareFileForUpload(f, mime);
+        total += prepared.size;
+        if (total > MOBILE_MAX_TOTAL_BYTES) {
+          throw new Error(`附件总大小超过 ${formatBytes(MOBILE_MAX_TOTAL_BYTES)} 上限`);
+        }
+        next.push({ id: crypto.randomUUID(), ...prepared });
       }
       setPhotos((prev) => [...prev, ...next]);
     } catch (err) {
@@ -327,8 +355,10 @@ export function SessionScreen({
     setError(undefined);
     try {
       const canSteer = Boolean(isRunning && transcript?.capabilities?.steer);
+      const onlyImages = photos.length > 0 && photos.every((p) => p.upload.mime.startsWith("image/"));
+      const fallbackText = onlyImages ? "请查看这张图片。" : "请查看我发送的附件。";
       const res = await transport.request("POST", `/v1/agents/${encodeURIComponent(agentId)}/messages`, {
-        text: text || "请查看这张图片。",
+        text: text || fallbackText,
         ...(canSteer ? { steer: true } : {}),
         ...(photos.length ? { attachments: photos.map((p) => p.upload) } : {}),
         client_message_id: clientMessageId,
@@ -480,29 +510,39 @@ export function SessionScreen({
                         <div className="person-turn-name">{profile.name.trim()}</div>
                       )}
                       {turn.attachments && turn.attachments.length > 0 && (
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                          {turn.attachments.map((att) =>
-                            attachmentUrls[att.id] ? (
-                              <img
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", width: "100%" }}>
+                          {turn.attachments.map((att) => {
+                            if (att.mime.startsWith("image/") && attachmentUrls[att.id]) {
+                              return (
+                                <img
+                                  key={att.id}
+                                  src={attachmentUrls[att.id]}
+                                  alt={att.name}
+                                  onClick={() => setZoomUrl(attachmentUrls[att.id])}
+                                  style={{
+                                    width: 112,
+                                    height: 112,
+                                    objectFit: "cover",
+                                    borderRadius: 10,
+                                    border: "1px solid var(--border)",
+                                    cursor: "pointer",
+                                  }}
+                                />
+                              );
+                            }
+                            const kind = mediaKindOfMime(att.mime) ?? mediaKindOfPath(att.name) ?? "file";
+                            return (
+                              <MobileMediaCard
                                 key={att.id}
-                                src={attachmentUrls[att.id]}
-                                alt={att.name}
-                                onClick={() => setZoomUrl(attachmentUrls[att.id])}
-                                style={{
-                                  width: 112,
-                                  height: 112,
-                                  objectFit: "cover",
-                                  borderRadius: 10,
-                                  border: "1px solid var(--border)",
-                                  cursor: "pointer",
-                                }}
+                                source={{ kind: "attachment", agentId, attId: att.id, mime: att.mime }}
+                                mediaKind={kind}
+                                label={att.name}
+                                sizeHint={att.size}
+                                transport={transport}
+                                onZoomImage={setZoomUrl}
                               />
-                            ) : (
-                              <span key={att.id} className="chip">
-                                {att.name}
-                              </span>
-                            ),
-                          )}
+                            );
+                          })}
                         </div>
                       )}
                       {turn.input && (
@@ -546,6 +586,9 @@ export function SessionScreen({
                         <ItemView
                           key={idx}
                           item={item}
+                          agentId={agentId}
+                          transport={transport}
+                          onZoomImage={setZoomUrl}
                           loadedTool={item.type === "tool_call" ? toolDetails[item.tool_call_id] : undefined}
                           loadingTool={item.type === "tool_call" ? Boolean(loadingTools[item.tool_call_id]) : false}
                           onExpandTool={expandToolDetail}
@@ -591,18 +634,35 @@ export function SessionScreen({
         <div className="composer-box">
           {photos.length > 0 && (
             <div className="composer-photos">
-              {photos.map((p) => (
-                <div key={p.id} className="composer-photo-item">
-                  <img src={p.previewUrl} alt={p.upload.name} />
-                  <button
-                    type="button"
-                    className="composer-photo-del"
-                    onClick={() => setPhotos((prev) => prev.filter((x) => x.id !== p.id))}
-                  >
-                    <X size={11} />
-                  </button>
-                </div>
-              ))}
+              {photos.map((p) =>
+                p.previewUrl ? (
+                  <div key={p.id} className="composer-photo-item">
+                    <img src={p.previewUrl} alt={p.upload.name} />
+                    <button
+                      type="button"
+                      className="composer-photo-del"
+                      onClick={() => setPhotos((prev) => prev.filter((x) => x.id !== p.id))}
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                ) : (
+                  <div key={p.id} className="composer-file-chip">
+                    <span className="composer-file-ext">
+                      {(p.upload.name.split(".").pop() || "FILE").slice(0, 4).toUpperCase()}
+                    </span>
+                    <span className="composer-file-name">{p.upload.name}</span>
+                    <span className="composer-file-size">{formatBytes(p.size)}</span>
+                    <button
+                      type="button"
+                      className="composer-file-del"
+                      onClick={() => setPhotos((prev) => prev.filter((x) => x.id !== p.id))}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ),
+              )}
             </div>
           )}
 
@@ -628,7 +688,7 @@ export function SessionScreen({
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept={MOBILE_FILE_ACCEPT}
               multiple
               style={{ display: "none" }}
               onChange={(e) => void onPickFiles(e.target.files)}
@@ -636,11 +696,11 @@ export function SessionScreen({
             <button
               type="button"
               className="composer-tool-btn icon-only"
-              disabled={photos.length >= 4 || sending || !transport}
+              disabled={photos.length >= MOBILE_MAX_FILES || sending || !transport}
               onClick={() => fileInputRef.current?.click()}
-              title="选择图片"
+              title="选择图片、音频、视频、PDF 或文本文件"
             >
-              <ImagePlus size={15} />
+              <Paperclip size={15} />
             </button>
 
             {activeAgent && (
@@ -730,11 +790,17 @@ function CopyReplyRow({ text }: { text: string }) {
 
 function ItemView({
   item,
+  agentId,
+  transport,
+  onZoomImage,
   loadedTool,
   loadingTool,
   onExpandTool,
 }: {
   item: TranscriptItem;
+  agentId: string;
+  transport: HubTransport | null;
+  onZoomImage: (url: string) => void;
   loadedTool?: { output?: string; detail?: ToolDetail };
   loadingTool?: boolean;
   onExpandTool: (toolCallId: string) => void;
@@ -749,7 +815,7 @@ function ItemView({
           </details>
         );
       }
-      return <MarkdownView text={item.text} />;
+      return <MarkdownView text={item.text} agentId={agentId} transport={transport} onZoomImage={onZoomImage} />;
 
     case "tool_call": {
       const done = item.status === "completed";

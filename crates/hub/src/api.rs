@@ -30,13 +30,14 @@ use crossagents_api_types::{
     FinishRequest, GitBranch, GitBranchesResponse, GitCommitResponse, GitFileState, GitGraph,
     GitGraphRef, GitRefKind, GitStatusEntry, GitStatusResponse, GraphCommit, GraphRef,
     GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest,
-    ListAccountsResponse, ListAgentsResponse, ListAvatarsResponse, ListHistoryResponse,
-    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QueuedReason, QuotaResponse,
-    RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
-    RunCostResponse, RunDetail, RunTrace, SaveEgressProxyRequest, SendMessageRequest,
-    SendMessageResponse, SetAccountEgressRequest, SetModelRequest, SetPluginModelsRequest,
-    SetTopicRequest, TaskReviewRequest, TaskTrace, ToolCallDetailResponse, Transcript,
+    ListAccountsResponse, ListAgentsResponse, ListAvatarsResponse, ListCouncilsResponse,
+    ListHistoryResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
+    ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted, MediaContent, PluginInfo,
+    QueuedReason, QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest,
+    ResolvePathsResponse, ResolvedPath, RunCostResponse, RunDetail, RunTrace,
+    SaveEgressProxyRequest, SearchSessionsResponse, SendMessageRequest, SendMessageResponse,
+    SetAccountEgressRequest, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
+    StartCouncilRequest, TaskReviewRequest, TaskTrace, ToolCallDetailResponse, Transcript,
     TurnDiffResponse,
     UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse,
     UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse, VerifyingTask, WorkDetail,
@@ -194,6 +195,9 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(AVATAR_BODY_LIMIT)),
         )
         .route("/v1/notes", get(list_notes))
+        .route("/v1/search/sessions", get(search_sessions))
+        .route("/v1/council", get(list_councils).post(start_council))
+        .route("/v1/council/{id}", get(get_council))
         .route("/v1/background", get(background))
         .route("/v1/background/reminders/{id}", delete(cancel_reminder))
         .route("/v1/extensions", get(list_extensions))
@@ -273,6 +277,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/files/status", get(agent_files_status))
         .route("/v1/agents/{key}/files/search", get(agent_files_search))
         .route("/v1/agents/{key}/files/image", get(agent_files_image))
+        .route("/v1/agents/{key}/files/media", get(agent_files_media))
         .route("/v1/agents/{key}/files/resolve", post(agent_files_resolve))
         .route("/v1/runs/{key}/files/tree", get(run_files_tree))
         .route("/v1/runs/{key}/files/content", get(run_files_content))
@@ -1661,6 +1666,127 @@ async fn list_notes(
     }))
 }
 
+#[derive(Deserialize)]
+struct SearchSessionsQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    archived: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /v1/search/sessions`: full-text search across past conversations (inputs, replies, topics).
+async fn search_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SearchSessionsQuery>,
+) -> ApiResult<Json<SearchSessionsResponse>> {
+    let q = query.q.trim().to_owned();
+    if q.is_empty() {
+        return Ok(Json(SearchSessionsResponse {
+            query: q,
+            hits: Vec::new(),
+        }));
+    }
+    let agent = match query
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(key) => Some(state.store().get_agent(&AgentKey::parse(key)).await?.id),
+        None => None,
+    };
+    let hits = state
+        .store()
+        .search_sessions(&crossagents_core::SessionSearchQuery {
+            query: q.clone(),
+            agent,
+            cwd: query
+                .cwd
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned),
+            include_archived: query.archived,
+            limit: query.limit.unwrap_or(20).clamp(1, 50),
+        })
+        .await?;
+    Ok(Json(SearchSessionsResponse { query: q, hits }))
+}
+
+#[derive(Deserialize)]
+struct CouncilListQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct StartCouncilQuery {
+    /// When `false` (default for GUI live polling), returns the initial `Running` record at once
+    /// while seats execute in the background. When `true` (default), waits until completion.
+    #[serde(default = "default_wait_true")]
+    wait: bool,
+}
+
+fn default_wait_true() -> bool {
+    true
+}
+
+/// `GET /v1/council`: list recent multi-model council consultations, newest first.
+async fn list_councils(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CouncilListQuery>,
+) -> ApiResult<Json<ListCouncilsResponse>> {
+    let councils = state
+        .store()
+        .list_councils(query.limit.unwrap_or(25).clamp(1, 100))
+        .await?;
+    Ok(Json(ListCouncilsResponse { councils }))
+}
+
+/// `GET /v1/council/{id}`: fetch one council consultation record (including live seat progress).
+async fn get_council(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crossagents_core::CouncilRecord>> {
+    let record = state.store().get_council(&id).await?;
+    Ok(Json(record))
+}
+
+/// `POST /v1/council`: start a multi-model council consultation across 2..=5 seats.
+async fn start_council(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<StartCouncilQuery>,
+    Json(req): Json<StartCouncilRequest>,
+) -> ApiResult<Json<crossagents_core::CouncilRecord>> {
+    let (initial, handle) = crate::council::start_council(
+        state.runtime.clone(),
+        state.bus.clone(),
+        crate::council::CouncilParams {
+            question: req.question,
+            context: req.context,
+            mode: req.mode,
+            members: req.members,
+            cwd: req.cwd,
+            requested_by: req.requested_by,
+            home: state.home.clone(),
+        },
+    )
+    .await?;
+    if !query.wait {
+        return Ok(Json(initial));
+    }
+    let finished = handle
+        .await
+        .map_err(|e| AppError::from(CoreError::Agent(format!("council task panicked: {e}"))))?;
+    Ok(Json(finished))
+}
+
 /// The background board: every agent's reminders and watches, and the tasks being verified.
 async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<BackgroundResponse>> {
     use std::collections::HashMap;
@@ -1969,21 +2095,35 @@ async fn store_uploads(
     })
 }
 
-/// One file sent to the agent, for clients to show.
+#[derive(Debug, Deserialize, Default)]
+struct ChunkQuery {
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    limit: Option<u64>,
+}
+
+/// One file sent to the agent, for clients to show (supports optional `?offset=&limit=` chunks).
 async fn get_attachment(
     State(state): State<Arc<AppState>>,
     Path((key, id)): Path<(String, String)>,
+    Query(chunk): Query<ChunkQuery>,
 ) -> ApiResult<Json<AttachmentContent>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
-    crate::attachments::read(&state.home, agent.id, &id)
-        .map(Json)
-        .ok_or_else(|| {
-            CoreError::NotFound {
-                kind: "attachment",
-                id,
-            }
-            .into()
-        })
+    let home = state.home.clone();
+    let id_for_task = id.clone();
+    let content = tokio::task::spawn_blocking(move || {
+        crate::attachments::read_range(&home, agent.id, &id_for_task, chunk.offset, chunk.limit)
+    })
+    .await
+    .map_err(|e| AppError::from(CoreError::Agent(format!("attachment read failed: {e}"))))?;
+    content.map(Json).ok_or_else(|| {
+        CoreError::NotFound {
+            kind: "attachment",
+            id,
+        }
+        .into()
+    })
 }
 
 async fn list_avatars(State(state): State<Arc<AppState>>) -> Json<ListAvatarsResponse> {
@@ -2743,13 +2883,27 @@ async fn update_run_policy(
     Path(key): Path<String>,
     Json(req): Json<UpdateRunPolicyRequest>,
 ) -> ApiResult<Json<RunDetail>> {
-    if req.continuation.is_none() && !req.reset_attempts {
+    if req.continuation.is_none() && !req.reset_attempts && req.lead_models.is_none() {
         return Err(AppError::bad_request(
-            "say what to change: continuation (on or off, with its limits) or reset_attempts",
+            "say what to change: continuation (on or off, with its limits), lead_models, or reset_attempts",
         ));
     }
     let id = resolve_run(&state, &key).await?;
     let mut run = state.store().get_run(id).await?;
+    if let Some(lead_models_update) = req.lead_models {
+        run.config.policy.lead_models = lead_models_update.and_then(|mut m| {
+            m.plan = m.plan.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+            m.coordinate = m
+                .coordinate
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty());
+            m.verify = m
+                .verify
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty());
+            m.is_set().then_some(m)
+        });
+    }
     if let Some(update) = req.continuation {
         if update.enabled {
             // Kept as a value and edited field by field: a limit the request does not
@@ -3337,6 +3491,59 @@ async fn agent_files_image(
         size: bytes.len() as u64,
         data: STANDARD.encode(&bytes),
     }))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MediaQuery {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    limit: Option<u64>,
+}
+
+/// `GET /v1/agents/{key}/files/media?path=&offset=&limit=`: serves images, audio (mp3/wav/m4a/ogg/flac),
+/// video (mp4/webm/mov), PDFs, text files, and common documents referenced in an agent reply, with
+/// chunked streaming support for mobile WebRTC/iroh and remote desktop clients.
+async fn agent_files_media(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<MediaQuery>,
+) -> ApiResult<Json<MediaContent>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    let input = q.path.unwrap_or_default();
+    if input.trim().is_empty() {
+        return Err(AppError::bad_request(
+            "path is missing: `?path=<a media or document path inside the agent's working directory or temp directory>`",
+        ));
+    }
+    if crate::runtime::is_remote_agent(&agent) {
+        return crate::api_nodes::remote_agent_files_media(
+            &state,
+            &agent,
+            &input,
+            q.offset,
+            q.limit,
+        )
+        .await;
+    }
+    let root = state
+        .orchestrator
+        .files_root(FilesScope::Agent(&agent))
+        .await?;
+    let normalized = crate::media::normalize_input_path(&input);
+    crate::paths::refuse_remote(&root, &normalized)?;
+    let attachments_dir = state.home.join("attachments").join(agent.id.to_string());
+    let abs = crate::media::locate(&root, Some(&attachments_dir), &input)?;
+    let offset = q.offset;
+    let limit = q.limit;
+    let content = tokio::task::spawn_blocking(move || {
+        crate::media::load_chunk(&abs, &input, offset, limit)
+    })
+    .await
+    .map_err(|e| AppError::from(CoreError::Agent(format!("media read failed: {e}"))))??;
+    Ok(Json(content))
 }
 
 async fn run_files_content(

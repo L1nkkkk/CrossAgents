@@ -4,7 +4,10 @@
 
 import { useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
+import { mediaKindOfPath } from "../media";
+import type { HubTransport } from "../transport";
 import type { FileChange } from "../types";
+import { MobileMediaCard } from "./MobileMediaCard";
 
 type Block =
   | { kind: "heading"; level: number; text: string }
@@ -158,10 +161,16 @@ function parseBlocks(text: string): Block[] {
   return blocks;
 }
 
-function renderInline(text: string): ReactNode[] {
+interface MediaCtx {
+  agentId?: string;
+  transport?: HubTransport | null;
+  onZoomImage?: (url: string) => void;
+}
+
+function renderInline(text: string, ctx?: MediaCtx): ReactNode[] {
   const parts: ReactNode[] = [];
   const regex =
-    /(`[^`\n]+`|\[([^\]\n]+)\]\(([^)\s]+)\)|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|https?:\/\/[^\s)<>]+)/g;
+    /(`[^`\n]+`|!\[([^\]\n]*)\]\(([^)\s]+)\)|\[([^\]\n]+)\]\(([^)\s]+)\)|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|https?:\/\/[^\s)<>]+)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   let key = 0;
@@ -178,8 +187,48 @@ function renderInline(text: string): ReactNode[] {
         </code>,
       );
     } else if (match[2] !== undefined && match[3] !== undefined) {
-      const label = match[2];
-      const href = match[3];
+      // Embedded media / image: `![alt](target)`
+      const alt = match[2];
+      const target = match[3];
+      if (/^https?:\/\//i.test(target)) {
+        parts.push(
+          <a key={key++} href={target} target="_blank" rel="noreferrer">
+            {alt || target}
+          </a>,
+        );
+      } else if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(target)) {
+        parts.push(
+          <img
+            key={key++}
+            src={target}
+            alt={alt}
+            className="m-media-img"
+            onClick={() => ctx?.onZoomImage?.(target)}
+          />,
+        );
+      } else if (ctx?.agentId) {
+        const cleanPath = target.replace(/^file:\/\//i, "").replace(/^\/([a-zA-Z]:\/)/, "$1");
+        const kind = mediaKindOfPath(cleanPath) ?? "image";
+        parts.push(
+          <MobileMediaCard
+            key={key++}
+            source={{ kind: "agentMedia", agentId: ctx.agentId, path: cleanPath }}
+            mediaKind={kind}
+            label={alt || cleanPath}
+            transport={ctx.transport ?? null}
+            onZoomImage={ctx.onZoomImage}
+          />,
+        );
+      } else {
+        parts.push(
+          <code key={key++} className="md-inline-code md-file-ref">
+            {alt || target}
+          </code>,
+        );
+      }
+    } else if (match[4] !== undefined && match[5] !== undefined) {
+      const label = match[4];
+      const href = match[5];
       if (/^https?:\/\//i.test(href)) {
         parts.push(
           <a key={key++} href={href} target="_blank" rel="noreferrer">
@@ -187,15 +236,30 @@ function renderInline(text: string): ReactNode[] {
           </a>,
         );
       } else {
-        // File/line reference from an agent (e.g. [a.rs](file:///...)) — render cleanly as code chip.
-        parts.push(
-          <code key={key++} className="md-inline-code md-file-ref">
-            {label}
-          </code>,
-        );
+        const cleanPath = href.replace(/^file:\/\//i, "").replace(/^\/([a-zA-Z]:\/)/, "$1");
+        const kind = mediaKindOfPath(cleanPath);
+        if (ctx?.agentId && (kind === "audio" || kind === "video" || kind === "pdf")) {
+          parts.push(
+            <MobileMediaCard
+              key={key++}
+              source={{ kind: "agentMedia", agentId: ctx.agentId, path: cleanPath }}
+              mediaKind={kind}
+              label={label}
+              transport={ctx.transport ?? null}
+              onZoomImage={ctx.onZoomImage}
+            />,
+          );
+        } else {
+          // File/line reference from an agent (e.g. [a.rs](file:///...)) — render cleanly as code chip.
+          parts.push(
+            <code key={key++} className="md-inline-code md-file-ref">
+              {label}
+            </code>,
+          );
+        }
       }
     } else if (token.startsWith("**") && token.endsWith("**")) {
-      parts.push(<strong key={key++}>{renderInline(token.slice(2, -2))}</strong>);
+      parts.push(<strong key={key++}>{renderInline(token.slice(2, -2), ctx)}</strong>);
     } else if (token.startsWith("~~") && token.endsWith("~~")) {
       parts.push(<del key={key++}>{token.slice(2, -2)}</del>);
     } else if (token.startsWith("*") && token.endsWith("*")) {
@@ -236,8 +300,21 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
   );
 }
 
-export function MarkdownView({ text, className = "" }: { text: string; className?: string }) {
+export function MarkdownView({
+  text,
+  className = "",
+  agentId,
+  transport,
+  onZoomImage,
+}: {
+  text: string;
+  className?: string;
+  agentId?: string;
+  transport?: HubTransport | null;
+  onZoomImage?: (url: string) => void;
+}) {
   const blocks = parseBlocks(text);
+  const ctx: MediaCtx = { agentId, transport, onZoomImage };
   return (
     <div className={`prose ${className}`}>
       {blocks.map((block, idx) => {
@@ -246,9 +323,9 @@ export function MarkdownView({ text, className = "" }: { text: string; className
             return <CodeBlock key={idx} lang={block.lang} code={block.code} />;
           case "heading":
             return block.level <= 2 ? (
-              <h3 key={idx}>{renderInline(block.text)}</h3>
+              <h3 key={idx}>{renderInline(block.text, ctx)}</h3>
             ) : (
-              <h4 key={idx}>{renderInline(block.text)}</h4>
+              <h4 key={idx}>{renderInline(block.text, ctx)}</h4>
             );
           case "hr":
             return <hr key={idx} />;
@@ -256,7 +333,7 @@ export function MarkdownView({ text, className = "" }: { text: string; className
             return (
               <blockquote key={idx}>
                 {block.lines.map((l, j) => (
-                  <p key={j}>{renderInline(l)}</p>
+                  <p key={j}>{renderInline(l, ctx)}</p>
                 ))}
               </blockquote>
             );
@@ -264,7 +341,7 @@ export function MarkdownView({ text, className = "" }: { text: string; className
             return (
               <ul key={idx}>
                 {block.items.map((item, j) => (
-                  <li key={j}>{renderInline(item)}</li>
+                  <li key={j}>{renderInline(item, ctx)}</li>
                 ))}
               </ul>
             );
@@ -272,7 +349,7 @@ export function MarkdownView({ text, className = "" }: { text: string; className
             return (
               <ol key={idx}>
                 {block.items.map((item, j) => (
-                  <li key={j}>{renderInline(item)}</li>
+                  <li key={j}>{renderInline(item, ctx)}</li>
                 ))}
               </ol>
             );
@@ -283,7 +360,7 @@ export function MarkdownView({ text, className = "" }: { text: string; className
                   <thead>
                     <tr>
                       {block.headers.map((h, j) => (
-                        <th key={j}>{renderInline(h)}</th>
+                        <th key={j}>{renderInline(h, ctx)}</th>
                       ))}
                     </tr>
                   </thead>
@@ -291,7 +368,7 @@ export function MarkdownView({ text, className = "" }: { text: string; className
                     {block.rows.map((r, ri) => (
                       <tr key={ri}>
                         {r.map((cell, ci) => (
-                          <td key={ci}>{renderInline(cell)}</td>
+                          <td key={ci}>{renderInline(cell, ctx)}</td>
                         ))}
                       </tr>
                     ))}
@@ -300,7 +377,7 @@ export function MarkdownView({ text, className = "" }: { text: string; className
               </div>
             );
           case "p":
-            return <p key={idx}>{renderInline(block.text)}</p>;
+            return <p key={idx}>{renderInline(block.text, ctx)}</p>;
         }
       })}
     </div>
