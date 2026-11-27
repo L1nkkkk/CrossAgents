@@ -43,6 +43,7 @@ import { useConnectionState } from "./lib/useConnection";
 import { OsIcon } from "./osIcon";
 import "./sidebar.css";
 import { CHATS, selectWorkspace, useWorkspaces, wsHref, wsKey } from "./workspace";
+import { encodeSessionDrag, ScopedNameLabel } from "./sessionRef";
 
 const Confirmed = createContext(true);
 const Needs = createContext<readonly TodoItem[]>([]);
@@ -622,12 +623,13 @@ export function Sidebar({ route }: { route: string[] }) {
     e.stopPropagation();
     setCtxMenu({ agent, x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 220) });
   };
-  const row = (member: SidebarMember, groupKey?: string, groupIds?: string[], nodeOffline?: boolean) => (
+  const row = (member: SidebarMember, groupKey?: string, groupIds?: string[], nodeOffline?: boolean, inProjectGroup = false) => (
     <SessionRow
       key={member.agent.id}
       member={member}
       active={isSession(member.agent)}
       nodeOffline={nodeOffline}
+      inProjectGroup={inProjectGroup}
       dragKey={groupKey ? { group: groupKey, id: member.agent.id } : undefined}
       onReorder={groupKey && groupIds ? (fromId, toId, after) => reorderInGroup(groupKey, groupIds, fromId, toId, after) : undefined}
       onMenu={openRowMenu(member.agent)}
@@ -832,7 +834,7 @@ export function Sidebar({ route }: { route: string[] }) {
                           keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
                           searching={searching}
                         >
-                          {(m) => row(m, foldKey, sessionMembers.map((x) => x.agent.id), nodeOffline)}
+                          {(m) => row(m, foldKey, sessionMembers.map((x) => x.agent.id), nodeOffline, g.key !== CHATS)}
                         </Capped>
                         {!searching && isCentre && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
                       </Group>
@@ -1250,6 +1252,7 @@ function SessionRow({
   member,
   active,
   nodeOffline,
+  inProjectGroup = false,
   dragKey,
   onReorder,
   onMenu,
@@ -1257,6 +1260,7 @@ function SessionRow({
   member: SidebarMember;
   active: boolean;
   nodeOffline?: boolean;
+  inProjectGroup?: boolean;
   dragKey?: { group: string; id: string };
   onReorder?: (fromId: string, toId: string, after: boolean) => void;
   onMenu?: (e: ReactMouseEvent) => void;
@@ -1355,6 +1359,7 @@ function SessionRow({
       pinKey={sessionKey(agent)}
       beside={agent.id}
       archive={agent}
+      dragAgent={agent}
       dragKey={dragKey}
       onReorder={onReorder}
       onMenu={onMenu}
@@ -1368,7 +1373,9 @@ function SessionRow({
       }
       label={
         <span className="member-top">
-          <span className={"member-name " + (flagged ? "strong" : "")}>{sessionLabel(agent)}</span>
+          <span className={"member-name " + (flagged ? "strong" : "")}>
+            <ScopedNameLabel name={sessionLabel(agent)} compact={inProjectGroup} />
+          </span>
           <ModelMark plugin={agent.plugin} model={agent.model} />
           {typeof (agent.config as Record<string, unknown> | null)?.worktree_branch === "string" && (
             <span className="member-branch" title={`Worktree 分支：${String((agent.config as Record<string, unknown>).worktree_branch)}`}>
@@ -1414,8 +1421,17 @@ function Archived({ agents, isSession }: { agents: Agent[]; isSession: (a: Agent
       </div>
       {open &&
         sorted.map((a) => (
-          <div key={a.id} className={`nav-row dim ${isSession(a) ? "active" : ""}`}>
-            <a className="row-link" href={sessionHref(a)} title={`${labelOf(a)} · ${displayName(a)}`}>
+          <div
+            key={a.id}
+            className={`nav-row dim ${isSession(a) ? "active" : ""}`}
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.effectAllowed = "copy";
+              encodeSessionDrag(e.dataTransfer, a);
+              e.dataTransfer.setData("text/plain", a.name);
+            }}
+          >
+            <a className="row-link" href={sessionHref(a)} title={`${labelOf(a)} · ${displayName(a)}（可拖入输入框引用）`}>
               <span className="row-lead">
                 <Avatar agent={a} size={16} />
               </span>
@@ -1455,6 +1471,7 @@ function Row({
   pinKey,
   beside,
   archive,
+  dragAgent,
   dragKey,
   onReorder,
   onMenu,
@@ -1480,6 +1497,8 @@ function Row({
   beside?: string;
   /** The conversation this row archives from its hover actions. */
   archive?: Agent;
+  /** Session carried when this row is dragged into a composer to reference it. */
+  dragAgent?: Agent;
   /** Drag-and-drop identity within a sidebar group. */
   dragKey?: { group: string; id: string };
   onReorder?: (fromId: string, toId: string, after: boolean) => void;
@@ -1535,40 +1554,46 @@ function Row({
   };
   const [dragging, setDragging] = useState(false);
   const [dropPos, setDropPos] = useState<"before" | "after" | null>(null);
-  const dnd = dragKey
-    ? {
-        draggable: true,
-        onDragStart: (e: ReactDragEvent<HTMLDivElement>) => {
-          hidePeek();
-          draggingSession = dragKey;
-          setDragging(true);
-          e.dataTransfer.effectAllowed = "move";
-          e.dataTransfer.setData("text/plain", dragKey.id);
-        },
-        onDragEnd: () => {
-          draggingSession = null;
-          setDragging(false);
-          setDropPos(null);
-        },
-        onDragOver: (e: ReactDragEvent<HTMLDivElement>) => {
-          if (!draggingSession || draggingSession.group !== dragKey.group || draggingSession.id === dragKey.id) return;
-          e.preventDefault();
-          e.dataTransfer.dropEffect = "move";
-          const rect = e.currentTarget.getBoundingClientRect();
-          setDropPos(e.clientY > rect.top + rect.height / 2 ? "after" : "before");
-        },
-        onDragLeave: () => setDropPos(null),
-        onDrop: (e: ReactDragEvent<HTMLDivElement>) => {
-          if (!draggingSession || draggingSession.group !== dragKey.group || draggingSession.id === dragKey.id) return;
-          e.preventDefault();
-          const rect = e.currentTarget.getBoundingClientRect();
-          const after = e.clientY > rect.top + rect.height / 2;
-          onReorder?.(draggingSession.id, dragKey.id, after);
-          draggingSession = null;
-          setDropPos(null);
-        },
-      }
-    : undefined;
+  const dnd =
+    dragKey || dragAgent
+      ? {
+          draggable: true,
+          onDragStart: (e: ReactDragEvent<HTMLDivElement>) => {
+            hidePeek();
+            if (dragKey) draggingSession = dragKey;
+            setDragging(true);
+            e.dataTransfer.effectAllowed = dragKey ? "copyMove" : "copy";
+            if (dragAgent) encodeSessionDrag(e.dataTransfer, dragAgent);
+            e.dataTransfer.setData("text/plain", dragKey?.id ?? dragAgent?.name ?? "");
+          },
+          onDragEnd: () => {
+            draggingSession = null;
+            setDragging(false);
+            setDropPos(null);
+          },
+          ...(dragKey
+            ? {
+                onDragOver: (e: ReactDragEvent<HTMLDivElement>) => {
+                  if (!draggingSession || draggingSession.group !== dragKey.group || draggingSession.id === dragKey.id) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setDropPos(e.clientY > rect.top + rect.height / 2 ? "after" : "before");
+                },
+                onDragLeave: () => setDropPos(null),
+                onDrop: (e: ReactDragEvent<HTMLDivElement>) => {
+                  if (!draggingSession || draggingSession.group !== dragKey.group || draggingSession.id === dragKey.id) return;
+                  e.preventDefault();
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const after = e.clientY > rect.top + rect.height / 2;
+                  onReorder?.(draggingSession.id, dragKey.id, after);
+                  draggingSession = null;
+                  setDropPos(null);
+                },
+              }
+            : {}),
+        }
+      : undefined;
   return (
     <div
       className={`nav-row ${active ? "active" : ""} ${dim ? "dim" : ""} ${compact ? "compact" : ""} ${flash ? "just-done" : ""} ${dragging ? "dragging" : ""} ${dropPos ? `drag-over-${dropPos}` : ""}`}

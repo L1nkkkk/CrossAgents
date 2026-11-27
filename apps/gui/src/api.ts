@@ -374,7 +374,8 @@ export const api = {
   agentCommands: (key: string) => request<AgentCommandsResponse>("GET", `/v1/agents/${enc(key)}/commands`),
   stopAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/stop`),
   setModel: (key: string, model: string | null, effort?: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/model`, { model, effort }),
-  renameAgent: (key: string, name: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/name`, { name }),
+  renameAgent: (key: string, name: string, random = false) =>
+    request<Agent>("POST", `/v1/agents/${enc(key)}/name`, random ? { name: "", random: true } : { name }),
   setTopic: (key: string, topic: string | null) => request<Agent>("POST", `/v1/agents/${enc(key)}/topic`, { topic }),
   setAgentCwd: (key: string, cwd: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/cwd`, { cwd }),
   archiveAgent: (key: string, archived: boolean) => request<Agent>("POST", `/v1/agents/${enc(key)}/archive`, { archived }),

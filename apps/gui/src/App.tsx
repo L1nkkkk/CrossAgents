@@ -14,6 +14,9 @@ import { toggleRail } from "./rail";
 import { Sidebar, SidebarRail } from "./Sidebar";
 import { useSystemNotices } from "./notify";
 import { Titlebar, closeSidebarPeek, hoverSidebar, inDesktop, toggleSidebar, unhoverSidebar, useSidebar } from "./titlebar";
+import { setWindowMode, useWindowMode } from "./windowMode";
+import { ClassicWindow } from "./views/ClassicWindow";
+import { MiniWindow } from "./views/MiniWindow";
 import { ToolColumn, useToolsFloat } from "./ToolColumn";
 import { BOTTOM, COLLAPSE, SIDEBAR, TOOLS, dragBottom, dragEdge, setBottomHeight, setSidebarWidth, setToolsWidth, useWidths } from "./lib/widths";
 import { HomeView } from "./views/Home";
@@ -194,6 +197,7 @@ function UnavailablePage({ label, support }: { label: string; support: FeatureSu
 
 export function App() {
   useSystemNotices();
+  const windowMode = useWindowMode();
   const route = useRoute();
   const [section, a, b, c] = route;
   const { state, focus, peek } = useLayout();
@@ -262,6 +266,11 @@ export function App() {
       } else if (mod && e.key.toLowerCase() === "i") {
         e.preventDefault();
         toggleRail();
+      } else if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.key === "1" || e.key === "!" || e.key === "2" || e.key === "@" || e.key === "3" || e.key === "#")) {
+        e.preventDefault();
+        if (e.key === "1" || e.key === "!") void setWindowMode("efficiency");
+        else if (e.key === "2" || e.key === "@") void setWindowMode("classic");
+        else void setWindowMode("mini");
       } else if (e.altKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
         e.preventDefault();
         if (e.key === "ArrowLeft") history.back();
@@ -443,6 +452,20 @@ title="拖动调整宽度，双击还原，拖到边上收起"
       <TerminalProblem />
     </div>
   );
+  if (windowMode.mode === "mini") {
+    return (
+      <div className="window window-mini">
+        {mismatch ? <VersionMismatchView {...mismatch} /> : <MiniWindow />}
+      </div>
+    );
+  }
+  if (windowMode.mode === "classic") {
+    return (
+      <div className="window window-classic">
+        {mismatch ? <VersionMismatchView {...mismatch} /> : <ClassicWindow route={route} />}
+      </div>
+    );
+  }
   if (!inDesktop) return app;
   return (
     <div className="window">

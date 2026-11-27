@@ -6,8 +6,10 @@ import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { CreateRunRequest } from "@bindings/CreateRunRequest";
 import type { SessionCandidate } from "@bindings/SessionCandidate";
 import type { AttachmentUpload } from "@bindings/AttachmentUpload";
+import type { SessionRefInput } from "@bindings/SessionRefInput";
 import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { Key } from "./i18n";
+import { semanticTopic } from "./agentName.ts";
 import { chatTitle } from "./models.ts";
 
 /** A sentence for the person: a dictionary key and what fills its placeholders. */
@@ -83,10 +85,19 @@ export function runSessionFields(session: SessionCandidate | undefined): RunSess
 }
 
 /** The body of `POST /v1/agents/{key}/chat`; an archived session needs `restore: true`. */
-export function chatBody(text: string, session: SessionCandidate | undefined, attachments: AttachmentUpload[] = []): StartChatRequest {
+export function chatBody(
+  text: string,
+  session: SessionCandidate | undefined,
+  attachments: AttachmentUpload[] = [],
+  sessionRefs: SessionRefInput[] = [],
+): StartChatRequest {
   const body: StartChatRequest = { text, restore: session?.reason === "archived" };
-  // Without files the body is as before, byte for byte.
-  return attachments.length ? { ...body, attachments } : body;
+  // Without files or session refs the body is as before, byte for byte.
+  return {
+    ...body,
+    ...(attachments.length ? { attachments } : {}),
+    ...(sessionRefs.length ? { session_refs: sessionRefs } : {}),
+  };
 }
 
 /** A model to start a brand-new chat on, and which login of its vendor pays for it. */
@@ -94,12 +105,13 @@ export type ChatChoice = { plugin: string; model: string; account?: string };
 
 /**
  * The agent a new chat is made as (chat mode, no existing session): titled by its first
- * message, with its login and — unless it is one typed with `@` for another vendor — the
- * composer's effort.
+ * message (cleaned of greetings/fillers), with its login and — unless it is one typed with `@`
+ * for another vendor — the composer's effort.
  */
 export function newChatRequest(choice: ChatChoice, text: string, cwd: string, effort?: string): CreateAgentRequest {
+  const topic = semanticTopic(text, 36) ?? (text.trim() ? undefined : chatTitle(text, 60));
   return {
-    topic: chatTitle(text, 60),
+    ...(topic !== undefined ? { topic } : {}),
     plugin: choice.plugin,
     driver: null,
     model: choice.model,

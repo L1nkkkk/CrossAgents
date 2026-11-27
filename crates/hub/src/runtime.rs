@@ -1444,6 +1444,8 @@ impl Runtime {
             text,
             reply_to: Some(forward.answers),
             attachments: Vec::new(),
+            session_refs: Vec::new(),
+            session_context: None,
         };
         self.replies.lock().unwrap().mark_forwarded(id);
         if let Err(err) = self
@@ -1778,7 +1780,7 @@ impl Runtime {
         // text, but the bubble shows what the person wrote, not the notes. The notes are
         // only consumed if the message really goes in: a queued copy below gets them from
         // `deliver`.
-        let (display, sent, consumed) = {
+        let (display, mut sent, consumed) = {
             let notices = self.notices.lock().await;
             match notices.get(&stored.id).filter(|notes| !notes.is_empty()) {
                 Some(notes) => {
@@ -1796,6 +1798,13 @@ impl Runtime {
                 ),
             }
         };
+        if let Some(ctx) = &envelope.session_context {
+            if sent.trim().is_empty() {
+                sent = ctx.clone();
+            } else {
+                sent = format!("{sent}\n\n{ctx}");
+            }
+        }
         let prompt = Prompt {
             text: sent,
             attachments: envelope.attachments.clone(),
@@ -2072,6 +2081,8 @@ impl Runtime {
             text,
             reply_to,
             attachments,
+            session_refs,
+            session_context,
         } = envelope;
         // A reply joins the thread of the message it answers.
         let (thread, reply_excerpt) = match reply_to {
@@ -2126,12 +2137,20 @@ impl Runtime {
                     thread,
                     reply_excerpt,
                     attachments: attachments.clone(),
+                    session_refs: session_refs.clone(),
                     notices,
                     queued_reason: Some(QueuedReason::ExternalAgent),
                 },
             )
             .await;
             let mut text = self.with_notices(stored.id, text).await;
+            if let Some(ctx) = &session_context {
+                text = if text.trim().is_empty() {
+                    ctx.clone()
+                } else {
+                    format!("{text}\n\n{ctx}")
+                };
+            }
             if let Some(carried) = &carried {
                 text = format!("{text}\n\n{}", carried.text);
             }
@@ -2210,6 +2229,7 @@ impl Runtime {
                 thread,
                 reply_excerpt,
                 attachments: attachments.clone(),
+                session_refs,
                 notices,
                 queued_reason,
             },
@@ -2218,6 +2238,13 @@ impl Runtime {
         // What changed since the last message (model, effort, name) is told before it; the
         // conversation shows it as a note of its own (e.g. `agent.model_changed`).
         let mut text = self.with_notices(agent.id, text).await;
+        if let Some(ctx) = &session_context {
+            text = if text.trim().is_empty() {
+                ctx.clone()
+            } else {
+                format!("{text}\n\n{ctx}")
+            };
+        }
         // The notices go after the person's words, as the agent reads them.
         if let Some(carried) = &carried {
             text = format!("{text}\n\n{}", carried.text);
@@ -2601,6 +2628,8 @@ impl Runtime {
             text,
             reply_to: None,
             attachments: Vec::new(),
+            session_refs: Vec::new(),
+            session_context: None,
         };
         if let Err(err) = self
             .deliver(&AgentKey::Id(agent.id), envelope, false, None, None)
@@ -2880,17 +2909,24 @@ impl Runtime {
     /// Renames the agent (people chose the name). It hears its new name with its next message;
     /// its instructions carry it from its next session.
     pub async fn rename(&self, key: &AgentKey, name: &str) -> Result<Agent, CoreError> {
+        self.rename_with_source(key, name, NameSource::Chosen).await
+    }
+
+    pub async fn rename_with_source(
+        &self,
+        key: &AgentKey,
+        name: &str,
+        source: NameSource,
+    ) -> Result<Agent, CoreError> {
         let name = name.trim();
         validate_agent_name(name)?;
         let mut agent = self.store().get_agent(key).await?;
-        if agent.name == name && agent.name_source == NameSource::Chosen {
+        if agent.name == name && agent.name_source == source {
             return Ok(agent);
         }
-        self.store()
-            .rename_agent(agent.id, name, NameSource::Chosen)
-            .await?;
+        self.store().rename_agent(agent.id, name, source).await?;
         let from = std::mem::replace(&mut agent.name, name.to_owned());
-        agent.name_source = NameSource::Chosen;
+        agent.name_source = source;
         if agent.plugin != EXTERNAL_PLUGIN && from != agent.name {
             let note = format!(
                 "[CrossAgents] You have been renamed: you are {} now (was {from}). People and teammates call you {}.",
@@ -3855,6 +3891,7 @@ async fn inject(
             thread: None,
             reply_excerpt: None,
             attachments: Vec::new(),
+            session_refs: Vec::new(),
             notices: Vec::new(),
             queued_reason: Some(QueuedReason::TurnRunning),
         },

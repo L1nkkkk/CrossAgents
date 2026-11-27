@@ -28,7 +28,8 @@ import * as draft from "../lib/draft";
 import { useQuota } from "./Quota";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
-import { mentionsFor, useMention } from "../mention";
+import { mentionsFor, sessionMentionsFor, useMention } from "../mention";
+import { HeldSessionRefs, useSessionRefs } from "../sessionRef";
 import { QuestionCards } from "../questions";
 import { RemoteDirPicker } from "../RemoteDirPicker";
 import { CHATS, homeOf, isChat, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsKey, wsName } from "../workspace";
@@ -213,6 +214,7 @@ export function HomeView() {
   // Screenshots and files for the first message: the chat's, or the run lead's kickoff. What
   // the agent takes is only known once it exists; the hub checks then and says why.
   const files = useHeld(setError);
+  const sessionRefs = useSessionRefs(setError);
   const ref = useRef<HTMLTextAreaElement>(null);
 
   // The files come back once, after `useHeld` exists; the text was restored above.
@@ -237,6 +239,7 @@ export function HomeView() {
     draft.forget(DRAFT);
     setDraftNote(undefined);
     files.clear();
+    sessionRefs.clear();
   };
 
   // The delegation level carries over, 全托管 included (docs/tasks/W1.md §7).
@@ -342,7 +345,7 @@ export function HomeView() {
         : undefined;
   const ready =
     !busy &&
-    (mode === "chat" && chosenImport ? true : !!request.trim()) &&
+    (mode === "chat" && (chosenImport || sessionRefs.held.length > 0) ? true : !!request.trim()) &&
     (mode === "chat" ? !!chosenSession || !!chosenImport || !!chatModel : (!!lead || !!chosenImport) && !!where) &&
     (!sessionUse || sessionUse.selectable);
   // Effort levels of the vendor and model picked: the chat's model, or the run's lead. A
@@ -479,7 +482,7 @@ export function HomeView() {
       // Its permission is the person's to change here too; set it before the message lands.
       if (chosenSession) {
         if (chatPermission !== permissionOf(chosenSession.agent)) await applyPermission(chosenSession.agent, chatPermission);
-        await api.chat(chosenSession.agent.id, chatBody(typed, chosenSession, uploads()));
+        await api.chat(chosenSession.agent.id, chatBody(typed, chosenSession, uploads(), sessionRefs.toInputs()));
         sent();
         navigate("s", chosenSession.agent.id);
         return;
@@ -492,8 +495,8 @@ export function HomeView() {
           account: chosenImport.account,
           permission: chatPermission ?? undefined,
         });
-        if (typed || uploads().length > 0) {
-          void sendMessage(agent.id, typed, { attachments: uploads() }).catch(() => {});
+        if (typed || uploads().length > 0 || sessionRefs.held.length > 0) {
+          void sendMessage(agent.id, typed, { attachments: uploads(), sessionRefs: sessionRefs.held }).catch(() => {});
         }
         setImportPick(undefined);
         sent();
@@ -512,7 +515,7 @@ export function HomeView() {
         ...(isRemoteNode ? { node: activeRemote.id } : {}),
       });
       // Into the conversation at once; the message shows there while the agent starts.
-      void sendMessage(agent.id, text, { attachments: uploads() }).catch(() => {});
+      void sendMessage(agent.id, text, { attachments: uploads(), sessionRefs: sessionRefs.held }).catch(() => {});
       sent();
       navigate("s", agent.id);
     } catch (err) {
@@ -945,8 +948,11 @@ export function HomeView() {
   };
 
   const wsLabel = folder ? wsName(folder) : current?.name;
-  // @ names a helper: an agent already in this project, or a model to recruit one on.
-  const mention = useMention(ref, setRequest, mentionsFor(cwd ? here.filter((a) => !a.config || !(a.config as Record<string, unknown>).spawned_by_agent) : [], offered));
+  // @ references a past session or names a helper / model to recruit one on.
+  const mention = useMention(ref, setRequest, [
+    ...(mode === "chat" ? sessionMentionsFor(agents.data ?? [], sessionRefs.add) : []),
+    ...mentionsFor(cwd ? here.filter((a) => !a.config || !(a.config as Record<string, unknown>).spawned_by_agent) : [], offered),
+  ]);
   const missing =
     !agents.data || !plugins.data
       ? undefined
@@ -988,8 +994,20 @@ export function HomeView() {
         </div>
 
         <QuestionCards agents={everyone} />
-        <div className="composer home-composer" onDrop={files.onDrop} onDragOver={files.onDragOver}>
+        <div
+          className={`composer home-composer ${sessionRefs.dragOver ? "drop-session-over" : ""}`}
+          onDrop={(e) => {
+            if (!sessionRefs.onDrop(e)) files.onDrop(e);
+          }}
+          onDragOver={(e) => {
+            if (mode === "chat") sessionRefs.onDragOver(e);
+            files.onDragOver(e);
+          }}
+          onDragLeave={sessionRefs.onDragLeave}
+        >
+          {sessionRefs.dragOver && <div className="composer-drop-hint">松手引用该会话（只读上下文）</div>}
           {mention.menu}
+          <HeldSessionRefs refs={sessionRefs.held} onRemove={sessionRefs.remove} onCycleMode={sessionRefs.cycleMode} />
           <HeldFiles files={files.held} onRemove={files.remove} />
           {draftNote && <div className="small dim">{draftNote}</div>}
           <textarea

@@ -229,6 +229,7 @@ pub async fn run(ctx: &Context, args: SetupArgs) -> Result<()> {
                     now: None,
                     steer: None,
                     attachments: None,
+                    session_refs: None,
                     client_message_id: None,
                 },
             )

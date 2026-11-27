@@ -416,11 +416,14 @@ impl AgentHost for HubHost {
                 self.runtime.plugins().names().join(", ")
             )));
         }
-        let (name, name_source) = crate::identity::free_name(
+        let chats = self.home.join("chats");
+        let (name, name_source) = crate::identity::free_name_in(
             self.bus.store().as_ref(),
             Some(agent.name.as_str()),
             true,
             &self.denied_name_words(),
+            Some(agent.home()),
+            Some(&chats),
         )
         .await?;
         let mut profile = agent.profile.normalized()?;

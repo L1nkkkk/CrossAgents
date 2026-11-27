@@ -177,14 +177,6 @@ pub async fn import_session(
         .into());
     };
 
-    let (name, name_source) = crate::identity::free_name(
-        state.store().as_ref(),
-        req.name.as_deref(),
-        false,
-        &crate::identity::denied_words(state.runtime.plugins()),
-    )
-    .await?;
-
     let mut profile = AgentProfile::default().normalized()?;
     crate::avatars::assign_new(&state.home, state.store(), &mut profile).await?;
 
@@ -213,6 +205,17 @@ pub async fn import_session(
     };
     let cwd = dunce::canonicalize(&dir)
         .map_err(|e| AppError::bad_request(format!("cwd {}: {e}", dir.display())))?;
+
+    let chats = state.home.join("chats");
+    let (name, name_source) = crate::identity::free_name_in(
+        state.store().as_ref(),
+        req.name.as_deref(),
+        false,
+        &crate::identity::denied_words(state.runtime.plugins()),
+        Some(&cwd),
+        Some(&chats),
+    )
+    .await?;
 
     let mut config = Map::new();
     if let Some(account) = req
@@ -306,6 +309,7 @@ async fn backfill_history(
                 thread: None,
                 reply_excerpt: None,
                 attachments: Vec::new(),
+                session_refs: Vec::new(),
                 notices: Vec::new(),
                 queued_reason: None,
             })

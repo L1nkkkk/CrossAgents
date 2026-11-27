@@ -513,6 +513,7 @@ mod tests {
             thread: None,
             reply_excerpt: None,
             attachments: vec![],
+            session_refs: vec![],
             notices: vec![],
             queued_reason: None,
         }

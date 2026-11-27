@@ -13,7 +13,7 @@ pub use crossagents_core::{
     DeliveryState, DeliveryStatus, Device, DeviceKind, DeviceLevel, DeviceOs, DiffSource,
     DriverKind, Event, EventKind, FindingAnswer, FindingStatus, Handoff, HandoffKind, HistoryTask,
     LeadPlace, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, QueuedReason, Role,
-    Run, RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId, TaskStatus,
+    Run, RunHistory, RunId, RunPolicy, RunStatus, SessionRef, StopReason, Task, TaskId, TaskStatus,
     TokenTotals, ToolInfo, ToolStatus,
 };
 
@@ -361,7 +361,12 @@ impl Serialize for ListAgentsResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RenameAgentRequest {
+    #[serde(default)]
     pub name: String,
+    /// When `true`, generate a fresh scoped name (`<CODE>-<Word>-<Seq>`) in the agent's project.
+    #[serde(default)]
+    #[ts(optional)]
+    pub random: Option<bool>,
 }
 
 /// `POST /v1/agents/{key}/topic`: the conversation's title; empty or absent clears it.
@@ -421,6 +426,18 @@ pub struct SetModelRequest {
     pub effort: Option<String>,
 }
 
+/// A read-only reference to another session sent with a person's message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SessionRefInput {
+    /// Target session's `AgentId` (preferred) or name; resolved to immutable `AgentId`.
+    pub agent: String,
+    /// Context depth: `"summary"` (default), `"pointer"`, or `"full"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mode: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SendMessageRequest {
@@ -440,6 +457,10 @@ pub struct SendMessageRequest {
     #[serde(default)]
     #[ts(optional)]
     pub attachments: Option<Vec<AttachmentUpload>>,
+    /// Other sessions referenced as read-only context (`@session` or sidebar drag-and-drop).
+    #[serde(default)]
+    #[ts(optional)]
+    pub session_refs: Option<Vec<SessionRefInput>>,
     /// The sender's id for this message, fixed once and reused on a retry: the hub then
     /// answers a repeat with the first delivery instead of starting another turn
     /// (docs/tasks/DELIVERY-AUDIT.md §4).
@@ -669,6 +690,10 @@ pub struct TranscriptTurn {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<crossagents_core::Attachment>>", optional)]
     pub attachments: Vec<crossagents_core::Attachment>,
+    /// Read-only references to other sessions attached via `@session` or drag-and-drop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<crossagents_core::SessionRef>>", optional)]
+    pub session_refs: Vec<crossagents_core::SessionRef>,
     /// Notices that rode along with the message (docs/TODO.md §二十五 第 3 条): in what the
     /// agent read, after `input`, but not part of it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1534,6 +1559,10 @@ pub struct StartChatRequest {
     #[serde(default)]
     #[ts(optional)]
     pub attachments: Option<Vec<AttachmentUpload>>,
+    /// Other sessions referenced as read-only context.
+    #[serde(default)]
+    #[ts(optional)]
+    pub session_refs: Option<Vec<SessionRefInput>>,
 }
 
 /// `POST /v1/repos/init`: put a directory under version control (`git init` and a first
@@ -3978,6 +4007,7 @@ mod tests {
         crossagents_core::PermissionPolicy::export_all(&cfg).unwrap();
         crossagents_core::TaskBudget::export_all(&cfg).unwrap();
         crossagents_core::LeadPhaseModels::export_all(&cfg).unwrap();
+        crossagents_core::SessionRef::export_all(&cfg).unwrap();
         crossagents_core::SessionSearchHit::export_all(&cfg).unwrap();
         crossagents_core::CouncilRecord::export_all(&cfg).unwrap();
         crossagents_core::CouncilMemberSpec::export_all(&cfg).unwrap();

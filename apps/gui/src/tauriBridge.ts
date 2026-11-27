@@ -1,4 +1,4 @@
-import type { ConnectionState, CrossAgentsBridge, HubResponse, NativeBrowserEvent, PairStep, UpdateState } from "./bridge";
+import type { ConnectionState, CrossAgentsBridge, HubResponse, NativeBrowserEvent, PairStep, UpdateState, WindowMode, WindowModeSnapshot } from "./bridge";
 
 type StreamFrame =
   | { type: "connected" }
@@ -20,6 +20,8 @@ export function installTauriBridge() {
   const terminals = new Set<(id: string, data: string) => void>();
   const terminalStarts = new Map<string, Promise<void>>();
   const noticeListeners = new Set<(agent: string) => void>();
+  const windowModeListeners = new Set<(state: WindowModeSnapshot) => void>();
+  let windowModeRegistered = false;
   const connectionListeners = new Set<(state: ConnectionState) => void>();
   const pairListeners = new Set<(step: PairStep) => void>();
   let connectionPoll: ReturnType<typeof setInterval> | undefined;
@@ -187,6 +189,27 @@ export function installTauriBridge() {
     writeClipboard: (text) => invoke<void>("write_clipboard", { text }),
     setTheme: ({ dark }) => { void invoke("set_theme", { dark }).catch(console.warn); },
     command: (action) => { void invoke("window_command", { action }).catch(console.warn); },
+    windowMode: {
+      get: () => invoke<WindowModeSnapshot>("window_mode_get", {}),
+      set: (mode: WindowMode) => invoke<WindowModeSnapshot>("window_mode_set", { mode }),
+      setAlwaysOnTop: (enabled: boolean) => invoke<WindowModeSnapshot>("window_always_on_top", { enabled }),
+      setOpacity: (opacity: number, persist = true) => invoke<WindowModeSnapshot>("window_opacity", { opacity, persist }),
+      setMiniCollapsed: (collapsed: boolean) => invoke<WindowModeSnapshot>("window_mini_resize", { collapsed }),
+      onChange(listener) {
+        windowModeListeners.add(listener);
+        if (!windowModeRegistered) {
+          windowModeRegistered = true;
+          const channel = new Channel<WindowModeSnapshot>((snap) => windowModeListeners.forEach((fn) => fn(snap)));
+          void invoke<WindowModeSnapshot>("window_mode_listen", { channel })
+            .then((snap) => windowModeListeners.forEach((fn) => fn(snap)))
+            .catch((error: unknown) => {
+              windowModeRegistered = false;
+              console.warn(error);
+            });
+        }
+        return () => windowModeListeners.delete(listener);
+      },
+    },
     notify: (notice) => { void invoke("notify", { notice }).catch(console.warn); },
     onNoticeOpen(listener) {
       noticeListeners.add(listener);

@@ -3,6 +3,7 @@ import type { Attachment } from "./Attachment";
 import type { MessageId } from "./MessageId";
 import type { MessageSource } from "./MessageSource";
 import type { QueuedReason } from "./QueuedReason";
+import type { SessionRef } from "./SessionRef";
 import type { StopReason } from "./StopReason";
 import type { TranscriptItem } from "./TranscriptItem";
 import type { TurnDiffStat } from "./TurnDiffStat";
@@ -39,6 +40,10 @@ diff?: TurnDiffStat,
  * `GET /v1/agents/{key}/attachments/{id}`.
  */
 attachments?: Array<Attachment>, 
+/**
+ * Read-only references to other sessions attached via `@session` or drag-and-drop.
+ */
+session_refs?: Array<SessionRef>, 
 /**
  * Notices that rode along with the message (docs/TODO.md §二十五 第 3 条): in what the
  * agent read, after `input`, but not part of it.

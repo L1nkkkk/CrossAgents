@@ -44,6 +44,7 @@ pub mod run_cost;
 pub mod runtime;
 pub mod self_check;
 pub mod session_import;
+pub mod session_refs;
 pub mod shadow;
 pub mod shims;
 pub mod snapshot;

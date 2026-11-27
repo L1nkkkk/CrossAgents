@@ -189,6 +189,10 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[cfg_attr(feature = "ts", ts(as = "Option<Vec<crate::Attachment>>", optional))]
         attachments: Vec<crate::Attachment>,
+        /// Read-only references to other sessions attached via `@session` or drag-and-drop.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[cfg_attr(feature = "ts", ts(as = "Option<Vec<SessionRef>>", optional))]
+        session_refs: Vec<SessionRef>,
         /// Notices that rode along with it (docs/TODO.md §二十五 第 3 条): they are in what
         /// the agent reads, after the person's words, but not in `text`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -736,6 +740,26 @@ pub struct BrowserAgent {
     pub name: String,
 }
 
+/// A read-only reference to another session attached to a person's message.
+/// Display fields (`name`, `topic`, `project`) are a snapshot at send time; `agent_id` is
+/// always the authoritative lookup key so renaming never breaks a reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SessionRef {
+    pub agent_id: AgentId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub topic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub project: Option<String>,
+    /// Context depth: `"summary"` (default), `"pointer"`, or `"full"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub mode: Option<String>,
+}
+
 /// A message on its way to an agent. The id is fixed before delivery, so a sender can
 /// refer to the message (and others reply to it) before the agent has even started.
 #[derive(Debug, Clone, PartialEq)]
@@ -747,6 +771,11 @@ pub struct Envelope {
     pub reply_to: Option<MessageId>,
     /// Files sent with it.
     pub attachments: Vec<crate::Attachment>,
+    /// Read-only references to other sessions (recorded on `AgentInput` for UI chips).
+    pub session_refs: Vec<SessionRef>,
+    /// Server-assembled context block for `session_refs`, appended to the prompt sent to the
+    /// agent without cluttering `AgentInput.text`.
+    pub session_context: Option<String>,
 }
 
 impl Envelope {
@@ -757,6 +786,8 @@ impl Envelope {
             text,
             reply_to: None,
             attachments: Vec::new(),
+            session_refs: Vec::new(),
+            session_context: None,
         }
     }
 }

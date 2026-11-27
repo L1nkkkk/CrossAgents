@@ -1,7 +1,7 @@
-// `@` in a composer: name who should help, a teammate (`@Iris`) or a model to recruit an agent
-// on (`@claude-haiku-4-5`). Typing `@` opens a menu above the composer; arrows move, Enter or
-// Tab picks, Escape closes. The pick is plain text in the message; the agent's guide says what
-// `@` means (crates/orchestrator/src/protocol.rs).
+// `@` in a composer: name who should help (`@CA-Nyx-1`), reference a past session's history
+// (attaches a read-only session chip bound to its immutable agent_id), or recruit a model
+// (`@claude-haiku-4-5`). Typing `@` opens a menu above the composer; arrows move, Enter or
+// Tab picks, Escape closes.
 
 import { useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
@@ -11,8 +11,22 @@ import { prettyModel, vendorLabel } from "./lib/models";
 import { cursorMode, reasoningModels, usesVariantReasoning } from "./lib/reasoning";
 import { unusableOf } from "./lib/unusable";
 import { isImeEvent } from "./lib/ime";
+import { ScopedNameLabel } from "./sessionRef";
+import { homeOf, isChat, wsName } from "./workspace";
 
-export type Mention = { key: string; token: string; search: string; label: ReactNode; sub?: ReactNode; icon?: ReactNode; group: string; /** Why this machine cannot hand work to it: greyed out, unselectable. */ unusable?: string };
+export type Mention = {
+  key: string;
+  token: string;
+  search: string;
+  label: ReactNode;
+  sub?: ReactNode;
+  icon?: ReactNode;
+  group: string;
+  /** Why this machine cannot hand work to it: greyed out, unselectable. */
+  unusable?: string;
+  /** Custom action on pick (removes the `@query` text instead of inserting `@token`). */
+  onPick?: () => void;
+};
 
 /** Teammates first (by name), then every model a login offers (by id; Cursor's bases). */
 export function mentionsFor(agents: Agent[], plugins: PluginInfo[]): Mention[] {
@@ -20,11 +34,11 @@ export function mentionsFor(agents: Agent[], plugins: PluginInfo[]): Mention[] {
     (a): Mention => ({
       key: `a/${a.id}`,
       token: a.name,
-      search: `${a.name} ${displayName(a)} ${a.model ?? ""}`.toLowerCase(),
-      label: displayName(a),
-      sub: `${agentTitle(a)} · ${a.model ? prettyModel(a.model) : a.plugin}`,
+      search: `${a.name} ${displayName(a)} ${a.topic ?? ""} ${a.model ?? ""}`.toLowerCase(),
+      label: <ScopedNameLabel name={displayName(a)} />,
+      sub: `${a.topic || agentTitle(a)} · ${a.model ? prettyModel(a.model) : a.plugin}`,
       icon: <Avatar agent={a} size={16} />,
-      group: "协作者",
+      group: "点名协作者（派活）",
       unusable: unusableOf(a),
     }),
   );
@@ -49,8 +63,42 @@ export function mentionsFor(agents: Agent[], plugins: PluginInfo[]): Mention[] {
   return [...mates, ...models];
 }
 
-/** Rows the menu shows at most. */
-const SHOWN = 10;
+/**
+ * Read-only session references across all projects (including archived sessions).
+ * Picking one attaches a session reference chip instead of delegating work to that agent.
+ */
+export function sessionMentionsFor(
+  agents: Agent[],
+  onPickSession: (agent: Agent) => void,
+  excludeId?: string,
+): Mention[] {
+  const sorted = agents
+    .filter((a) => a.id !== excludeId)
+    .slice()
+    .sort((a, b) => {
+      const aArch = a.archived_at ? 1 : 0;
+      const bArch = b.archived_at ? 1 : 0;
+      if (aArch !== bArch) return aArch - bArch;
+      return b.created_at.localeCompare(a.created_at);
+    });
+  return sorted.map((a): Mention => {
+    const project = isChat(a) ? "独立对话" : wsName(homeOf(a));
+    const subParts = [a.topic, project, a.archived_at ? "已归档" : undefined].filter(Boolean);
+    return {
+      key: `ref/${a.id}`,
+      token: a.name,
+      search: `会话 session ${a.name} ${displayName(a)} ${a.topic ?? ""} ${project} ${a.model ?? ""}`.toLowerCase(),
+      label: <ScopedNameLabel name={a.name} />,
+      sub: subParts.join(" · ") || (a.model ? prettyModel(a.model) : a.plugin),
+      icon: <Avatar agent={a} size={16} />,
+      group: "引用会话（读取历史）",
+      onPick: () => onPickSession(a),
+    };
+  });
+}
+
+/** Rows the menu shows at most (keeps each group visible when unfiltered). */
+const SHOWN = 14;
 
 /**
  * Wires `@` into a textarea: call `sync` from its onChange and onClick, give `onKeyDown` the
@@ -72,7 +120,22 @@ export function useMention(ref: RefObject<HTMLTextAreaElement | null>, setValue:
   };
 
   const q = at?.query.toLowerCase() ?? "";
-  const shown = at ? candidates.filter((c) => !q || c.search.includes(q) || c.token.toLowerCase().includes(q)).slice(0, SHOWN) : [];
+  let shown: Mention[] = [];
+  if (at) {
+    if (!q) {
+      // Unfiltered: show up to 5 from each group so sessions, teammates and models are all reachable at once.
+      const counts = new Map<string, number>();
+      for (const c of candidates) {
+        const n = counts.get(c.group) ?? 0;
+        if (n >= 5) continue;
+        counts.set(c.group, n + 1);
+        shown.push(c);
+        if (shown.length >= SHOWN) break;
+      }
+    } else {
+      shown = candidates.filter((c) => c.search.includes(q) || c.token.toLowerCase().includes(q)).slice(0, SHOWN);
+    }
+  }
   const open = !!at && shown.length > 0;
 
   const pick = (c: Mention) => {
@@ -81,6 +144,20 @@ export function useMention(ref: RefObject<HTMLTextAreaElement | null>, setValue:
     const el = ref.current;
     if (!el || !at) return;
     const end = at.start + 1 + at.query.length;
+    if (c.onPick) {
+      const before = el.value.slice(0, at.start);
+      const after = el.value.slice(end).replace(/^ /, "");
+      const next = before && after && !/\s$/.test(before) ? `${before} ${after}` : before + after;
+      const caret = before.length;
+      setValue(next);
+      setAt(undefined);
+      c.onPick();
+      requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(caret, caret);
+      });
+      return;
+    }
     const before = el.value.slice(0, at.start) + "@" + c.token + " ";
     const next = before + el.value.slice(end).replace(/^ /, "");
     setValue(next);
@@ -114,7 +191,7 @@ export function useMention(ref: RefObject<HTMLTextAreaElement | null>, setValue:
   };
 
   const menu = open ? (
-    <div className="menu up left mention-menu" role="listbox" aria-label="点名协作者或模型">
+    <div className="menu up left mention-menu" role="listbox" aria-label="引用会话、点名协作者或模型">
       {shown.map((c, i) => (
         <div key={c.key} style={{ display: "contents" }}>
           {(i === 0 || shown[i - 1].group !== c.group) && <div className="menu-head">{c.group}</div>}

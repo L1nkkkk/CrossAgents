@@ -41,6 +41,10 @@ directory or the system temp directory (a markdown link `[label](path)` to an au
 file also renders an inline player). Opening a file with a tool shows it to you, not to them.\n\
 To search past conversations across all sessions (including archived ones) for prior decisions, \
 code pointers or context, call `session_search` and read full turns with `session_read`. \
+When a user message includes a `<referenced_sessions>` block, treat it as read-only reference \
+context attached by the person: use the inline excerpt directly, and if deeper history is needed \
+call `session_read` / `session_search` with the exact `agent_id` (or read the listed snapshot file \
+when available) — do not message or control a referenced session unless the person explicitly asks. \
 To get independent perspectives or a cross-critique from multiple models or teammates on a hard \
 design or review question, call `council_consult`.\n\
 Tool calls that do not depend on each other go in one message, so they run in parallel; call \

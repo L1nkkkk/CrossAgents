@@ -1,7 +1,7 @@
 //! Agent names: what people and teammates call an agent, separate from its id (what the hub
-//! routes by) and its model (an attribute that can change). The hub makes up a name when none
-//! is given, never reuses a taken one, and keeps vendor and model words out of the names it
-//! makes up.
+//! routes by) and its model (an attribute that can change). The hub makes up a scoped name
+//! (`<PROJECT_CODE>-<Myth/Astro/EsotericWord>-<SEQ>`, e.g. `CA-Nyx-1`) when none is given,
+//! never reuses a taken one, and keeps vendor and model words out of the names it makes up.
 
 use crossagents_core::names::{self, model_words};
 use crossagents_core::{Agent, CoreError, NameSource, Store, validate_agent_name};
@@ -22,6 +22,19 @@ pub async fn free_name(
     ordinal: bool,
     deny: &[String],
 ) -> Result<(String, NameSource), CoreError> {
+    free_name_in(store, wanted, ordinal, deny, None, None).await
+}
+
+/// Like [`free_name`], deriving a project short code from `cwd` (and treating paths under
+/// `chats` as standalone `CH`) when generating a name: `<CODE>-<Word>-<Seq>`, e.g. `CA-Nyx-1`.
+pub async fn free_name_in(
+    store: &dyn Store,
+    wanted: Option<&str>,
+    ordinal: bool,
+    deny: &[String],
+    cwd: Option<&Path>,
+    chats: Option<&Path>,
+) -> Result<(String, NameSource), CoreError> {
     let names: Vec<String> = store
         .list_agents()
         .await?
@@ -41,7 +54,12 @@ pub async fn free_name(
             validate_agent_name(&name)?;
             Ok((name, NameSource::Chosen))
         }
-        None => Ok((names::generate(&names, deny, seed()), NameSource::Generated)),
+        None => {
+            let prefix = names::project_code(cwd, chats);
+            let generated = names::generate_scoped(&prefix, &names, deny, seed());
+            validate_agent_name(&generated)?;
+            Ok((generated, NameSource::Generated))
+        }
     }
 }
 
@@ -53,7 +71,7 @@ fn seed() -> usize {
 
 /// Agents from before names were for people. A chat's old display name was its first message:
 /// it becomes the chat's title. Any other display name (e.g. "Ada") becomes the name. A name
-/// made up from a model ("chat-gpt-6-luna", "opus-lead") is replaced by a made-up given name.
+/// made up from a model ("chat-gpt-6-luna", "opus-lead") is replaced by a made-up name.
 /// Safe to run on every start: agents already in the new shape are left alone.
 pub async fn fix_up(store: &dyn Store, chats: &Path, deny: &[String]) -> Result<(), CoreError> {
     for agent in store.list_agents().await? {
@@ -93,6 +111,7 @@ pub async fn fix_up(store: &dyn Store, chats: &Path, deny: &[String]) -> Result<
                 (!wanted.is_empty()).then_some(wanted.as_str()),
                 source,
                 deny,
+                chats,
             )
             .await?;
         }
@@ -100,15 +119,16 @@ pub async fn fix_up(store: &dyn Store, chats: &Path, deny: &[String]) -> Result<
     Ok(())
 }
 
-/// Renames `agent` to `wanted` (with an ordinal if taken) or a made-up name.
+/// Renames `agent` to `wanted` (with an ordinal if taken) or a made-up scoped name.
 async fn rename_free(
     store: &dyn Store,
     agent: &Agent,
     wanted: Option<&str>,
     source: NameSource,
     deny: &[String],
+    chats: &Path,
 ) -> Result<(), CoreError> {
-    let (name, _) = free_name(store, wanted, true, deny).await?;
+    let (name, _) = free_name_in(store, wanted, true, deny, Some(agent.home()), Some(chats)).await?;
     store.rename_agent(agent.id, &name, source).await?;
     tracing::info!(id = %agent.id, from = %agent.name, to = %name, "agent renamed");
     Ok(())

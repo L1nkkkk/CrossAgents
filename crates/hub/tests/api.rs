@@ -1833,6 +1833,7 @@ async fn transcript_supports_progressive_pagination_slim_tools_and_gzip() {
                 thread: None,
                 reply_excerpt: None,
                 attachments: Vec::new(),
+                session_refs: Vec::new(),
                 notices: Vec::new(),
                 queued: false,
                 queued_reason: None,
@@ -1966,5 +1967,236 @@ async fn transcript_supports_progressive_pagination_slim_tools_and_gzip() {
     assert!(
         sse_res.headers().get("content-encoding").is_none(),
         "SSE streams must never be gzip-buffered"
+    );
+}
+
+
+#[tokio::test]
+async fn scoped_names_reroll_and_semantic_topic_work_end_to_end() {
+    let t = TestHub::start().await;
+    let project_dir = t.paths.home.join("CrossAgents");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    // 1. Two unnamed agents in `CrossAgents` get `CA-<Word>-1` and `CA-<Word>-2` with distinct words.
+    let a1: Agent = t
+        .post("/v1/agents")
+        .json(&json!({
+            "plugin": "external",
+            "role": "worker",
+            "cwd": project_dir.display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a2: Agent = t
+        .post("/v1/agents")
+        .json(&json!({
+            "plugin": "external",
+            "role": "worker",
+            "cwd": project_dir.display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(a1.name.starts_with("CA-") && a1.name.ends_with("-1"), "a1 = {}", a1.name);
+    assert!(a2.name.starts_with("CA-") && a2.name.ends_with("-2"), "a2 = {}", a2.name);
+    assert_ne!(a1.name.split('-').nth(1), a2.name.split('-').nth(1));
+
+    // 2. Standalone chat (empty cwd) gets `CH-<Word>-1`.
+    let chat: Agent = t
+        .post("/v1/agents")
+        .json(&json!({ "plugin": "external", "role": "worker", "cwd": "" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(chat.name.starts_with("CH-") && chat.name.ends_with("-1"), "chat = {}", chat.name);
+
+    // 3. Random reroll via `POST /v1/agents/{id}/name` with `random: true`.
+    let rerolled: Agent = t
+        .post(&format!("/v1/agents/{}/name", a1.id))
+        .json(&json!({ "name": "", "random": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        rerolled.name.starts_with("CA-") && rerolled.name.ends_with("-3"),
+        "rerolled = {}",
+        rerolled.name
+    );
+    assert_eq!(rerolled.name_source, crossagents_core::NameSource::Generated);
+
+    // 4. Bare greeting does not pollute topic; first substantive message distills semantic title.
+    let resp = t
+        .post(&format!("/v1/agents/{}/messages", a2.id))
+        .json(&json!({ "text": "你好" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let after_hi: Agent = t
+        .get(&format!("/v1/agents/{}", a2.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after_hi.topic, None, "bare greeting must not lock topic");
+
+    let resp = t
+        .post(&format!("/v1/agents/{}/messages", a2.id))
+        .json(&json!({ "text": "你看看能不能帮我修一下登录页超时" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let after_real: Agent = t
+        .get(&format!("/v1/agents/{}", a2.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after_real.topic.as_deref(), Some("修一下登录页超时"));
+}
+
+#[tokio::test]
+async fn session_refs_record_clean_bubble_and_inject_context() {
+    use crossagents_api_types::Transcript;
+    use crossagents_core::{EventKind, MessageId, MessageSource, OutputStream, StopReason};
+
+    let t = TestHub::start().await;
+    let project_dir = t.paths.home.join("CrossAgents");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let source: Agent = t
+        .post("/v1/agents")
+        .json(&json!({
+            "plugin": "external",
+            "role": "worker",
+            "cwd": project_dir.display().to_string(),
+            "topic": "排查 ConPTY 句柄泄漏",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Seed a completed turn in `source`.
+    let m1 = MessageId::new();
+    let store = t.hub.bus.store();
+    store
+        .append_event(EventKind::AgentInput {
+            id: source.id,
+            message_id: m1,
+            text: "检查 conpty.rs 为什么 steer 返回 202".into(),
+            queued: false,
+            from: Some(MessageSource::Human),
+            reply_to: None,
+            thread: None,
+            reply_excerpt: None,
+            attachments: Vec::new(),
+            session_refs: Vec::new(),
+            notices: Vec::new(),
+            queued_reason: None,
+        })
+        .await
+        .unwrap();
+    store
+        .append_event(EventKind::AgentTurnStarted {
+            id: source.id,
+            message_id: m1,
+        })
+        .await
+        .unwrap();
+    store
+        .append_event(EventKind::AgentOutput {
+            id: source.id,
+            stream: OutputStream::Text,
+            text: "缺少 PROC_THREAD_ATTRIBUTE_HANDLE_LIST 导致句柄被并发子进程继承".into(),
+        })
+        .await
+        .unwrap();
+    store
+        .append_event(EventKind::AgentTurnCompleted {
+            id: source.id,
+            message_id: m1,
+            stop_reason: StopReason::EndTurn,
+        })
+        .await
+        .unwrap();
+
+    // Target external agent receives a message referencing `source`.
+    let target: Agent = t
+        .post("/v1/agents")
+        .json(&json!({
+            "plugin": "external",
+            "role": "worker",
+            "cwd": project_dir.display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let send_res = t
+        .post(&format!("/v1/agents/{}/messages", target.id))
+        .json(&json!({
+            "text": "参考这个会话继续查一下同类问题",
+            "session_refs": [{ "agent": source.id.to_string(), "mode": "summary" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(send_res.status(), StatusCode::ACCEPTED);
+
+    // 1. Transcript keeps the bubble text clean while recording structured `session_refs`.
+    let tr: Transcript = t
+        .get(&format!("/v1/agents/{}/transcript", target.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tr.turns.len(), 1);
+    assert_eq!(tr.turns[0].input, "参考这个会话继续查一下同类问题");
+    assert_eq!(tr.turns[0].session_refs.len(), 1);
+    assert_eq!(tr.turns[0].session_refs[0].agent_id, source.id);
+    assert_eq!(tr.turns[0].session_refs[0].name, source.name);
+    assert_eq!(tr.turns[0].session_refs[0].topic.as_deref(), Some("排查 ConPTY 句柄泄漏"));
+    assert_eq!(tr.turns[0].session_refs[0].project.as_deref(), Some("CrossAgents"));
+
+    // 2. The agent's delivered prompt contains `<referenced_sessions>` + excerpt + snapshot file!
+    let delivered = t.hub.runtime.take_external(target.id).await;
+    assert_eq!(delivered.len(), 1);
+    let prompt_text = &delivered[0].2;
+    assert!(prompt_text.contains("<referenced_sessions>"), "{prompt_text}");
+    assert!(prompt_text.contains(&source.id.to_string()), "{prompt_text}");
+    assert!(prompt_text.contains("PROC_THREAD_ATTRIBUTE_HANDLE_LIST"), "{prompt_text}");
+    assert!(
+        t.paths
+            .home
+            .join("session-refs")
+            .join(format!("{}.md", source.id))
+            .is_file(),
+        "read-only markdown snapshot should be written on disk"
     );
 }

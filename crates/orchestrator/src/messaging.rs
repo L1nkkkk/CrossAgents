@@ -476,6 +476,8 @@ impl Orchestrator {
                 text: format!("{}\n{}", header(id), a.text),
                 reply_to,
                 attachments: Vec::new(),
+                session_refs: Vec::new(),
+                session_context: None,
             };
             state.recent.insert(dedup, (Instant::now(), id));
             state

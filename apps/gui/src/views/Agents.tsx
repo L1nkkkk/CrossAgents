@@ -722,7 +722,29 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
         <div className="editor-face">
           <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
             <Field label={agent.name_source === "generated" ? "名字（自动起的，可以改）" : "名字"}>
-              <input value={name} onChange={(e) => setName(e.target.value)} maxLength={32} placeholder="Luna" />
+              <div className="row" style={{ gap: 4 }}>
+                <input value={name} onChange={(e) => setName(e.target.value)} maxLength={32} placeholder="CA-Nyx-1" />
+                <button
+                  type="button"
+                  className="ghost small"
+                  disabled={busy}
+                  title="随机生成一个新的神话/天文/神秘学代号"
+                  onClick={async () => {
+                    setBusy(true);
+                    setError(undefined);
+                    try {
+                      const updated = await api.renameAgent(agent.id, "", true);
+                      setName(updated.name);
+                    } catch (err) {
+                      setError(errorText(err));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  🎲
+                </button>
+              </div>
             </Field>
             <Field label="备注（可选）">
               <input value={profile.title ?? ""} onChange={(e) => set({ title: e.target.value })} placeholder="比如：管前端" />

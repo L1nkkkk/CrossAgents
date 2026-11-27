@@ -1237,7 +1237,18 @@ export class MockBridge implements CrossAgentsBridge {
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/name$/))) {
         const a = this.agent(m[1]);
         if (!a) return notFound("agent");
-        const name = (body as { name: string }).name.trim();
+        const req = body as { name?: string; random?: boolean };
+        if (req.random) {
+          const taken = (n: string) => s.agents.some((x) => x !== a && x.name.toLowerCase() === n.toLowerCase());
+          const word = MOCK_NAMES[Math.floor(Math.random() * MOCK_NAMES.length)];
+          let seq = s.agents.length + 1;
+          while (taken(`CA-${word}-${seq}`)) seq++;
+          a.name = `CA-${word}-${seq}`;
+          a.name_source = "generated";
+          this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+          return json(200, a);
+        }
+        const name = (req.name ?? "").trim();
         if (s.agents.some((x) => x !== a && x.name.toLowerCase() === name.toLowerCase()))
           return json(409, { error: { code: "conflict", message: `agent name "${name}" is already taken` } });
         a.name = name;
@@ -1354,7 +1365,7 @@ export class MockBridge implements CrossAgentsBridge {
           this.emit({ type: "agent.updated", data: { agent: { ...a } } });
           this.restored(a);
         }
-        return this.send(a.id, { text: req.text });
+        return this.send(a.id, { text: req.text, attachments: req.attachments, session_refs: req.session_refs });
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages\/([^/]+)\/send-now$/))) {
         const a = this.agent(m[1]);
@@ -1585,8 +1596,32 @@ export class MockBridge implements CrossAgentsBridge {
       this.timers.push(setTimeout(() => this.emit({ type: "agent.steer_read", data: { id: a.id, message_id } }), 1_500));
       return json(202, { message_id, queued: false, steered: true });
     }
+    const session_refs = (req.session_refs ?? []).flatMap((ref) => {
+      const target = this.agent(ref.agent);
+      if (!target) return [];
+      return [
+        {
+          agent_id: target.id,
+          name: target.name,
+          ...(target.topic ? { topic: target.topic } : {}),
+          mode: ref.mode ?? "summary",
+        },
+      ];
+    });
     const reason: QueuedReason | undefined = external ? "external_agent" : req.steer && busy ? "runtime_no_steer" : busy ? "turn_running" : undefined;
-    this.emit({ type: "agent.input", data: { id: a.id, message_id, text: req.text, queued: busy || external, from: { kind: "human" }, ...(reason ? { queued_reason: reason } : {}), ...(attachments.length ? { attachments } : {}) } });
+    this.emit({
+      type: "agent.input",
+      data: {
+        id: a.id,
+        message_id,
+        text: req.text,
+        queued: busy || external,
+        from: { kind: "human" },
+        ...(reason ? { queued_reason: reason } : {}),
+        ...(attachments.length ? { attachments } : {}),
+        ...(session_refs.length ? { session_refs } : {}),
+      },
+    });
     this.emit({
       type: "agent.delivery_changed",
       data: { id: a.id, delivery: external ? { state: "held", queued: 1 } : busy ? { state: "turn", queued: 1 } : { state: "starting", queued: 1 } },

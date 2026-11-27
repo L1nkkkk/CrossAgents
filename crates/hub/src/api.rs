@@ -843,7 +843,8 @@ async fn start_chat(
     Json(req): Json<crossagents_api_types::StartChatRequest>,
 ) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
     let uploads = req.attachments.unwrap_or_default();
-    if req.text.trim().is_empty() && uploads.is_empty() {
+    let ref_inputs = req.session_refs.unwrap_or_default();
+    if req.text.trim().is_empty() && uploads.is_empty() && ref_inputs.is_empty() {
         return Err(
             AppError::bad_request("text must not be empty").with_reason(QueuedReason::Empty)
         );
@@ -867,20 +868,21 @@ async fn start_chat(
     }
     let text = req.text;
     let attachments = store_uploads(&state, &key, uploads).await?;
+    let (session_refs, session_context) = crate::session_refs::resolve_session_refs(
+        state.store().as_ref(),
+        &state.home,
+        &ref_inputs,
+    )
+    .await?;
     let envelope = Envelope {
         attachments,
+        session_refs,
+        session_context,
         ..Envelope::new(MessageSource::Human, text.clone())
     };
     let delivery = state.runtime.send_envelope(&key, envelope).await?;
-    // Files alone leave the topic as it was.
-    if !text.trim().is_empty() {
-        let topic = text
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .take(60)
-            .collect();
+    // Files or bare greetings alone leave the topic as it was; a real request distills a short title.
+    if let Some(topic) = crossagents_core::names::semantic_topic(&text) {
         state.runtime.set_topic(&key, Some(topic)).await?;
     }
     Ok((StatusCode::ACCEPTED, Json(message_response(delivery))))
@@ -919,11 +921,29 @@ async fn create_agent(
     {
         return Err(AppError::bad_request(CURSOR_WINDOWS_GUARD_ERROR));
     }
-    let (name, name_source) = crate::identity::free_name(
+    let chats_dir = state.home.join("chats");
+    let name_dir: Option<PathBuf> = {
+        let raw = req.cwd.trim();
+        if !raw.is_empty() {
+            Some(PathBuf::from(raw))
+        } else if let Some(node) = &remote_node {
+            if node.chats_dir.as_deref().is_some_and(|s| !s.is_empty()) {
+                None
+            } else {
+                let d = node.default_cwd.trim();
+                (!d.is_empty()).then(|| PathBuf::from(d))
+            }
+        } else {
+            None
+        }
+    };
+    let (name, name_source) = crate::identity::free_name_in(
         state.store().as_ref(),
         req.name.as_deref(),
         false,
         &crate::identity::denied_words(state.runtime.plugins()),
+        name_dir.as_deref(),
+        Some(&chats_dir),
     )
     .await?;
     if let Some(node) = &remote_node {
@@ -1464,12 +1484,27 @@ async fn rename_agent(
     Path(key): Path<String>,
     Json(req): Json<RenameAgentRequest>,
 ) -> ApiResult<Json<Agent>> {
-    Ok(Json(
-        state
-            .runtime
-            .rename(&AgentKey::parse(&key), &req.name)
-            .await?,
-    ))
+    let parsed_key = AgentKey::parse(&key);
+    if req.random == Some(true) {
+        let agent = state.store().get_agent(&parsed_key).await?;
+        let chats_dir = state.home.join("chats");
+        let (name, _) = crate::identity::free_name_in(
+            state.store().as_ref(),
+            None,
+            true,
+            &crate::identity::denied_words(state.runtime.plugins()),
+            Some(agent.home()),
+            Some(&chats_dir),
+        )
+        .await?;
+        return Ok(Json(
+            state
+                .runtime
+                .rename_with_source(&parsed_key, &name, crossagents_core::NameSource::Generated)
+                .await?,
+        ));
+    }
+    Ok(Json(state.runtime.rename(&parsed_key, &req.name).await?))
 }
 
 async fn set_topic(
@@ -1951,7 +1986,8 @@ async fn send_message(
     Json(req): Json<SendMessageRequest>,
 ) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
     let uploads = req.attachments.unwrap_or_default();
-    if req.text.trim().is_empty() && uploads.is_empty() {
+    let ref_inputs = req.session_refs.unwrap_or_default();
+    if req.text.trim().is_empty() && uploads.is_empty() && ref_inputs.is_empty() {
         return Err(
             AppError::bad_request("text must not be empty").with_reason(QueuedReason::Empty)
         );
@@ -1971,9 +2007,18 @@ async fn send_message(
         .with_reason(QueuedReason::Archived));
     }
     let attachments = store_uploads(&state, &key, uploads).await?;
+    let (session_refs, session_context) = crate::session_refs::resolve_session_refs(
+        state.store().as_ref(),
+        &state.home,
+        &ref_inputs,
+    )
+    .await?;
+    let raw_text = req.text;
     let envelope = Envelope {
         attachments,
-        ..Envelope::new(MessageSource::Human, req.text)
+        session_refs,
+        session_context,
+        ..Envelope::new(MessageSource::Human, raw_text.clone())
     };
     let client_message_id = req.client_message_id;
     let delivery = if req.now == Some(true) {
@@ -2015,6 +2060,15 @@ async fn send_message(
             .await
             .map_err(AppError::from)?
     };
+    // Fill or upgrade a missing / bare-greeting topic once the person sends a real request.
+    if stored
+        .topic
+        .as_deref()
+        .is_none_or(crossagents_core::names::is_bare_greeting)
+        && let Some(topic) = crossagents_core::names::semantic_topic(&raw_text)
+    {
+        let _ = state.runtime.set_topic(&key, Some(topic)).await;
+    }
     Ok((StatusCode::ACCEPTED, Json(message_response(delivery))))
 }
 

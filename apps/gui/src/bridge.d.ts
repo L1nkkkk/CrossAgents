@@ -159,6 +159,15 @@ export type NativeBrowser = {
   close(id: number): Promise<void>;
 };
 
+export type WindowMode = "efficiency" | "classic" | "mini";
+
+export type WindowModeSnapshot = {
+  mode: WindowMode;
+  alwaysOnTop: boolean;
+  opacity: number;
+  miniCollapsed: boolean;
+};
+
 export interface CrossAgentsBridge {
   /** The built-in browser (native child webviews); absent where the page has no tab of its own. */
   browser?: BrowserBridge;
@@ -242,6 +251,15 @@ export interface CrossAgentsBridge {
   };
   /** A window command from the page's menu (src-tauri/src/desktop.rs `window_command`). */
   command?(name: "drag" | "minimize" | "maximize" | "close" | "zoomIn" | "zoomOut" | "zoomReset" | "reload" | "devtools" | "fullscreen" | "quit"): void;
+  /** QQ-style three-mode desktop window controls (efficiency / classic / mini). */
+  windowMode?: {
+    get(): Promise<WindowModeSnapshot>;
+    set(mode: WindowMode): Promise<WindowModeSnapshot>;
+    setAlwaysOnTop(enabled: boolean): Promise<WindowModeSnapshot>;
+    setOpacity(opacity: number, persist?: boolean): Promise<WindowModeSnapshot>;
+    setMiniCollapsed(collapsed: boolean): Promise<WindowModeSnapshot>;
+    onChange(listener: (state: WindowModeSnapshot) => void): () => void;
+  };
   /** This machine's Tailscale state and peers (src-tauri/src/remote.rs). Desktop only. */
   tailscale?: { status(): Promise<TailscaleStatus> };
 }

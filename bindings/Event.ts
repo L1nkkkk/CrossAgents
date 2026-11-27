@@ -31,6 +31,7 @@ import type { RoundSource } from "./RoundSource";
 import type { Run } from "./Run";
 import type { RunId } from "./RunId";
 import type { RunStatus } from "./RunStatus";
+import type { SessionRef } from "./SessionRef";
 import type { StopReason } from "./StopReason";
 import type { TaskId } from "./TaskId";
 import type { TaskStatus } from "./TaskStatus";
@@ -66,6 +67,10 @@ reply_excerpt?: string,
  * Files sent with it (docs/tasks/DOGFOOD.md §3).
  */
 attachments?: Array<Attachment>, 
+/**
+ * Read-only references to other sessions attached via `@session` or drag-and-drop.
+ */
+session_refs?: Array<SessionRef>, 
 /**
  * Notices that rode along with it (docs/TODO.md §二十五 第 3 条): they are in what
  * the agent reads, after the person's words, but not in `text`.

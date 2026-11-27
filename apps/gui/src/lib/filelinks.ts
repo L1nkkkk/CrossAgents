@@ -53,14 +53,35 @@ function plausiblePath(p: string): boolean {
 }
 
 /**
+ * Converts a local `file:` URI (`file:///C:/a/b.rs`, `file:///home/a/b.rs`, `file://localhost/...`)
+ * to a local path; returns `undefined` for non-local hosts (`file://evil.com/...`) or malformed URIs,
+ * and `null` when `s` is not a `file:` URI.
+ */
+function stripFileUri(s: string): string | null | undefined {
+  if (!/^file:/i.test(s)) return null;
+  const rest = s.slice(5);
+  const m = rest.match(/^\/\/(?:localhost)?(\/.*)$/i);
+  if (m) {
+    const path = m[1];
+    return /^\/[a-zA-Z]:[\\/]/.test(path) ? path.slice(1) : path;
+  }
+  if (/^\/\/[a-zA-Z]:[\\/]/.test(rest)) return rest.slice(2);
+  return undefined;
+}
+
+/**
  * The file a Markdown link target names, or undefined when it is not a local path: http(s) and
- * mailto are web links, any other scheme (`javascript:`, `file:`…) is refused, and so is "".
+ * mailto are web links, local `file:///` URIs unwrap to local paths (workspace containment is
+ * still enforced by the hub when opening), and any other scheme (`javascript:`, `vscode:`…) or
+ * remote `file://host/...` share is refused.
  */
 export function fileLinkTarget(href: string): FileTarget | undefined {
   const raw = href.trim();
   if (!raw) return undefined;
   if (/^(https?:|mailto:)/i.test(raw)) return undefined;
-  const text = decode(raw);
+  const unwrapped = stripFileUri(raw);
+  if (unwrapped === undefined) return undefined;
+  const text = decode(unwrapped ?? raw);
   const target = splitLine(text);
   // `main.rs:12` reads like a scheme until its line is gone; anything left with one is refused.
   if (!plausiblePath(target.path)) return undefined;

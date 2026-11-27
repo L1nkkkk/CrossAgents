@@ -67,6 +67,7 @@ import { Composer, QueuePanel } from "./SessionComposer";
 import { AgentText, Bubble, CiteContext, fromPerson, MessageAppearance, PersonMessage } from "./SessionMessage";
 import { SteerItem, TurnEnded } from "./SessionSteer";
 import { SessionModeration } from "./SessionModeration";
+import { ScopedNameLabel, TurnSessionRefs } from "../sessionRef";
 
 const started = (turn: TranscriptTurn) => !!turn.started_at || !!turn.completed_at;
 
@@ -606,7 +607,7 @@ function Header({
         )}
         <span className="who-block">
           <AgentName agent={agent} />
-          <span className="who-sub">{agent.topic ?? agentTitle(agent)}</span>
+          <TopicSubtitle agent={agent} />
         </span>
         <StatusChip status={agent.status} tone={agentTone(agent.status)} />
         {isRemoteNodeId(agent.node) && (
@@ -853,18 +854,95 @@ function AgentName({ agent }: { agent: Agent }) {
         }}
       />
     );
+  const [rerolling, setRerolling] = useState(false);
   const generated = agent.name_source === "generated";
   return (
+    <span className="name-row">
+      <button
+        className="title name-button"
+        onClick={() => {
+          setValue(agent.name);
+          setEditing(true);
+        }}
+        title={`${sessionLabel(agent) !== agent.name ? `@${agent.name} · ` : ""}${generated ? "名字是自动起的，点一下改名" : "点一下改名"}`}
+      >
+        <ScopedNameLabel name={sessionLabel(agent)} />
+      </button>
+      {agent.plugin !== "external" && sessionLabel(agent) === agent.name && (
+        <button
+          type="button"
+          className="ghost icon name-reroll"
+          disabled={rerolling}
+          title="随机换一个神话/天文/神秘学代号"
+          aria-label="随机换名"
+          onClick={async () => {
+            setRerolling(true);
+            try {
+              await api.renameAgent(agent.id, "", true);
+            } catch {
+              // ignore transient error
+            } finally {
+              setRerolling(false);
+            }
+          }}
+        >
+          🎲
+        </button>
+      )}
+    </span>
+  );
+}
+
+/** Semantic short title under the agent name; click to edit in place. */
+function TopicSubtitle({ agent }: { agent: Agent }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(agent.topic ?? "");
+  async function save() {
+    const next = value.trim();
+    if (next === (agent.topic ?? "")) {
+      setEditing(false);
+      return;
+    }
+    try {
+      await api.setTopic(agent.id, next || null);
+    } finally {
+      setEditing(false);
+    }
+  }
+  if (editing) {
+    return (
+      <input
+        className="topic-edit"
+        autoFocus
+        value={value}
+        maxLength={120}
+        placeholder="输入简短标题（留空清除）"
+        aria-label="编辑会话标题"
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => void save()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void save();
+          } else if (e.key === "Escape") {
+            setEditing(false);
+          }
+        }}
+      />
+    );
+  }
+  const text = agent.topic ?? agentTitle(agent);
+  return (
     <button
-      className="title name-button"
+      type="button"
+      className="who-sub who-sub-btn"
       onClick={() => {
-        setValue(agent.name);
+        setValue(agent.topic ?? "");
         setEditing(true);
       }}
-      title={`${sessionLabel(agent) !== agent.name ? `@${agent.name} · ` : ""}${generated ? "名字是自动起的，点一下改名" : "点一下改名"}`}
+      title={agent.topic ? `${agent.topic}（点一下修改会话标题）` : "点一下设置会话标题"}
     >
-      {sessionLabel(agent)}
-      {generated && sessionLabel(agent) === agent.name && <span className="name-auto">自动命名</span>}
+      {text}
     </button>
   );
 }
@@ -883,7 +961,8 @@ function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
   return (
     <div className="turn sending">
       <PersonMessage>
-        {(message.text || !message.attachments?.length) && <div className="bubble">{message.text}</div>}
+        <TurnSessionRefs refs={message.sessionRefs} />
+        {(message.text || (!message.attachments?.length && !message.sessionRefs?.length)) && <div className="bubble">{message.text}</div>}
         {!!message.attachments?.length && <div className="turn-note small muted">附件：{message.attachments.map((a) => a.name).join("、")}</div>}
       </PersonMessage>
       {message.error ? (
@@ -1208,7 +1287,8 @@ const Turn = memo(function Turn({ turn, agent, agents, tree }: { turn: Transcrip
       {fromPerson(turn) ? (
         <>
           <PersonMessage>
-            {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} tree={tree} />}
+            <TurnSessionRefs refs={turn.session_refs} />
+            {(turn.input || (!turn.attachments?.length && !turn.session_refs?.length)) && <Bubble turn={turn} tree={tree} />}
             <TurnFiles agent={agent.id} files={turn.attachments ?? []} />
           </PersonMessage>
           {!turn.started_at && <WaitingTurn turn={turn} agent={agent} />}

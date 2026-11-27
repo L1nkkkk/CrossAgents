@@ -16,6 +16,7 @@ import type { QueuedReason } from "@bindings/QueuedReason";
 import type { TranscriptTurn } from "@bindings/TranscriptTurn";
 import { api } from "./api";
 import { deliveryFailure, deliveryHint } from "./lib/errors";
+import type { HeldSessionRef } from "./sessionRef";
 
 export type Outgoing = {
   key: number;
@@ -26,6 +27,8 @@ export type Outgoing = {
   steer?: boolean;
   /** Files sent with it. */
   attachments?: AttachmentUpload[];
+  /** Referenced sessions attached with it. */
+  sessionRefs?: HeldSessionRef[];
   /** This message's own id, fixed at submit and reused by every retry. */
   clientId: string;
   /** The hub's id for it, once it took it. */
@@ -66,6 +69,9 @@ function clientId(): string {
 async function deliver(item: Outgoing): Promise<void> {
   try {
     const attachments = item.attachments?.length ? item.attachments : undefined;
+    const session_refs = item.sessionRefs?.length
+      ? item.sessionRefs.map((r) => ({ agent: r.agentId, mode: r.mode }))
+      : undefined;
     // `steered: false` in the answer is not a failure: `queued_reason` says why it waits instead
     // (no turn runs, the driver cannot steer, …). It shows on the same row.
     const sent = await api.sendMessage(item.agent, {
@@ -73,6 +79,7 @@ async function deliver(item: Outgoing): Promise<void> {
       now: item.now || undefined,
       steer: item.steer || undefined,
       attachments,
+      session_refs,
       client_message_id: item.clientId,
     });
     set((xs) =>
@@ -102,8 +109,21 @@ async function deliver(item: Outgoing): Promise<void> {
  * with a retry, unless `takeBack` (the caller puts the text back where it was typed). `steer`
  * hands it to the running turn, which the hub may still queue.
  */
-export async function sendMessage(agent: string, text: string, opts: { now?: boolean; steer?: boolean; takeBack?: boolean; attachments?: AttachmentUpload[] } = {}): Promise<void> {
-  const item: Outgoing = { key: ++next, agent, text, now: opts.now, steer: opts.steer, attachments: opts.attachments, clientId: clientId() };
+export async function sendMessage(
+  agent: string,
+  text: string,
+  opts: { now?: boolean; steer?: boolean; takeBack?: boolean; attachments?: AttachmentUpload[]; sessionRefs?: HeldSessionRef[] } = {},
+): Promise<void> {
+  const item: Outgoing = {
+    key: ++next,
+    agent,
+    text,
+    now: opts.now,
+    steer: opts.steer,
+    attachments: opts.attachments,
+    sessionRefs: opts.sessionRefs,
+    clientId: clientId(),
+  };
   set((xs) => [...xs, item]);
   try {
     await deliver(item);

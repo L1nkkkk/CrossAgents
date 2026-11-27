@@ -7,7 +7,7 @@ import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, errorText } from "../api";
 import { HeldFiles, MiniFiles, useHeld } from "../attach";
-import { ErrorBox, Icon, Vendor, displayName } from "../components";
+import { ErrorBox, Icon, Vendor, displayName, useAgents } from "../components";
 import { useCompact } from "../contextusage";
 import { useHubData } from "../hub";
 import { useNodePlugins } from "../nodes";
@@ -18,11 +18,12 @@ import { queueHeading } from "../lib/delivery";
 import { t } from "../lib/i18n";
 import { canSteer, composerAction, composerHint, composerPlaceholder } from "../lib/steer";
 import { isImeEvent } from "../lib/ime";
-import { mentionsFor, useMention } from "../mention";
+import { mentionsFor, sessionMentionsFor, useMention } from "../mention";
 import { ModelEffortPicks } from "../modelPick";
 import { sendMessage } from "../outbox";
 import { StateWord } from "../parts";
 import type { TranscriptTurn } from "../session";
+import { HeldSessionRefs, useSessionRefs } from "../sessionRef";
 import { useSlash, type SlashMenuGroup } from "../slash";
 import { PlanTasks, usePlanApproval } from "./Run";
 import { isKickoff } from "../lib/messageText";
@@ -107,7 +108,12 @@ export function Composer({
   const [keepNote, setKeepNote] = useState<string>();
   const ref = useRef<HTMLTextAreaElement>(null);
   const plugins = useNodePlugins(agent.node);
-  const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
+  const allAgents = useAgents();
+  const sessionRefs = useSessionRefs(setError);
+  const mention = useMention(ref, setDraft, [
+    ...sessionMentionsFor(allAgents.data ?? [], sessionRefs.add, agent.id),
+    ...mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)),
+  ]);
   const compact = useCompact(agent);
   const agentCommands = useHubData(() => api.agentCommands(agent.id), [agent.id],
     (e) => (e.type === "agent.status_changed" && e.data.id === agent.id) || (e.type === "agent.updated" && e.data.agent.id === agent.id));
@@ -183,9 +189,10 @@ export function Composer({
   async function send(mode: "queue" | "now" | "steer" = "queue") {
     const text = draft.trim();
     const held = files.held;
-    if ((!text && !held.length) || busy) return;
+    const refs = sessionRefs.held;
+    if ((!text && !held.length && !refs.length) || busy) return;
     // `/model <query>` switches this session's model from the composer without sending a turn.
-    const slashModel = !held.length && agent.plugin !== "external" ? /^\/model\s+(.+)$/i.exec(text) : null;
+    const slashModel = !held.length && !refs.length && agent.plugin !== "external" ? /^\/model\s+(.+)$/i.exec(text) : null;
     if (slashModel) {
       const q = slashModel[1].trim().toLowerCase();
       setBusy(true);
@@ -213,13 +220,14 @@ export function Composer({
     // Shown at once (outbox.ts); a failure puts the text and files back here.
     setDraft("");
     files.clear();
+    sessionRefs.clear();
     drafts.forget({ kind: "session", agent: agent.id });
     setKeepNote(undefined);
     try {
       const attachments = held.map(({ name, mime, data }) => ({ name, mime, data }));
       // A failure stays on this message's own row with a retry (P0-1, P2-6): the row keeps the
       // text and files, so nothing is put back in the composer and nothing is lost.
-      await sendMessage(agent.id, text, { now: mode === "now", steer: mode === "steer", attachments });
+      await sendMessage(agent.id, text, { now: mode === "now", steer: mode === "steer", attachments, sessionRefs: refs });
     } catch {
       // Said on the row (outbox.ts), in the person's words.
     } finally {
@@ -267,9 +275,21 @@ export function Composer({
           Plan 待审批 · {plans[0].run.plan.length} 个任务 · 展开审批
         </button>
       )}
-      <div className="composer" onDrop={files.onDrop} onDragOver={files.onDragOver}>
+      <div
+        className={`composer ${sessionRefs.dragOver ? "drop-session-over" : ""}`}
+        onDrop={(e) => {
+          if (!sessionRefs.onDrop(e)) files.onDrop(e);
+        }}
+        onDragOver={(e) => {
+          sessionRefs.onDragOver(e);
+          files.onDragOver(e);
+        }}
+        onDragLeave={sessionRefs.onDragLeave}
+      >
+        {sessionRefs.dragOver && <div className="composer-drop-hint">松手引用该会话（只读上下文）</div>}
         {slash.menu}
         {mention.menu}
+        <HeldSessionRefs refs={sessionRefs.held} onRemove={sessionRefs.remove} onCycleMode={sessionRefs.cycleMode} />
         <HeldFiles files={files.held} onRemove={files.remove} />
         {keepNote && <div className="small dim">{keepNote}</div>}
         <textarea
@@ -306,12 +326,12 @@ export function Composer({
           <div className="spacer" />
           {agent.plugin !== "external" && files.picker}
           {/* One button: stop while it works and nothing is typed, else send (which queues). */}
-          {canInterrupt && !draft.trim() && !files.held.length ? (
+          {canInterrupt && !draft.trim() && !files.held.length && !sessionRefs.held.length ? (
             <button className="primary send" onClick={interrupt} title="中断本轮（Esc）" aria-label="中断本轮">
               <Icon name="stop" size={14} />
             </button>
           ) : (
-            <button className="primary send" disabled={busy || (!draft.trim() && !files.held.length)} onClick={() => send()} aria-label="发送">
+            <button className="primary send" disabled={busy || (!draft.trim() && !files.held.length && !sessionRefs.held.length)} onClick={() => send()} aria-label="发送">
               <Icon name="send" size={16} />
             </button>
           )}

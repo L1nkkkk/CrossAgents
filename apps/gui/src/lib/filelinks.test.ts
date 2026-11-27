@@ -32,6 +32,9 @@ test("link targets: relative and absolute paths, Windows and POSIX", () => {
   assert.deepEqual(fileLinkTarget("C:\\work\\notes\\todo.md"), { path: "C:\\work\\notes\\todo.md" });
   assert.deepEqual(fileLinkTarget("C:/work/notes/todo.md:3:1"), { path: "C:/work/notes/todo.md", line: 3, col: 1 });
   assert.deepEqual(fileLinkTarget("/home/me/repo/src/lib.rs"), { path: "/home/me/repo/src/lib.rs" });
+  assert.deepEqual(fileLinkTarget("file:///C:/work/notes/todo.md"), { path: "C:/work/notes/todo.md" });
+  assert.deepEqual(fileLinkTarget("file:///C:/work/notes/todo.md#L10-L20"), { path: "C:/work/notes/todo.md", line: 10 });
+  assert.deepEqual(fileLinkTarget("file://localhost/home/me/repo/src/lib.rs:7"), { path: "/home/me/repo/src/lib.rs", line: 7 });
   assert.deepEqual(fileLinkTarget("docs/%E8%AF%B4%E6%98%8E.md"), { path: "docs/说明.md" });
   assert.deepEqual(fileLinkTarget("Makefile"), { path: "Makefile" });
 });
@@ -41,7 +44,9 @@ test("link targets: web links, other schemes and empty targets are not files", (
   assert.equal(fileLinkTarget("mailto:a@b.c"), undefined);
   assert.equal(fileLinkTarget("javascript:alert(1)"), undefined);
   assert.equal(fileLinkTarget("JavaScript:1"), undefined);
-  assert.equal(fileLinkTarget("file:///etc/passwd"), undefined);
+  assert.equal(fileLinkTarget("file://evil.com/share/x"), undefined);
+  assert.equal(fileLinkTarget("file:relative.rs"), undefined);
+  assert.equal(fileLinkTarget("file:///"), undefined);
   assert.equal(fileLinkTarget("vscode://file/x"), undefined);
   assert.equal(fileLinkTarget("data:text/html,x"), undefined);
   assert.equal(fileLinkTarget(""), undefined);

@@ -265,6 +265,12 @@ fn main() {
         desktop::write_clipboard,
         desktop::set_theme,
         desktop::window_command,
+        desktop::window_mode_get,
+        desktop::window_mode_set,
+        desktop::window_mode_listen,
+        desktop::window_always_on_top,
+        desktop::window_opacity,
+        desktop::window_mini_resize,
         desktop::notify,
         desktop::listen_for_notice,
         extensions::extension_safe_mode,
@@ -321,6 +327,7 @@ fn main() {
         .manage(HubRelay::default())
         .manage(terminal::TerminalRelays::default())
         .manage(desktop::Zoom::default())
+        .manage(desktop::WindowModeState::default())
         .manage(desktop::OpenCopies::default())
         .manage(desktop::NoticeListener::default())
         .manage(updates::Updates::default())

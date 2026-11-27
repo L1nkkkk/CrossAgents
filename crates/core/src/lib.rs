@@ -52,7 +52,7 @@ pub use error::CoreError;
 pub use event::{
     AccountCandidate, BrowserAgent, CarriedNotice, DeliveryState, DeliveryStatus, DiffSource,
     EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, MessageSource, QueuedReason,
-    RoundNotice, RoundSource,
+    RoundNotice, RoundSource, SessionRef,
 };
 pub use expertise::{
     Candidate, CandidateOrigin, CandidateStatus, EntryKind, EntryStats, EntryStatus, Example,

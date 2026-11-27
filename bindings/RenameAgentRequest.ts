@@ -3,4 +3,8 @@
 /**
  * `POST /v1/agents/{key}/name`: a person renames the agent.
  */
-export type RenameAgentRequest = { name: string, };
+export type RenameAgentRequest = { name: string, 
+/**
+ * When `true`, generate a fresh scoped name (`<CODE>-<Word>-<Seq>`) in the agent's project.
+ */
+random?: boolean, };

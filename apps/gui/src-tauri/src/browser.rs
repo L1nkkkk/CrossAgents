@@ -209,6 +209,14 @@ pub fn close_all(app: &AppHandle) {
     }
 }
 
+pub fn hide_all(app: &AppHandle) {
+    for (label, view) in app.webviews() {
+        if label.starts_with("browser-") {
+            let _ = view.hide();
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }

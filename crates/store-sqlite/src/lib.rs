@@ -4371,6 +4371,7 @@ mod tests {
                 thread: None,
                 reply_excerpt: None,
                 attachments: Vec::new(),
+                session_refs: Vec::new(),
                 notices: Vec::new(),
             })
             .await
@@ -4411,6 +4412,7 @@ mod tests {
                 thread: None,
                 reply_excerpt: None,
                 attachments: Vec::new(),
+                session_refs: Vec::new(),
                 notices: Vec::new(),
             })
             .await

@@ -415,29 +415,29 @@ function renderBlocks(blocks: Block[], doc = false, headingIds?: string[], headi
   });
 }
 
-function renderInline(spans: Inline[]): ReactNode[] {
+function renderInline(spans: Inline[], insideLink = false): ReactNode[] {
   return spans.map((s, i) => {
     switch (s.t) {
       case "text":
         return s.text;
       case "code":
-        return <InlineCode key={i} text={s.text} />;
+        return insideLink ? <code key={i}>{s.text}</code> : <InlineCode key={i} text={s.text} />;
       case "file":
         return (
           <FileLink key={i} path={s.path} line={s.line}>
-            {renderInline(s.children)}
+            {renderInline(s.children, true)}
           </FileLink>
         );
       case "strong":
-        return <strong key={i}>{renderInline(s.children)}</strong>;
+        return <strong key={i}>{renderInline(s.children, insideLink)}</strong>;
       case "em":
-        return <em key={i}>{renderInline(s.children)}</em>;
+        return <em key={i}>{renderInline(s.children, insideLink)}</em>;
       case "del":
-        return <del key={i}>{renderInline(s.children)}</del>;
+        return <del key={i}>{renderInline(s.children, insideLink)}</del>;
       case "link":
         return (
           <a key={i} href={s.href} target="_blank" rel="noreferrer">
-            {renderInline(s.children)}
+            {renderInline(s.children, true)}
           </a>
         );
       case "image":

@@ -128,6 +128,7 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
         stop_reason: null,
         items: [],
         ...(event.data.attachments?.length ? { attachments: event.data.attachments } : {}),
+        ...(event.data.session_refs?.length ? { session_refs: event.data.session_refs } : {}),
         ...(event.data.notices?.length ? { notices: event.data.notices } : {}),
         ...(event.data.queued_reason ? { queued_reason: event.data.queued_reason } : {}),
       };

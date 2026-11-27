@@ -688,6 +688,7 @@ async fn remote_node_executes_agent_session_and_reports_plugins() {
             now: None,
             steer: None,
             attachments: None,
+            session_refs: None,
             client_message_id: None,
         })
         .send()

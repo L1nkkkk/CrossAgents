@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
     time::Duration,
 };
@@ -7,7 +7,10 @@ use std::{
 use regex::Regex;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State, Theme, Webview, Window, ipc::Channel};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, State, Theme,
+    Webview, Window, ipc::Channel,
+};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
@@ -198,9 +201,17 @@ fn build_tray_menu(
     let status = MenuItem::with_id(app, "status", status_label, false, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let show = MenuItem::with_id(app, "show", "打开 CrossAgents", !stopping, None::<&str>)?;
+    let mode_eff = MenuItem::with_id(app, "mode-efficiency", "效率模式（完整窗口）", !stopping, None::<&str>)?;
+    let mode_classic = MenuItem::with_id(app, "mode-classic", "经典模式（侧边窄面板）", !stopping, None::<&str>)?;
+    let mode_mini = MenuItem::with_id(app, "mode-mini", "迷你窗（悬浮置顶）", !stopping, None::<&str>)?;
+    let sep_modes = PredefinedMenuItem::separator(app)?;
     menu.append(&status)?;
     menu.append(&sep1)?;
     menu.append(&show)?;
+    menu.append(&mode_eff)?;
+    menu.append(&mode_classic)?;
+    menu.append(&mode_mini)?;
+    menu.append(&sep_modes)?;
 
     let update_state = crate::updates::current_state(app);
     let update_kind = update_state["state"].as_str().unwrap_or("idle");
@@ -303,6 +314,18 @@ pub fn install_tray(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("CrossAgents")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app),
+            "mode-efficiency" => {
+                show_window(app);
+                let _ = apply_window_mode(app, WindowMode::Efficiency);
+            }
+            "mode-classic" => {
+                show_window(app);
+                let _ = apply_window_mode(app, WindowMode::Classic);
+            }
+            "mode-mini" => {
+                show_window(app);
+                let _ = apply_window_mode(app, WindowMode::Mini);
+            }
             "update-check" => crate::updates::check_from_tray(app.clone()),
             "update-install" => crate::updates::install_from_tray(app.clone()),
             "safe-mode" => restart_safe_mode(app),
@@ -363,6 +386,456 @@ fn stop_background(app: &AppHandle) {
                 }
             });
         });
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowMode {
+    #[default]
+    Efficiency,
+    Classic,
+    Mini,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    maximized: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredModePrefs {
+    #[serde(default)]
+    mode: WindowMode,
+    #[serde(default)]
+    efficiency_bounds: Option<SavedBounds>,
+    #[serde(default)]
+    classic_bounds: Option<SavedBounds>,
+    #[serde(default)]
+    mini_bounds: Option<SavedBounds>,
+    #[serde(default)]
+    classic_always_on_top: bool,
+    #[serde(default = "default_true_bool")]
+    mini_always_on_top: bool,
+    #[serde(default = "default_one")]
+    classic_opacity: f64,
+    #[serde(default = "default_mini_opacity")]
+    mini_opacity: f64,
+    #[serde(default)]
+    mini_collapsed: bool,
+    #[serde(default = "default_mini_expanded_height")]
+    mini_expanded_height: f64,
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+fn default_one() -> f64 {
+    1.0
+}
+
+fn default_mini_opacity() -> f64 {
+    0.94
+}
+
+fn default_mini_expanded_height() -> f64 {
+    248.0
+}
+
+impl Default for StoredModePrefs {
+    fn default() -> Self {
+        Self {
+            mode: WindowMode::Efficiency,
+            efficiency_bounds: None,
+            classic_bounds: None,
+            mini_bounds: None,
+            classic_always_on_top: false,
+            mini_always_on_top: true,
+            classic_opacity: 1.0,
+            mini_opacity: 0.94,
+            mini_collapsed: false,
+            mini_expanded_height: 248.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowModeSnapshot {
+    pub mode: WindowMode,
+    pub always_on_top: bool,
+    pub opacity: f64,
+    pub mini_collapsed: bool,
+}
+
+impl StoredModePrefs {
+    fn snapshot(&self) -> WindowModeSnapshot {
+        match self.mode {
+            WindowMode::Efficiency => WindowModeSnapshot {
+                mode: WindowMode::Efficiency,
+                always_on_top: false,
+                opacity: 1.0,
+                mini_collapsed: self.mini_collapsed,
+            },
+            WindowMode::Classic => WindowModeSnapshot {
+                mode: WindowMode::Classic,
+                always_on_top: self.classic_always_on_top,
+                opacity: self.classic_opacity,
+                mini_collapsed: self.mini_collapsed,
+            },
+            WindowMode::Mini => WindowModeSnapshot {
+                mode: WindowMode::Mini,
+                always_on_top: self.mini_always_on_top,
+                opacity: self.mini_opacity,
+                mini_collapsed: self.mini_collapsed,
+            },
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct WindowModeState {
+    inner: Mutex<WindowModeInner>,
+}
+
+#[derive(Default)]
+struct WindowModeInner {
+    loaded: bool,
+    prefs: StoredModePrefs,
+    listener: Option<Channel<WindowModeSnapshot>>,
+}
+
+fn prefs_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("window-modes.json"))
+}
+
+fn load_prefs(app: &AppHandle, inner: &mut WindowModeInner) {
+    if inner.loaded {
+        return;
+    }
+    inner.loaded = true;
+    if let Some(path) = prefs_path(app)
+        && let Ok(bytes) = std::fs::read(path)
+        && let Ok(parsed) = serde_json::from_slice::<StoredModePrefs>(&bytes)
+    {
+        inner.prefs = parsed;
+    }
+}
+
+fn save_prefs(app: &AppHandle, prefs: &StoredModePrefs) {
+    if let Some(path) = prefs_path(app) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(prefs) {
+            let _ = std::fs::write(path, bytes);
+        }
+    }
+}
+
+fn capture_bounds(window: &Window) -> Option<SavedBounds> {
+    let pos = window.outer_position().ok()?;
+    let size = window.inner_size().ok()?;
+    let maximized = window.is_maximized().unwrap_or(false);
+    Some(SavedBounds {
+        x: pos.x,
+        y: pos.y,
+        width: size.width,
+        height: size.height,
+        maximized,
+    })
+}
+
+fn default_bounds_for(window: &Window, mode: WindowMode, mini_collapsed: bool, mini_h: f64) -> (LogicalPosition<f64>, LogicalSize<f64>) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let (work_x, work_y, work_w, work_h) = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|m| {
+            let pos = m.position();
+            let size = m.size();
+            (
+                f64::from(pos.x) / scale,
+                f64::from(pos.y) / scale,
+                f64::from(size.width) / scale,
+                f64::from(size.height) / scale,
+            )
+        })
+        .unwrap_or((0.0, 0.0, 1440.0, 900.0));
+    match mode {
+        WindowMode::Efficiency => {
+            let w = 1280.0_f64.min((work_w - 60.0).max(800.0));
+            let h = 900.0_f64.min((work_h - 80.0).max(600.0));
+            (
+                LogicalPosition::new(work_x + (work_w - w) / 2.0, work_y + (work_h - h) / 2.0),
+                LogicalSize::new(w, h),
+            )
+        }
+        WindowMode::Classic => {
+            let w = 356.0;
+            let h = 760.0_f64.min((work_h - 90.0).max(520.0));
+            (
+                LogicalPosition::new((work_x + work_w - w - 18.0).max(work_x), work_y + 42.0),
+                LogicalSize::new(w, h),
+            )
+        }
+        WindowMode::Mini => {
+            let w = if mini_collapsed { 286.0 } else { 312.0 };
+            let h = if mini_collapsed { 52.0 } else { mini_h.clamp(160.0, 420.0) };
+            (
+                LogicalPosition::new((work_x + work_w - w - 18.0).max(work_x), work_y + 24.0),
+                LogicalSize::new(w, h),
+            )
+        }
+    }
+}
+
+fn apply_opacity_native(window: &Window, opacity: f64) -> Result<(), String> {
+    let clamped = opacity.clamp(0.35, 1.0);
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{COLORREF, HWND};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongW,
+            WS_EX_LAYERED,
+        };
+        let raw = window.hwnd().map_err(|err| err.to_string())?;
+        let hwnd = HWND(raw.0 as *mut _);
+        unsafe {
+            let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            let layered = WS_EX_LAYERED.0 as i32;
+            if (ex & layered) == 0 {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, ex | layered);
+            }
+            let alpha = (clamped * 255.0).round().clamp(90.0, 255.0) as u8;
+            SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA)
+                .map_err(|err| err.to_string())?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, clamped);
+    }
+    Ok(())
+}
+
+pub fn apply_window_mode(app: &AppHandle, next_mode: WindowMode) -> Result<WindowModeSnapshot, String> {
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "找不到主窗口".to_owned())?;
+    let state = app.state::<WindowModeState>();
+    let (saved_target, prev_mode, snapshot, mini_collapsed, mini_expanded_height, listener) = {
+        let mut inner = state.inner.lock().expect("window mode state");
+        load_prefs(app, &mut inner);
+        let prev = inner.prefs.mode;
+        if prev != next_mode {
+            if let Some(bounds) = capture_bounds(&window) {
+                match prev {
+                    WindowMode::Efficiency => inner.prefs.efficiency_bounds = Some(bounds),
+                    WindowMode::Classic => inner.prefs.classic_bounds = Some(bounds),
+                    WindowMode::Mini => {
+                        if !inner.prefs.mini_collapsed {
+                            let scale = window.scale_factor().unwrap_or(1.0);
+                            inner.prefs.mini_expanded_height =
+                                (f64::from(bounds.height) / scale).clamp(160.0, 420.0);
+                        }
+                        inner.prefs.mini_bounds = Some(bounds);
+                    }
+                }
+            }
+            inner.prefs.mode = next_mode;
+            save_prefs(app, &inner.prefs);
+        }
+        let target = match next_mode {
+            WindowMode::Efficiency => inner.prefs.efficiency_bounds,
+            WindowMode::Classic => inner.prefs.classic_bounds,
+            WindowMode::Mini => inner.prefs.mini_bounds,
+        };
+        (
+            target,
+            prev,
+            inner.prefs.snapshot(),
+            inner.prefs.mini_collapsed,
+            inner.prefs.mini_expanded_height,
+            inner.listener.clone(),
+        )
+    };
+
+    if next_mode != WindowMode::Efficiency {
+        crate::browser::hide_all(app);
+    }
+
+    if prev_mode != next_mode {
+        if window.is_maximized().unwrap_or(false) {
+            let _ = window.unmaximize();
+        }
+        let min_size = match next_mode {
+            WindowMode::Efficiency => LogicalSize::new(640.0, 480.0),
+            WindowMode::Classic => LogicalSize::new(280.0, 440.0),
+            WindowMode::Mini => LogicalSize::new(220.0, 44.0),
+        };
+        let _ = window.set_min_size(Some(min_size));
+
+        if let Some(bounds) = saved_target {
+            if next_mode == WindowMode::Efficiency && bounds.maximized {
+                let _ = window.maximize();
+            } else {
+                let scale = window.scale_factor().unwrap_or(1.0);
+                let target_height = if next_mode == WindowMode::Mini {
+                    if mini_collapsed {
+                        (52.0 * scale).round() as u32
+                    } else {
+                        (mini_expanded_height * scale).round() as u32
+                    }
+                } else {
+                    bounds.height
+                };
+                let _ = window.set_size(PhysicalSize::new(bounds.width.max(220), target_height.max(44)));
+                let _ = window.set_position(PhysicalPosition::new(bounds.x, bounds.y));
+            }
+        } else {
+            let (pos, size) = default_bounds_for(&window, next_mode, mini_collapsed, mini_expanded_height);
+            let _ = window.set_size(size);
+            let _ = window.set_position(pos);
+        }
+    }
+
+    let _ = window.set_always_on_top(snapshot.always_on_top);
+    let _ = apply_opacity_native(&window, snapshot.opacity);
+    if let Some(channel) = listener {
+        let _ = channel.send(snapshot.clone());
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn window_mode_get(app: AppHandle) -> Result<WindowModeSnapshot, String> {
+    let state = app.state::<WindowModeState>();
+    let mut inner = state.inner.lock().expect("window mode state");
+    load_prefs(&app, &mut inner);
+    Ok(inner.prefs.snapshot())
+}
+
+#[tauri::command]
+pub fn window_mode_set(app: AppHandle, mode: WindowMode) -> Result<WindowModeSnapshot, String> {
+    apply_window_mode(&app, mode)
+}
+
+#[tauri::command]
+pub fn window_mode_listen(
+    app: AppHandle,
+    webview: Webview,
+    channel: Channel<WindowModeSnapshot>,
+) -> Result<WindowModeSnapshot, String> {
+    let state = app.state::<WindowModeState>();
+    let mut inner = state.inner.lock().expect("window mode state");
+    load_prefs(&app, &mut inner);
+    if webview.label() == "main" {
+        inner.listener = Some(channel);
+    }
+    Ok(inner.prefs.snapshot())
+}
+
+#[tauri::command]
+pub fn window_always_on_top(
+    app: AppHandle,
+    window: Window,
+    enabled: bool,
+) -> Result<WindowModeSnapshot, String> {
+    let state = app.state::<WindowModeState>();
+    let snapshot = {
+        let mut inner = state.inner.lock().expect("window mode state");
+        load_prefs(&app, &mut inner);
+        match inner.prefs.mode {
+            WindowMode::Classic => inner.prefs.classic_always_on_top = enabled,
+            WindowMode::Mini => inner.prefs.mini_always_on_top = enabled,
+            WindowMode::Efficiency => {}
+        }
+        save_prefs(&app, &inner.prefs);
+        inner.prefs.snapshot()
+    };
+    window
+        .set_always_on_top(enabled)
+        .map_err(|err| err.to_string())?;
+    Ok(WindowModeSnapshot {
+        always_on_top: enabled,
+        ..snapshot
+    })
+}
+
+#[tauri::command]
+pub fn window_opacity(
+    app: AppHandle,
+    window: Window,
+    opacity: f64,
+    persist: Option<bool>,
+) -> Result<WindowModeSnapshot, String> {
+    let clamped = opacity.clamp(0.35, 1.0);
+    apply_opacity_native(&window, clamped)?;
+    let state = app.state::<WindowModeState>();
+    let snapshot = {
+        let mut inner = state.inner.lock().expect("window mode state");
+        load_prefs(&app, &mut inner);
+        if persist.unwrap_or(true) {
+            match inner.prefs.mode {
+                WindowMode::Classic => inner.prefs.classic_opacity = clamped,
+                WindowMode::Mini => inner.prefs.mini_opacity = clamped,
+                WindowMode::Efficiency => {}
+            }
+            save_prefs(&app, &inner.prefs);
+        }
+        inner.prefs.snapshot()
+    };
+    Ok(WindowModeSnapshot {
+        opacity: clamped,
+        ..snapshot
+    })
+}
+
+#[tauri::command]
+pub fn window_mini_resize(
+    app: AppHandle,
+    window: Window,
+    collapsed: bool,
+) -> Result<WindowModeSnapshot, String> {
+    let state = app.state::<WindowModeState>();
+    let (target_h, snapshot) = {
+        let mut inner = state.inner.lock().expect("window mode state");
+        load_prefs(&app, &mut inner);
+        if inner.prefs.mode == WindowMode::Mini && !inner.prefs.mini_collapsed && collapsed {
+            if let Ok(size) = window.inner_size() {
+                let scale = window.scale_factor().unwrap_or(1.0);
+                inner.prefs.mini_expanded_height =
+                    (f64::from(size.height) / scale).clamp(160.0, 420.0);
+            }
+        }
+        inner.prefs.mini_collapsed = collapsed;
+        save_prefs(&app, &inner.prefs);
+        let h = if collapsed {
+            52.0
+        } else {
+            inner.prefs.mini_expanded_height
+        };
+        (h, inner.prefs.snapshot())
+    };
+    if snapshot.mode == WindowMode::Mini
+        && let Ok(size) = window.inner_size()
+    {
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let width_logical = (f64::from(size.width) / scale).max(260.0);
+        let _ = window.set_size(LogicalSize::new(width_logical, target_h));
+    }
+    Ok(snapshot)
 }
 
 pub fn show_window(app: &AppHandle) {
@@ -625,7 +1098,20 @@ fn runs_when_opened(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::WindowAction;
+    use super::{WindowAction, WindowMode};
+
+    #[test]
+    fn window_modes_roundtrip_camel_case() {
+        for (raw, expected) in [
+            ("\"efficiency\"", WindowMode::Efficiency),
+            ("\"classic\"", WindowMode::Classic),
+            ("\"mini\"", WindowMode::Mini),
+        ] {
+            let parsed: WindowMode = serde_json::from_str(raw).unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), raw);
+        }
+    }
 
     #[test]
     fn window_actions_deserialize_from_frontend_names() {
