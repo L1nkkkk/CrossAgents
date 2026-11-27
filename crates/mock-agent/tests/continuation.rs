@@ -110,10 +110,19 @@ async fn phase(t: &TestHub, run: &Run, expected: &str) {
     );
 }
 
-async fn due(t: &TestHub, id: RunId) {
+async fn mutate_run(t: &TestHub, id: RunId, edit: impl FnOnce(&mut Run)) {
+    let _guard = t.hub.orchestrator.lock_run(id).await;
     let mut run = get(t, id).await;
-    run.continuation.as_mut().unwrap().next_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    edit(&mut run);
     t.hub.orchestrator.store().update_run(&run).await.unwrap();
+}
+
+async fn due(t: &TestHub, id: RunId) {
+    mutate_run(t, id, |run| {
+        run.continuation.as_mut().unwrap().next_at =
+            Some(Utc::now() - chrono::Duration::seconds(1));
+    })
+    .await;
 }
 
 async fn wake_count(t: &TestHub, run: &Run) -> usize {
@@ -415,16 +424,12 @@ async fn human_wait_approval_pause_and_cancel_suppress_due_wakeups() {
         (RunStatus::Paused, "paused"),
         (RunStatus::Cancelled, "ended"),
     ] {
-        let mut current = get(&t, run.id).await;
-        current.status = status;
-        current.continuation.as_mut().unwrap().next_at =
-            Some(Utc::now() - chrono::Duration::seconds(1));
-        t.hub
-            .orchestrator
-            .store()
-            .update_run(&current)
-            .await
-            .unwrap();
+        mutate_run(&t, run.id, |current| {
+            current.status = status;
+            current.continuation.as_mut().unwrap().next_at =
+                Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
         phase(&t, &run, expected).await;
         assert_eq!(get(&t, run.id).await.continuation.unwrap().attempts, 0);
     }
@@ -439,14 +444,10 @@ async fn budget_pause_precedes_recovery_including_a_lead_working_without_tasks()
     idle(&t, run.planner).await;
     phase(&t, &run, "continue").await;
     due(&t, run.id).await;
-    let mut current = get(&t, run.id).await;
-    current.config.policy.budget.max_tokens = Some(0);
-    t.hub
-        .orchestrator
-        .store()
-        .update_run(&current)
-        .await
-        .unwrap();
+    mutate_run(&t, run.id, |current| {
+        current.config.policy.budget.max_tokens = Some(0);
+    })
+    .await;
     let budgets = crossagents_hub::budget::Budgets::load(
         t.hub.bus.store().as_ref(),
         t.hub.orchestrator.clone(),
@@ -639,14 +640,10 @@ async fn a_rearmed_run_tells_the_person_again_when_it_exhausts_once_more() {
     exhaust(&t, &run).await;
     assert_eq!(notices(&t, &run).await.len(), 1);
 
-    let mut current = get(&t, run.id).await;
-    current.continuation.as_mut().unwrap().attempts = 0;
-    t.hub
-        .orchestrator
-        .store()
-        .update_run(&current)
-        .await
-        .unwrap();
+    mutate_run(&t, run.id, |current| {
+        current.continuation.as_mut().unwrap().attempts = 0;
+    })
+    .await;
 
     exhaust(&t, &run).await;
     assert_eq!(
@@ -691,14 +688,10 @@ async fn runs_without_continuation_never_get_the_exhausted_notice() {
     assert!(get(&t, run.id).await.continuation.is_none());
     assert!(notices(&t, &run).await.is_empty());
 
-    let mut current = get(&t, run.id).await;
-    current.status = RunStatus::Cancelled;
-    t.hub
-        .orchestrator
-        .store()
-        .update_run(&current)
-        .await
-        .unwrap();
+    mutate_run(&t, run.id, |current| {
+        current.status = RunStatus::Cancelled;
+    })
+    .await;
     t.hub.orchestrator.continue_runs().await;
     assert!(get(&t, run.id).await.continuation.is_none());
     assert!(notices(&t, &run).await.is_empty());
@@ -1305,20 +1298,16 @@ async fn the_automation_breaker_pauses_the_continuation_and_tells_the_person() {
     phase(&t, &run, "recover").await;
     // Forty-nine failed runs inside the week: the next one is the fiftieth, and 49 of 50 is
     // over the line, so the delivery that succeeds is the last this automation makes.
-    let mut stored = get(&t, run.id).await;
-    let mut state = stored.continuation.clone().unwrap();
-    let now = Utc::now();
-    state.health.runs = (0..49)
-        .map(|_| crossagents_core::RunRecord { at: now, ok: false })
-        .collect();
-    state.next_at = Some(now - chrono::Duration::seconds(1));
-    stored.continuation = Some(state);
-    t.hub
-        .orchestrator
-        .store()
-        .update_run(&stored)
-        .await
-        .unwrap();
+    mutate_run(&t, run.id, |stored| {
+        let mut state = stored.continuation.clone().unwrap();
+        let now = Utc::now();
+        state.health.runs = (0..49)
+            .map(|_| crossagents_core::RunRecord { at: now, ok: false })
+            .collect();
+        state.next_at = Some(now - chrono::Duration::seconds(1));
+        stored.continuation = Some(state);
+    })
+    .await;
 
     t.hub.orchestrator.continue_runs().await;
     let paused = get(&t, run.id).await.continuation.unwrap();
@@ -1345,9 +1334,7 @@ async fn the_automation_breaker_pauses_the_continuation_and_tells_the_person() {
     );
 
     // Paused means paused: another due time wakes nobody.
-    let mut again = get(&t, run.id).await;
-    again.continuation.as_mut().unwrap().next_at = Some(Utc::now() - chrono::Duration::seconds(1));
-    t.hub.orchestrator.store().update_run(&again).await.unwrap();
+    due(&t, run.id).await;
     t.hub.orchestrator.continue_runs().await;
     assert_eq!(
         wake_count(&t, &run).await,

@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 fn config(paths: &Paths, builtin_node: bool) -> HubConfig {
     let mut config = HubConfig::new(paths.clone(), 0);
     config.plugins = mock_plugins();
+    config.egress_default = Some(crossagents_core::EgressPolicy::AllowDirect);
     config.plugins.insert(
         "codex".into(),
         PluginConfig {
@@ -108,7 +109,8 @@ async fn add(t: &TestHub, name: &str, plugin: &str, model: &str) {
         .post(
             "/v1/agents",
             json!({ "name": name, "plugin": plugin, "model": model, "role": "worker",
-                    "cwd": t.home.path().display().to_string() }),
+                    "cwd": t.home.path().display().to_string(),
+                    "config": { "proxy": "direct" } }),
         )
         .await;
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());

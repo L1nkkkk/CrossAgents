@@ -471,6 +471,11 @@ pub async fn run(args: Vec<String>) {
             }
             Some("user") => {
                 let stuck = mock.stdin_stuck;
+                if stuck {
+                    // Close stdin before the spawned turn emits "working", so any steer sent
+                    // once the turn is visible is guaranteed to hit the closed pipe.
+                    close_stdin();
+                }
                 let mock = mock.clone();
                 tokio::spawn(async move {
                     let queued = mock.running.load(Ordering::SeqCst);
@@ -488,9 +493,6 @@ pub async fn run(args: Vec<String>) {
                     mock.run_turn(message, queued).await;
                 });
                 if stuck {
-                    // No read is pending here, so the close does not wait on one: later
-                    // writes to this pipe fail. The turn keeps running above.
-                    close_stdin();
                     std::future::pending::<()>().await;
                 }
             }

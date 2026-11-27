@@ -593,8 +593,8 @@ async fn two_runs_taking_one_session_at_once_only_one_gets_it() {
     t.add_agent_in("Ada", None, "planner", repo.path()).await;
     t.add_agent_in("Bea", None, "planner", repo.path()).await;
     let mut w = t.watch().await;
-    let a_task = task("a", "[cwd] wait".into(), Some("Rex"), Some(false));
-    let b_task = task("b", "[cwd] wait".into(), Some("Rex"), Some(false));
+    let a_task = task("a", "[cwd] [slow]".into(), Some("Rex"), Some(false));
+    let b_task = task("b", "[cwd] [slow]".into(), Some("Rex"), Some(false));
     let runs = [
         run_with(
             &t,

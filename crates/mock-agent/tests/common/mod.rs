@@ -274,6 +274,9 @@ impl TestHub {
         let paths = Paths::new(home.path());
         let mut config = HubConfig::new(paths.clone(), 0);
         config.plugins = mock_plugins();
+        // Mock agents are local processes, never overseas vendor APIs: never block on or
+        // fail through the developer machine's system proxy.
+        config.egress_default = Some(crossagents_core::EgressPolicy::AllowDirect);
         config.mcp_command = Some(vec![
             crossagents_bin().display().to_string(),
             "mcp".to_owned(),
@@ -364,6 +367,7 @@ impl TestHub {
                 json!({
                     "name": name, "plugin": plugin, "model": "mock-native", "role": role,
                     "cwd": cwd.display().to_string(),
+                    "config": { "proxy": "direct" },
                 }),
             )
             .await;
@@ -442,9 +446,23 @@ impl Watcher {
             let event = tokio::time::timeout_at(deadline, self.rx.recv())
                 .await
                 .unwrap_or_else(|_| {
+                    let errors: Vec<String> = self
+                        .seen
+                        .iter()
+                        .filter_map(|e| match &e.kind {
+                            EventKind::AgentError { id, message } => {
+                                Some(format!("error({id}): {message}"))
+                            }
+                            EventKind::AgentExited { id, message, .. } => {
+                                Some(format!("exited({id}): {message}"))
+                            }
+                            _ => None,
+                        })
+                        .collect();
                     panic!(
-                        "timed out waiting for {what}; saw {:#?}\noutput:\n{}",
+                        "timed out waiting for {what}; saw {:#?}\nerrors: {:#?}\noutput:\n{}",
                         types(&self.seen),
+                        errors,
                         self.output()
                     )
                 })

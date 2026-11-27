@@ -76,6 +76,7 @@ async fn phase(t: &TestHub, run: &Run, expected: &str) {
 
 /// Advances the persisted due time, instead of waiting out the interval.
 async fn due(t: &TestHub, id: RunId) {
+    let _guard = t.hub.orchestrator.lock_run(id).await;
     let mut run = get(t, id).await;
     run.continuation.as_mut().unwrap().next_at = Some(Utc::now() - chrono::Duration::seconds(1));
     t.hub.orchestrator.store().update_run(&run).await.unwrap();
