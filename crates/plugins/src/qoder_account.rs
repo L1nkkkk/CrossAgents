@@ -126,6 +126,8 @@ impl QoderAccounts {
                     description: None,
                     context_window: None,
                     credit_multiplier: None,
+                    // `--list-models` says only id and display name.
+                    efforts: None,
                 })
                 .collect(),
             Err(_) => Vec::new(),
