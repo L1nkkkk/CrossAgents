@@ -807,6 +807,11 @@ private struct ModelPickerSheet: View {
                                 Text(model).tag(model)
                             }
                         }
+                        .onChange(of: selectedModel) { _, _ in
+                            if !efforts.contains(selectedEffort) {
+                                selectedEffort = ""
+                            }
+                        }
                         if !efforts.isEmpty {
                             Picker("推理力度", selection: $selectedEffort) {
                                 Text("默认").tag("")
@@ -854,7 +859,7 @@ private struct ModelPickerSheet: View {
             try await store.setModel(
                 agentId: agent.id,
                 model: selectedModel.isEmpty ? nil : selectedModel,
-                effort: selectedEffort.isEmpty ? nil : selectedEffort
+                effort: efforts.contains(selectedEffort) ? selectedEffort : ""
             )
             dismiss()
         } catch {

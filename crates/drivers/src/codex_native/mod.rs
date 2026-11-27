@@ -1115,10 +1115,10 @@ impl DriverSession for CodexSession {
     async fn set_model(&self, model: Option<&str>, effort: Option<&str>) -> Result<(), CoreError> {
         let mut next = self.next.lock().expect("next lock");
         if let Some(model) = model {
-            next.0 = Some(model.to_owned());
+            next.0 = Some(model.to_owned()).filter(|m| !m.is_empty());
         }
         if let Some(effort) = effort {
-            next.1 = Some(effort.to_owned());
+            next.1 = Some(effort.to_owned()).filter(|e| !e.is_empty());
         }
         Ok(())
     }

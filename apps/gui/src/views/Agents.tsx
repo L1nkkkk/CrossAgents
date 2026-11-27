@@ -23,7 +23,7 @@ import { useArmed } from "../parts";
 import { AvatarChoice } from "./AvatarGallery";
 import { ConnectExternal, ConnectInstructions } from "./External";
 import { prettyModel, vendorLabel } from "../lib/models";
-import { cursorMode, reasoningModels } from "../lib/reasoning";
+import { cursorMode, reasoningModels, usesVariantReasoning } from "../lib/reasoning";
 import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
 import { permissionOf, type PermissionChoice } from "../lib/permission";
 import { useOperation } from "../lib/features";
@@ -874,7 +874,7 @@ function ModelField({ value, models, plugin, onChange }: { value: string; models
         <select value={value} onChange={(e) => onChange(e.target.value)}>
           {models.map((m) => (
             <option key={m} value={m}>
-              {plugin === "cursor" ? prettyModel(cursorMode(m).base) : m}
+              {usesVariantReasoning(plugin) ? prettyModel(cursorMode(m).base) : m}
             </option>
           ))}
           <option value="">插件默认</option>

@@ -112,7 +112,7 @@ export function NewChatModal({
         model: model || null,
         cwd: cwd.trim(),
         topic: trimmedMsg ? trimmedMsg.slice(0, 48) : undefined,
-        config: effort ? { effort } : {},
+        config: effort && efforts.includes(effort) ? { effort } : {},
         profile: {
           display_name: null,
           title: null,
@@ -294,7 +294,16 @@ export function NewChatModal({
               {models.length > 0 && (
                 <div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>模型</div>
-                  <select className="field-select" value={model} onChange={(e) => setModel(e.target.value)}>
+                  <select
+                    className="field-select"
+                    value={model}
+                    onChange={(e) => {
+                      const nextModel = e.target.value;
+                      setModel(nextModel);
+                      const nextEfforts = availableEfforts(currentPlugin, nextModel);
+                      if (effort && !nextEfforts.includes(effort)) setEffort("");
+                    }}
+                  >
                     <option value="">默认模型</option>
                     {models.map((m) => (
                       <option key={m} value={m}>

@@ -948,12 +948,21 @@ function ModelSwitcherModal({
   const grouped = groupModels(models);
   const efforts = availableEfforts(plugin, model);
 
+  function pickModel(nextModel: string) {
+    setModel(nextModel);
+    const nextEfforts = availableEfforts(plugin, nextModel);
+    if (effort && !nextEfforts.includes(effort)) {
+      setEffort("");
+    }
+  }
+
   async function save() {
     setSaving(true);
     try {
+      const nextEffort = effort && efforts.includes(effort) ? effort : "";
       const res = await transport.request("POST", `/v1/agents/${encodeURIComponent(agent.id)}/model`, {
         model: model || null,
-        effort: effort || undefined,
+        effort: nextEffort,
       });
       if (res.status < 400) {
         onSaved(JSON.parse(res.body) as Agent);
@@ -1007,7 +1016,7 @@ function ModelSwitcherModal({
             <button
               type="button"
               className={`model-opt-row ${model === "" ? "active" : ""}`}
-              onClick={() => setModel("")}
+              onClick={() => pickModel("")}
             >
               <span>默认模型</span>
               {model === "" && <Check size={15} />}
@@ -1023,7 +1032,7 @@ function ModelSwitcherModal({
                     key={m}
                     type="button"
                     className={`model-opt-row ${model === m ? "active" : ""}`}
-                    onClick={() => setModel(m)}
+                    onClick={() => pickModel(m)}
                   >
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {prettyModel(m)}

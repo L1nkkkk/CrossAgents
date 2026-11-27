@@ -17,7 +17,7 @@ import { t } from "../lib/i18n";
 import { isImeEvent } from "../lib/ime";
 import { modelDisplay } from "../lib/modelDisplay";
 import { favoriteKey, toggleFavorite, useModelFavorites } from "../lib/modelFavorites";
-import { cursorMode, reasoningModels } from "../lib/reasoning";
+import { cursorMode, reasoningModels, usesVariantReasoning } from "../lib/reasoning";
 import { ReasoningPicks } from "../reasoningPicks";
 import { reasoningWorkerRequest, type ReasoningChoice } from "../lib/workerModels";
 import { effortLabel, effortLevels, effortOf, prettyModel, shortModelLabel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
@@ -430,7 +430,7 @@ export function HomeView() {
       if (model) return pick(p.name, model);
     }
     for (const p of offered) {
-      if (p.name !== "cursor") continue;
+      if (!usesVariantReasoning(p.name)) continue;
       const model = p.models.find((x) => cursorMode(x).base.toLowerCase() === wanted);
       if (model) return pick(p.name, model);
     }
@@ -769,7 +769,7 @@ export function HomeView() {
           const item: MenuItem = {
             kind: "item",
             key: `${p.name}/${account ?? ""}/${m}`,
-            label: p.name === "cursor" ? prettyModel(cursorMode(m).base) : display.label,
+            label: usesVariantReasoning(p.name) ? prettyModel(cursorMode(m).base) : display.label,
             sub: m,
             searchText: [vendorLabel(p.name), display.description].filter(Boolean).join(" "),
             icon: <VendorMark plugin={p.name} size={14} />,
@@ -929,7 +929,7 @@ export function HomeView() {
   /** "Claude Opus 5.5", plus the login when the vendor has more than one. */
   const choiceLabel = (c: Choice) => {
     const login = accountsOf(c.plugin).length > 1 ? accountLabel(c.account) ?? t("home.defaultLogin") : undefined;
-    const label = c.plugin === "cursor" ? prettyModel(cursorMode(c.model).base) : modelDisplay(c.plugin, c.model, quota.data?.accounts ?? [], c.account).label;
+    const label = usesVariantReasoning(c.plugin) ? prettyModel(cursorMode(c.model).base) : modelDisplay(c.plugin, c.model, quota.data?.accounts ?? [], c.account).label;
     return `${vendorLabel(c.plugin)} ${label}${login ? ` · ${login}` : ""}`;
   };
   /**
@@ -940,7 +940,7 @@ export function HomeView() {
    */
   const chipLabel = (c: Choice) => {
     const login = accountsOf(c.plugin).length > 1 ? accountLabel(c.account) ?? t("home.defaultLogin") : undefined;
-    const label = c.plugin === "cursor" ? prettyModel(cursorMode(c.model).base) : modelDisplay(c.plugin, c.model, quota.data?.accounts ?? [], c.account).label;
+    const label = usesVariantReasoning(c.plugin) ? prettyModel(cursorMode(c.model).base) : modelDisplay(c.plugin, c.model, quota.data?.accounts ?? [], c.account).label;
     return `${shortModelLabel(label)}${login ? ` · ${login}` : ""}`;
   };
 
@@ -1122,10 +1122,11 @@ export function HomeView() {
                 />
               )}
               {/* After the model it applies to: the chat's, or the run lead's. */}
-              {!chosenSession && !chosenImport && activeChoice && activePlugin?.name === "cursor" && (
+              {!chosenSession && !chosenImport && activeChoice && usesVariantReasoning(activePlugin?.name) && (
                 <ReasoningPicks
                   plugin={activePlugin}
                   model={activeChoice.model}
+                  variantsOnly
                   onChange={(model) => {
                     if (!model) return;
                     const next = { ...activeChoice, model };

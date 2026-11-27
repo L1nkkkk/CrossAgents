@@ -2764,6 +2764,16 @@ impl Runtime {
             .update_agent_model(agent.id, model.as_deref())
             .await?;
         agent.model = model;
+        let mut effort = effort;
+        if let Some(model_id) = agent.model.as_deref()
+            && let Ok(resolved) = self.resolve_driver(&agent).await
+            && let Some(allowed) = resolved.driver.model_efforts(model_id)
+        {
+            let target = effort.as_deref().or(from_effort.as_deref()).unwrap_or("");
+            if !target.is_empty() && !allowed.iter().any(|a| a.eq_ignore_ascii_case(target)) {
+                effort = Some(String::new());
+            }
+        }
         if let Some(effort) = &effort {
             if !agent.config.is_object() {
                 agent.config = serde_json::json!({});
@@ -2778,7 +2788,6 @@ impl Runtime {
                 .update_agent_config(agent.id, &agent.config)
                 .await?;
         }
-        let effort = effort.filter(|e| !e.is_empty());
         let live = self.live.lock().await.get(&agent.id).cloned();
         if let Some(live) = live
             && (agent.model.is_some() || effort.is_some())
@@ -3383,6 +3392,12 @@ fn unavailable_model_error(error: &str) -> bool {
         .any(|n| n == "429")
         || lower.contains("rate limit")
         || lower.contains("too many requests")
+        // An incompatible `--effort` flag (e.g. `agy`: `--model X conflicts with --effort=Y`)
+        // is a bad flag combination, not an unavailable model.
+        || lower.contains("conflicts with --effort")
+        || lower.contains("--effort is not supported")
+        || lower.contains("invalid --effort")
+        || (lower.contains(" has no ") && lower.contains(" effort"))
     {
         return false;
     }
@@ -4240,6 +4255,10 @@ mod tests {
             "429 rate limit: model not found",
             "too many requests",
             "500 internal error",
+            r#"invalid model selection (--model "gemini-4-neon-xhigh" --effort "medium"): --model gemini-4-neon-xhigh conflicts with --effort=medium"#,
+            r#"invalid model selection (--model "gemini-4-neon" --effort "max"): gemini-4-neon has no "max" effort (available: low, medium, high, xhigh)"#,
+            r#"invalid model selection (--model "auto" --effort "medium"): --effort is not supported for model "auto""#,
+            r#"invalid model selection (--model "gemini-4-neon" --effort "bogus"): invalid --effort "bogus" (valid: low, medium, high, xhigh, max)"#,
         ] {
             assert!(!unavailable_model_error(error), "{error}");
         }
@@ -5232,5 +5251,141 @@ mod tests {
         assert_eq!(dropped_row.line, "left behind");
         assert!(dropped_row.carried_by.is_none());
         assert_eq!(dropped_row.wake_tries, 0);
+    }
+
+    #[tokio::test]
+    async fn set_model_forwards_effort_clear_and_drops_incompatible_effort() {
+        struct RecordingSession {
+            calls: std::sync::Mutex<Vec<(Option<String>, Option<String>)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl DriverSession for RecordingSession {
+            fn session_id(&self) -> &str {
+                "rec-1"
+            }
+            async fn prompt(&self, _text: &str) -> Result<crossagents_core::TurnOutcome, CoreError> {
+                Ok(crossagents_core::TurnOutcome {
+                    stop_reason: StopReason::EndTurn,
+                    turn_id: None,
+                })
+            }
+            async fn interrupt(&self) -> Result<(), CoreError> {
+                Ok(())
+            }
+            async fn set_model(
+                &self,
+                model: Option<&str>,
+                effort: Option<&str>,
+            ) -> Result<(), CoreError> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((model.map(str::to_owned), effort.map(str::to_owned)));
+                Ok(())
+            }
+            async fn shutdown(&self) {}
+        }
+
+        let store = Arc::new(
+            crossagents_store_sqlite::SqliteStore::open_in_memory()
+                .await
+                .unwrap(),
+        );
+        let runtime = Runtime::new(
+            Arc::new(EventBus::new(store.clone())),
+            PluginRegistry::with_config(&Default::default()),
+        );
+        let agent = Agent {
+            node: None,
+            id: AgentId::new(),
+            name: "Quinn".into(),
+            name_source: Default::default(),
+            plugin: "antigravity".into(),
+            driver: None,
+            model: Some("gemini-3.8-flash".into()),
+            role: crossagents_core::Role::Worker,
+            home: PathBuf::from("."),
+            cwd: PathBuf::from("."),
+            config: serde_json::json!({ "effort": "medium" }),
+            status: AgentStatus::Idle,
+            created_at: Utc::now(),
+            profile: Default::default(),
+            topic: None,
+            archived_at: None,
+        };
+        store.insert_agent(&agent).await.unwrap();
+        let session = Arc::new(RecordingSession {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let (control, _rx) = mpsc::unbounded_channel();
+        runtime.live.lock().await.insert(
+            agent.id,
+            Arc::new(Live {
+                generation: 1,
+                session: session.clone(),
+                inbox: Arc::new(Inbox::default()),
+                control,
+                attachments: None,
+                steer: false,
+            }),
+        );
+
+        // 1. Clearing effort (`Some("")`) removes `config.effort` AND forwards `Some("")` to the live session.
+        let cleared = runtime
+            .set_model(
+                &AgentKey::Id(agent.id),
+                Some("gemini-3.8-flash".into()),
+                Some(String::new()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(effort_of(&cleared), None);
+
+        // 2. Setting effort on a bare model stores and forwards it.
+        let set_bare = runtime
+            .set_model(
+                &AgentKey::Id(agent.id),
+                Some("gemini-3.8-flash".into()),
+                Some("medium".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(effort_of(&set_bare).as_deref(), Some("medium"));
+
+        // 3. Switching to an effort-suffixed Antigravity model (`gemini-4-neon-xhigh`) drops the
+        //    incompatible `config.effort = "medium"` and forwards `Some("")` to clear it live.
+        let switched = runtime
+            .set_model(
+                &AgentKey::Id(agent.id),
+                Some("gemini-4-neon-xhigh".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(switched.model.as_deref(), Some("gemini-4-neon-xhigh"));
+        assert_eq!(effort_of(&switched), None);
+
+        // 4. Explicitly passing an incompatible effort on `gemini-4-neon-xhigh` also clears it.
+        let conflicted = runtime
+            .set_model(
+                &AgentKey::Id(agent.id),
+                Some("gemini-4-neon-xhigh".into()),
+                Some("medium".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(effort_of(&conflicted), None);
+
+        let calls = session.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                (Some("gemini-3.8-flash".into()), Some(String::new())),
+                (Some("gemini-3.8-flash".into()), Some("medium".into())),
+                (Some("gemini-4-neon-xhigh".into()), Some(String::new())),
+                (Some("gemini-4-neon-xhigh".into()), Some(String::new())),
+            ]
+        );
     }
 }

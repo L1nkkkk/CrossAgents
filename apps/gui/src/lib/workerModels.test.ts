@@ -42,6 +42,12 @@ test("task reasoning overrides are isolated and preserve login, driver and perso
   const cursor = reasoningWorkerRequest({ ...template, plugin: "cursor" }, "/task", { model: "claude-opus-5-thinking-max", effort: "max" });
   assert.equal(cursor.model, "claude-opus-5-thinking-max");
   assert.deepEqual(cursor.config, { account: "work", setting_sources: ["project"] });
+  const agySuffixed = reasoningWorkerRequest({ ...template, plugin: "antigravity" }, "/task", { model: "gemini-4-neon-xhigh", effort: "medium" });
+  assert.equal(agySuffixed.model, "gemini-4-neon-xhigh");
+  assert.deepEqual(agySuffixed.config, { account: "work", setting_sources: ["project"] });
+  const agyBare = reasoningWorkerRequest({ ...template, plugin: "antigravity" }, "/task", { model: "gemini-3.8-flash", effort: "medium" });
+  assert.equal(agyBare.model, "gemini-3.8-flash");
+  assert.deepEqual(agyBare.config, { account: "work", effort: "medium", setting_sources: ["project"] });
 });
 
 test("every installed plugin's models are listed, grouped by family", () => {

@@ -9,6 +9,7 @@ import type { PluginInfo } from "@bindings/PluginInfo";
 import type { Key } from "./i18n";
 import { groupModels, vendorLabel } from "./models.ts";
 import { modelDisplay } from "./modelDisplay.ts";
+import { cursorMode } from "./reasoning.ts";
 
 /** The lead, when one is known: its plugin decides whose login a new worker uses. */
 export type LeadRef = { plugin?: string; account?: string };
@@ -127,7 +128,8 @@ export type ReasoningChoice = { model: string | null; effort: string };
 /** A task-specific template preserves the worker's persona/config without changing it. */
 export function reasoningWorkerRequest(template: Agent | CreateAgentRequest, cwd: string, choice: ReasoningChoice): CreateAgentRequest {
   const config = template.config && typeof template.config === "object" && !Array.isArray(template.config) ? { ...template.config } : {};
-  if (choice.effort && template.plugin !== "cursor") config.effort = choice.effort;
+  const suffixedAntigravity = template.plugin === "antigravity" && !!choice.model && !!cursorMode(choice.model).effort;
+  if (choice.effort && template.plugin !== "cursor" && !suffixedAntigravity) config.effort = choice.effort;
   else delete config.effort;
   return {
     plugin: template.plugin, driver: template.driver, model: choice.model, role: "worker", cwd, config,
