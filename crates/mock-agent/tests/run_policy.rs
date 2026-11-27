@@ -126,6 +126,8 @@ fn update(enabled: bool, max_attempts: Option<u32>, reset: bool) -> UpdateRunPol
             stuck_minutes: None,
         }),
         reset_attempts: reset,
+        // 这个 helper 只改续跑策略，不动阶段换档。
+        lead_models: None,
     }
 }
 
