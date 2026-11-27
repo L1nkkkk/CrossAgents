@@ -7,7 +7,7 @@ use std::{
 use regex::Regex;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State, Theme, WebviewWindow, ipc::Channel};
+use tauri::{AppHandle, Manager, State, Theme, Webview, Window, ipc::Channel};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
@@ -25,8 +25,13 @@ pub fn write_clipboard(app: AppHandle, text: String) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+// Commands below intentionally accept `Window` / `Webview` (and `app.get_window("main")`) rather
+// than `WebviewWindow` / `app.get_webview_window("main")`: once a built-in browser tab attaches a
+// child webview via `window.add_child(...)`, Tauri's `Window::is_webview_window()` becomes `false`
+// and `WebviewWindow` extraction fails with "current webview is not a WebviewWindow".
+
 #[tauri::command]
-pub fn set_theme(window: WebviewWindow, dark: bool) -> Result<(), String> {
+pub fn set_theme(window: Window, dark: bool) -> Result<(), String> {
     window
         .set_theme(Some(if dark { Theme::Dark } else { Theme::Light }))
         .map_err(|err| err.to_string())
@@ -45,21 +50,21 @@ pub struct Notice {
 
 #[tauri::command]
 pub fn listen_for_notice(
-    window: WebviewWindow,
+    webview: Webview,
     listener: State<'_, NoticeListener>,
     channel: Channel<String>,
 ) {
-    if window.label() == "main" {
+    if webview.label() == "main" {
         *listener.0.lock().expect("notice listener") = Some(channel);
     }
 }
 
 #[tauri::command]
-pub fn notify(window: WebviewWindow, notice: Notice) -> Result<(), String> {
+pub fn notify(app: AppHandle, window: Window, notice: Notice) -> Result<(), String> {
     if window.is_focused().unwrap_or(true) {
         return Ok(());
     }
-    let mut toast = window
+    let mut toast = app
         .notification()
         .builder()
         .title(notice.title.chars().take(120).collect::<String>())
@@ -113,7 +118,8 @@ pub enum WindowAction {
 
 #[tauri::command]
 pub fn window_command(
-    window: WebviewWindow,
+    window: Window,
+    webview: Webview,
     zoom: State<'_, Zoom>,
     action: WindowAction,
 ) -> Result<(), String> {
@@ -128,7 +134,7 @@ pub fn window_command(
             }
         }),
         WindowAction::Close => window.close(),
-        WindowAction::Reload => window.reload(),
+        WindowAction::Reload => webview.reload(),
         WindowAction::Fullscreen => window
             .is_fullscreen()
             .and_then(|full| window.set_fullscreen(!full)),
@@ -138,10 +144,10 @@ pub fn window_command(
         }
         WindowAction::Devtools => {
             #[cfg(debug_assertions)]
-            if window.is_devtools_open() {
-                window.close_devtools();
+            if webview.is_devtools_open() {
+                webview.close_devtools();
             } else {
-                window.open_devtools();
+                webview.open_devtools();
             }
             Ok(())
         }
@@ -152,7 +158,7 @@ pub fn window_command(
                 WindowAction::ZoomOut => (*step - 1).max(-6),
                 _ => 0,
             };
-            window
+            webview
                 .set_zoom(1.2_f64.powf(f64::from(next) * 0.5))
                 .map_err(|err| err.to_string())?;
             *step = next;
@@ -360,7 +366,7 @@ fn stop_background(app: &AppHandle) {
 }
 
 pub fn show_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -369,15 +375,15 @@ pub fn show_window(app: &AppHandle) {
 
 #[tauri::command]
 pub async fn pick_folder(
-    window: WebviewWindow,
+    app: AppHandle,
+    window: Window,
     remote: State<'_, Remote>,
 ) -> Result<Option<String>, String> {
     if remote.is_remote() {
         return Err("远程模式下不能选择本机目录".into());
     }
     let (send, receive) = tokio::sync::oneshot::channel();
-    window
-        .dialog()
+    app.dialog()
         .file()
         .set_parent(&window)
         .pick_folder(move |folder| {
@@ -615,4 +621,50 @@ fn runs_when_opened(path: &Path) -> bool {
                 .trim_end_matches(['.', ' ']),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WindowAction;
+
+    #[test]
+    fn window_actions_deserialize_from_frontend_names() {
+        for name in [
+            "drag",
+            "minimize",
+            "maximize",
+            "close",
+            "zoomIn",
+            "zoomOut",
+            "zoomReset",
+            "reload",
+            "devtools",
+            "fullscreen",
+            "quit",
+        ] {
+            let parsed: Result<WindowAction, _> = serde_json::from_str(&format!("\"{name}\""));
+            assert!(parsed.is_ok(), "failed to parse window action {name}");
+        }
+    }
+
+    #[test]
+    fn desktop_commands_avoid_webview_window_so_child_webviews_never_break_controls() {
+        // Once a built-in browser tab attaches via `window.add_child`, `Window::is_webview_window`
+        // returns false; commands and tray restore must use `Window`/`Webview`/`get_window`.
+        let src = include_str!("desktop.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let code: String = prod
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("WebviewWindow"),
+            "desktop.rs must not take WebviewWindow (breaks when child browser webviews exist)"
+        );
+        assert!(
+            !code.contains("get_webview_window"),
+            "desktop.rs must use get_window instead of get_webview_window"
+        );
+    }
 }

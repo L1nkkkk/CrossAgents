@@ -1690,13 +1690,13 @@ button.account-who { display: inline-flex; align-items: center; gap: 4px; }
   /* The room the window buttons take on the right. */
   --tb-right: max(12px, calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
   padding: 0 var(--tb-right) 0 8px;
-  -webkit-app-region: drag; user-select: none;
+  -webkit-app-region: drag; app-region: drag; user-select: none;
   /* Its menus open over the panels below. */
   position: relative; z-index: 50;
 }
 .titlebar.mac { padding-left: 80px; }
 .titlebar:has(.titlebar-controls) { padding-right: 0; }
-.titlebar button { -webkit-app-region: no-drag; }
+.titlebar button, .titlebar-controls { -webkit-app-region: no-drag; app-region: no-drag; }
 .titlebar-nav { display: flex; align-items: center; gap: 2px; }
 .titlebar-controls { margin-left: auto; display: flex; align-items: stretch; height: 100%; }
 .titlebar-win-btn {
