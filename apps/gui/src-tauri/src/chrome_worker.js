@@ -1,6 +1,40 @@
 const attached = new Set();
+const openedByAgent = new Set();
 const logs = new Map();
 let polling = false;
+
+function pushLog(tabId, level, text, ts) {
+  const entries = logs.get(tabId) ?? [];
+  entries.push({ level: String(level ?? "log"), text: String(text ?? "").slice(0, 1000), ts: Number(ts) || Date.now() });
+  if (entries.length > 150) entries.shift();
+  logs.set(tabId, entries);
+}
+
+function waitTabComplete(tabId, timeoutMs = 12000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      resolve();
+    };
+    const onUpdated = (id, info) => {
+      if (id === tabId && info.status === "complete") finish();
+    };
+    const onRemoved = (id) => {
+      if (id === tabId) finish();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+    chrome.tabs.get(tabId).then((tab) => {
+      if (tab?.status === "complete") finish();
+    }).catch(finish);
+  });
+}
 
 async function execute(command) {
   const tabId = command.tabId;
@@ -9,11 +43,26 @@ async function execute(command) {
       const tab = tabId
         ? await chrome.tabs.update(tabId, { url: command.url, active: true })
         : await chrome.tabs.create({ url: command.url, active: true });
-      return { tab: `chrome:${tab.id}`, url: tab.url || command.url, title: tab.title || command.url };
+      if (!tabId && tab?.id) openedByAgent.add(tab.id);
+      if (tab?.id) await waitTabComplete(tab.id, 12000);
+      const latest = tab?.id ? await chrome.tabs.get(tab.id).catch(() => tab) : tab;
+      return {
+        tab: `chrome:${latest.id}`,
+        url: latest.url || command.url,
+        title: latest.title || latest.url || command.url,
+      };
     }
     case "activate": {
       const tab = await chrome.tabs.update(tabId, { active: true });
       await chrome.windows.update(tab.windowId, { focused: true });
+      return { ok: true };
+    }
+    case "close": {
+      if (!openedByAgent.has(tabId)) {
+        throw new Error("不能关闭非 Agent 打开的外部 Chrome 标签页，避免误关用户的页面");
+      }
+      await chrome.tabs.remove(tabId);
+      openedByAgent.delete(tabId);
       return { ok: true };
     }
     case "navigate":
@@ -21,6 +70,7 @@ async function execute(command) {
       else if (command.action === "back") await chrome.tabs.goBack(tabId);
       else if (command.action === "forward") await chrome.tabs.goForward(tabId);
       else throw new Error("未知的导航操作");
+      await waitTabComplete(tabId, 10000);
       return { ok: true };
     case "evaluate":
     case "console":
@@ -40,7 +90,10 @@ async function execute(command) {
       const response = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
         expression: command.expression, returnByValue: true,
       });
-      if (response.exceptionDetails) throw new Error("Chrome 未能执行页面操作");
+      if (response.exceptionDetails) {
+        const detail = response.exceptionDetails.exception?.description || response.exceptionDetails.text || "Chrome 未能执行页面操作";
+        throw new Error(detail);
+      }
       if (response.result?.value?.error) throw new Error(response.result.value.error);
       return response.result?.value;
     }
@@ -69,7 +122,7 @@ async function poll() {
       for (const command of response.commands) {
         let reply;
         try { reply = { id: command.id, value: await execute(command), ok: true }; }
-        catch (error) { reply = { id: command.id, error: String(error), ok: false }; }
+        catch (error) { reply = { id: command.id, error: error instanceof Error ? error.message : String(error), ok: false }; }
         await api("/reply", reply);
       }
     } catch {
@@ -79,14 +132,22 @@ async function poll() {
 }
 
 chrome.debugger.onEvent.addListener(({ tabId }, method, params) => {
-  if (method !== "Runtime.consoleAPICalled" || !attached.has(tabId)) return;
-  const entries = logs.get(tabId) ?? [];
-  const text = (params.args ?? []).map(({ value, description }) => String(value ?? description ?? "")).join(" ").slice(0, 1000);
-  entries.push({ level: String(params.type ?? "log"), text, ts: Number(params.timestamp) || Date.now() });
-  if (entries.length > 150) entries.shift();
-  logs.set(tabId, entries);
+  if (!attached.has(tabId)) return;
+  if (method === "Runtime.consoleAPICalled") {
+    const text = (params.args ?? []).map(({ value, description }) => String(value ?? description ?? "")).join(" ");
+    pushLog(tabId, params.type ?? "log", text, params.timestamp);
+  } else if (method === "Runtime.exceptionThrown") {
+    const details = params.exceptionDetails || {};
+    const text = details.exception?.description || details.text || "Uncaught exception";
+    pushLog(tabId, "error", text, params.timestamp);
+  }
 });
 chrome.debugger.onDetach.addListener(({ tabId }) => {
+  attached.delete(tabId);
+  logs.delete(tabId);
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  openedByAgent.delete(tabId);
   attached.delete(tabId);
   logs.delete(tabId);
 });

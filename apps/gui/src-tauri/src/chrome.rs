@@ -113,7 +113,7 @@ impl Chrome {
         let manifest = json!({
             "manifest_version": 3,
             "name": "CrossAgents Chrome Bridge",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "permissions": ["tabs", "debugger", "alarms"],
             "host_permissions": ["http://127.0.0.1/*"],
             "background": { "service_worker": "background.js" },
@@ -377,14 +377,43 @@ pub async fn chrome_action(bridge: State<'_, Arc<Chrome>>, input: Value) -> Resu
             .command(json!({ "kind": "console", "tabId": id }))
             .await;
     }
+    if tool == "browser_close" {
+        return bridge
+            .command(json!({ "kind": "close", "tabId": id }))
+            .await;
+    }
     let script = match tool {
-        "browser_snapshot" => json!({ "action": "snapshot" }),
+        "browser_snapshot" => json!({
+            "action": "snapshot",
+            "selector": input.get("selector"),
+            "max_chars": input.get("max_chars"),
+        }),
         "browser_click" => json!({ "action": "click", "reference": input["ref"] }),
-        "browser_type" => {
-            json!({ "action": "type", "reference": input["ref"], "text": input["text"], "submit": input["submit"] })
-        }
+        "browser_type" => json!({
+            "action": "type",
+            "reference": input["ref"],
+            "text": input["text"],
+            "submit": input["submit"],
+            "clear": input.get("clear").and_then(Value::as_bool).unwrap_or(true),
+        }),
+        "browser_select" => json!({
+            "action": "select",
+            "reference": input["ref"],
+            "value": input["value"],
+        }),
         "browser_press" => json!({ "action": "press", "key": input["key"] }),
-        "browser_scroll" => json!({ "action": "scroll", "dy": input["dy"] }),
+        "browser_scroll" => json!({
+            "action": "scroll",
+            "dy": input["dy"],
+            "reference": input.get("ref"),
+        }),
+        "browser_probe" => json!({
+            "action": "probe",
+            "text": input.get("text"),
+            "text_gone": input.get("text_gone"),
+            "selector": input.get("selector"),
+            "url": input.get("url"),
+        }),
         _ => return Err("这个 Chrome 操作还未接入".into()),
     };
     let expression = format!("({})({script})", include_str!("browser_page.js"));

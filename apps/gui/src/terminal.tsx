@@ -37,7 +37,7 @@ type Term = {
   focusOnShow: boolean;
 };
 
-/** A relay's own word on the stream (electron/main.cts), besides the hub's frames. */
+/** A relay's own word on the stream (src-tauri/src/terminal.rs), besides the hub's frames. */
 type RelayFrame = TerminalFrame | { type: "reconnecting" } | { type: "gone" };
 
 const terms = new Map<string, Term>();

@@ -1,7 +1,7 @@
 // Settings, laid out like Codex's: sections on the left, one page of cards on the right.
 // 个性化 is kept on this device (docs/tasks/V6-GUI.md §4.4); 模型 is kept by the hub, so every
 // window and the hub's own picks (e.g. a worker's model) see the same list.
-// 关于 shows both builds and the GUI's own update (electron/updates.cts).
+// 关于 shows both builds and the GUI's own update (src-tauri/src/updates.rs).
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import type { HubInfo } from "@bindings/HubInfo";

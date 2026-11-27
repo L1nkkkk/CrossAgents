@@ -115,8 +115,8 @@ pub async fn browser_create(
     let webview = window
         .add_child(
             builder,
-            LogicalPosition::new(-5.0, -5.0),
-            LogicalSize::new(1.0, 1.0),
+            LogicalPosition::new(-2000.0, -2000.0),
+            LogicalSize::new(1024.0, 768.0),
         )
         .map_err(|err| err.to_string())?;
     webview.hide().map_err(|err| err.to_string())
@@ -209,10 +209,19 @@ pub fn close_all(app: &AppHandle) {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "lowercase")]
 pub enum Action {
-    Snapshot,
+    Snapshot {
+        #[serde(default)]
+        selector: Option<String>,
+        #[serde(default)]
+        max_chars: Option<u32>,
+    },
     Console,
     Click {
         reference: u32,
@@ -221,12 +230,30 @@ pub enum Action {
         reference: u32,
         text: String,
         submit: bool,
+        #[serde(default = "default_true")]
+        clear: bool,
+    },
+    Select {
+        reference: u32,
+        value: String,
     },
     Press {
         key: String,
     },
     Scroll {
         dy: f64,
+        #[serde(default)]
+        reference: Option<u32>,
+    },
+    Probe {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        text_gone: Option<String>,
+        #[serde(default)]
+        selector: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
     },
 }
 
@@ -498,4 +525,50 @@ async fn capture_windows(tab: Webview) -> Result<Vec<u8>, String> {
         .await
         .map_err(|_| "浏览器截图超时".to_owned())?
         .map_err(|err| err.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_serializes_new_fields_and_defaults_clear_to_true() {
+        let typed: Action = serde_json::from_value(serde_json::json!({
+            "action": "type",
+            "reference": 2,
+            "text": "hello",
+            "submit": true
+        }))
+        .unwrap();
+        let json = serde_json::to_value(typed).unwrap();
+        assert_eq!(json["action"], "type");
+        assert_eq!(json["clear"], true);
+
+        let selected: Action = serde_json::from_value(serde_json::json!({
+            "action": "select",
+            "reference": 3,
+            "value": "pro"
+        }))
+        .unwrap();
+        assert_eq!(serde_json::to_value(selected).unwrap()["action"], "select");
+
+        let probe: Action = serde_json::from_value(serde_json::json!({
+            "action": "probe",
+            "text": "Done",
+            "selector": "#app"
+        }))
+        .unwrap();
+        let probe_json = serde_json::to_value(probe).unwrap();
+        assert_eq!(probe_json["action"], "probe");
+        assert_eq!(probe_json["text"], "Done");
+        assert_eq!(probe_json["selector"], "#app");
+    }
+
+    #[test]
+    fn parse_allows_http_https_blank_and_rejects_internal_hosts() {
+        assert!(parse("https://example.com/a").is_ok());
+        assert!(parse("about:blank").is_ok());
+        assert!(parse("http://tauri.localhost/index.html").is_err());
+        assert!(parse("file:///C:/Windows/win.ini").is_err());
+    }
 }

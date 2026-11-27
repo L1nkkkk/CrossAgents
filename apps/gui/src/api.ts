@@ -1,6 +1,6 @@
 import type { ApplyRerun } from "@bindings/ApplyRerun";
-// Typed client for the hub's local API (docs/DESIGN.md §11). Inside Electron requests go
-// through the preload bridge to the main process, which adds the bearer token; in a plain
+// Typed client for the hub's local API (docs/DESIGN.md §11). Inside the Tauri desktop app requests go
+// through the bridge to the Rust backend, which adds the bearer token; in a plain
 // browser they go to the same origin (the Vite dev server forwards them, see vite.config.ts).
 
 import type { Account } from "@bindings/Account";
@@ -143,7 +143,7 @@ export function scopeKey(scope: FileScope): string {
 }
 
 /**
- * The Electron preload bridge (electron/preload.cts), or the mock one in `preview:mock`;
+ * The Tauri desktop bridge (tauriBridge.ts), or the mock one in `preview:mock`;
  * absent in a plain browser. Read on use: the mock installs itself before the app starts.
  */
 export const getBridge = () => (typeof window !== "undefined" ? window.crossagents : undefined);
@@ -197,8 +197,8 @@ async function send(method: Method, path: string, body?: unknown): Promise<{ sta
     } catch (err) {
       throw new ApiError(0, "unreachable", err instanceof Error ? err.message : String(err));
     }
-    // The main process reports a request that got no hub answer this way: it knows whether the
-    // request may already have arrived (electron/main.cts).
+    // The desktop backend reports a request that got no hub answer this way: it knows whether the
+    // request may already have arrived (src-tauri/src/main.rs).
     if (reply.status === TRANSPORT_STATUS) throw errorFromBody(reply.status, reply.body);
     return reply;
   }
@@ -240,7 +240,7 @@ const enc = encodeURIComponent;
 
 /**
  * Any allowed hub route, for an extension's `ca.hub.request` (docs/EXTENSIONS.md §5). The
- * bridge's ALLOWED table (electron/allowed.cts) still decides what a page may reach, and the
+ * desktop route allowlist (shared/hub-routes.json) still decides what a page may reach, and the
  * hub still checks the token's level.
  */
 export function hubRequest<T = unknown>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {

@@ -94,17 +94,34 @@ export type ChromeBridgeStatus = {
   tabs: ChromeTabInfo[];
 };
 
+export type BrowserScrollResult = {
+  ok: true;
+  scroll_y?: number;
+  max_scroll_y?: number;
+  at_top?: boolean;
+  at_bottom?: boolean;
+};
+
+export type BrowserProbeResult = {
+  matched: boolean;
+  url: string;
+  title: string;
+  readyState?: string;
+};
+
 /**
  * The built-in browser's tabs (run note browser/contract §3), as `window.crossagents.browser`
  * exposes them (tauriBridge.ts). Every call names the tab by its numeric id.
  */
 export type BrowserBridge = {
   /** The page's interactive elements carrying `[ref=N]`, text content, url and title. */
-  snapshot(wcId: number): Promise<{ text: string; url: string; title: string }>;
+  snapshot(wcId: number, opts?: { selector?: string; maxChars?: number }): Promise<{ text: string; url: string; title: string }>;
   click(wcId: number, ref: number): Promise<{ ok: true }>;
-  type(wcId: number, ref: number, text: string, submit?: boolean): Promise<{ ok: true }>;
+  type(wcId: number, ref: number, text: string, submit?: boolean, clear?: boolean): Promise<{ ok: true }>;
+  select(wcId: number, ref: number, value: string): Promise<{ ok: true; selected_value: string; selected_label: string }>;
   press(wcId: number, key: string): Promise<{ ok: true }>;
-  scroll(wcId: number, dy: number): Promise<{ ok: true }>;
+  scroll(wcId: number, dy: number, ref?: number): Promise<BrowserScrollResult>;
+  probe(wcId: number, cond: { text?: string; textGone?: string; selector?: string; url?: string }): Promise<BrowserProbeResult>;
   screenshot(wcId: number): Promise<{ base64: string; mime: "image/png" }>;
   console(wcId: number): Promise<BrowserConsoleEntry[]>;
   /** A local file's preview url; the desktop shell lets the tab read that file's folder. */

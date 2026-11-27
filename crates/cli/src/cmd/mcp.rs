@@ -103,7 +103,7 @@ impl RpcHandler for McpProxy {
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "crossagents", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "CrossAgents collaboration tools: talk to other agents, submit plans, and report task results."
+                "instructions": "CrossAgents collaboration and built-in browser tools: talk to teammates, submit plans, report task results, and drive the desktop window's built-in browser or connected Chrome tabs via `browser_*`."
             })),
             "ping" => Ok(json!({})),
             "tools/list" => self.list_tools().await,

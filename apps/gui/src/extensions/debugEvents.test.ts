@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-// The extension is plain JavaScript, loaded directly by Electron without a build.
+// The extension is plain JavaScript, loaded directly by the desktop shell without a build.
 // @ts-expect-error The independently loaded extension has no TypeScript declarations.
 import { activate, agentsOf, createStore } from "../../../../extensions/debug/gui/index.js";
 

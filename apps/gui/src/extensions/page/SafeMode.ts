@@ -1,5 +1,5 @@
 // Safe mode, said out loud (docs/EXTENSIONS.md §5): why this window loaded no extension, and what
-// to do about it. The shell decides it (electron/safeMode.cts) and is the only one that can say
+// to do about it. The shell decides it (src-tauri/src/extensions.rs) and is the only one that can say
 // why, so the page asks the bridge and falls back to the host's own flag when there is no shell.
 
 import { useEffect, useState } from "react";

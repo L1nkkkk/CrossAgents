@@ -1,6 +1,6 @@
 // preview:mock's `window.crossagents.browser` (run note browser/contract §3). A plain page has no
-// `<webview>`, so every tab stands for a made-up page — a title and a few lines — and the agent's
-// tools answer from that; the preview's own page surface (browser.tsx `MockPage`) draws it.
+// native child webview, so every tab stands for a made-up page — a title and a few lines — and the
+// agent's tools answer from that; the preview's own page surface (browser.tsx `MockPage`) draws it.
 //
 // A scenario can make the tools slow (`MockState.browserDelay`), so a screenshot catches the
 //「正在操作」bar an agent's request puts on its tab while the tool runs.
@@ -108,6 +108,13 @@ export function createMockBrowser(opts: { delay?: number } = {}): MockBrowser {
       if (typeof text !== "string") throw new Error("文字必须是字符串");
       return { ok: true };
     },
+    async select(wcId, ref, value) {
+      await wait();
+      tabOf(wcId);
+      if (!Number.isInteger(ref) || ref < 1) throw new Error("ref 必须是正整数");
+      if (typeof value !== "string" || !value) throw new Error("value 必须是非空字符串");
+      return { ok: true, selected_value: value, selected_label: value };
+    },
     async press(wcId, key) {
       await wait();
       tabOf(wcId);
@@ -118,7 +125,17 @@ export function createMockBrowser(opts: { delay?: number } = {}): MockBrowser {
       await wait();
       tabOf(wcId);
       if (!Number.isFinite(dy)) throw new Error("滚动距离必须是数字");
-      return { ok: true };
+      return { ok: true, scroll_y: Math.max(0, Math.round(dy)), max_scroll_y: 800, at_top: dy <= 0, at_bottom: false };
+    },
+    async probe(wcId, cond) {
+      await wait();
+      const { page } = tabOf(wcId);
+      const body = snapshotText(page);
+      let matched = true;
+      if (cond.url && !page.url.includes(cond.url)) matched = false;
+      if (cond.text && !body.includes(cond.text)) matched = false;
+      if (cond.textGone && body.includes(cond.textGone)) matched = false;
+      return { matched, url: page.url, title: page.title, readyState: "complete" };
     },
     async screenshot(wcId) {
       await wait();

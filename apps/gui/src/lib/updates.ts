@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { UpdateState } from "../bridge";
 
 /**
- * Where the GUI's own update stands, kept current (electron/updates.cts). `null` where nothing
+ * Where the GUI's own update stands, kept current (src-tauri/src/updates.rs). `null` where nothing
  * updates (a development build, the page in a browser); `undefined` until the first answer.
  */
 export function useUpdateState(): [UpdateState | null | undefined, (state: UpdateState | null) => void] {

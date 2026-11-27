@@ -1,7 +1,7 @@
 // 内置打洞 on the 连接 page (docs/MULTI-NODE.md §14): what a pasted pairing code says before it
 // is used, how the hub's entrance stands, and what a failed pairing means. Pure: the page
-// renders these words, the tests pin them. The main process checks the code again
-// (electron/link.cts `decodeCode`): this copy only lets the page say what is wrong at once.
+// renders these words, the tests pin them. The desktop backend checks the code again
+// (src-tauri/src/remote.rs): this copy only lets the page say what is wrong at once.
 
 import type { LinkStatus } from "@bindings/LinkStatus";
 import type { PairStep, TunnelState } from "../bridge";

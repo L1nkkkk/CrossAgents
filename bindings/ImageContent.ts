@@ -3,7 +3,7 @@
 /**
  * `GET /v1/agents/{key}/files/image?path=`: an image a tool call named by a path (a
  * `ViewImage` tool's `image_path`, say), for a client to show as a thumbnail. The bytes are
- * base64, as with attachments, so a page that only carries text (the Electron bridge) can
+ * base64, as with attachments, so a page that only carries text (the desktop bridge) can
  * show them as a `data:` URL.
  */
 export type ImageContent = { 

@@ -14,7 +14,7 @@ import type { BookmarkEntry, BrowserBridge, ChromeBridgeStatus } from "./bridge"
 import { ErrorBox, Icon } from "./components";
 import { resolvePath } from "./fileResolve";
 import { onHubEvent } from "./hub";
-import { holdAfterRequest, holdLapsed, type Hold } from "./lib/browserControl";
+import { holdAfterRequest, holdLapsed, isHashOnlyChange, runBrowserWait, type Hold } from "./lib/browserControl";
 import { dockOf, type DockId } from "./lib/docks";
 import { docksNow, isWebTab, placeTab, rememberWebUrl, shutTab, showDockOf, useLayout, webTab, webUrl, type WebTab } from "./panes";
 import "./browser.css";
@@ -22,9 +22,9 @@ import "./browser.css";
 /** What the person was told when they took a tab over: the agent's own tools get this back. */
 export const HUMAN_CONTROL = "human_control: 这个标签正由人接管，等人点「交还」后再试";
 
-/** A `<webview>` as Electron adds it to HTMLElement (only the calls this page makes). */
-type WebviewTag = HTMLElement & {
-  getWebContentsId(): number;
+/** Adapter around a native Tauri child webview (only the calls this page makes). */
+type NativeWebviewElement = HTMLElement & {
+  getWebviewId(): number;
   loadURL(url: string): Promise<void>;
   goBack(): void;
   goForward(): void;
@@ -48,12 +48,12 @@ const PAGE_SCROLLBAR = `
 ::-webkit-scrollbar-thumb:hover { background-color: rgba(128, 128, 128, 0.6); }
 `;
 
-/** A navigation event of a `<webview>`. */
+/** A navigation event emitted by the native child webview adapter. */
 type NavEvent = Event & { url?: string; title?: string; errorCode?: number; errorDescription?: string; isMainFrame?: boolean };
 
 /** How long browser_open and browser_navigate wait for the page before telling the agent it timed out. */
 const LOAD_TIMEOUT = 20_000;
-/** How long a tool call waits for a tab that just (re)attached to get its webContents id. */
+/** How long a tool call waits for a tab that just (re)attached to become ready. */
 const ATTACH_TIMEOUT = 10_000;
 
 /** A wait for the page to stop loading: `null` when it loaded, or why it did not. */
@@ -64,7 +64,7 @@ type Page = {
   /** The `<id>` of `web:<id>`, which is also the tab an agent's tool names. */
   id: string;
   tab: WebTab;
-  /** The webContents id the main process knows the tab by; null until its page attached. */
+  /** The numeric id the Tauri backend knows the child webview by; null until its first load finishes. */
   wcId: number | null;
   url: string;
   /** As the page reports it; `pageName` falls back to the host. */
@@ -78,8 +78,8 @@ type Page = {
   controller: Hold | null;
   /** Waits for the page to stop loading (`whenLoaded`), settled by the webview's events. */
   waiters: Set<Waiter>;
-  /** The `<webview>`; null in the mock preview, which has no real page. */
-  el: WebviewTag | null;
+  /** The host element wrapping the native child webview; null in the mock preview. */
+  el: NativeWebviewElement | null;
   created: number;
   /** A fresh tab puts the cursor in the address bar once it shows. */
   focusBar: boolean;
@@ -141,10 +141,9 @@ export function browserUrl(text: string): string | null {
 }
 
 /**
- * Where a tab's `<webview>` waits while its tab is in no dock (another dock, a folded one, a page
- * with no tools column): taking it out of the document would destroy its page. It stays on screen
- * in the layout sense — off to the left at a real size, not `display: none`, which would leave the
- * page unloaded and an agent's tools unable to reach it.
+ * Where a tab's native child webview host waits while its tab is in no dock (another dock, a
+ * folded one, a page with no tools column): taking it out of the document would disconnect the
+ * adapter. It stays in the document off-screen while the native webview stays hidden and alive.
  */
 function vault(): HTMLElement {
   const known = document.getElementById("web-vault");
@@ -226,11 +225,11 @@ async function whenAttached(page: Page): Promise<number> {
   return page.wcId;
 }
 
-/** A tab's page, with its events. `src` is set before it is attached, so it starts loading then. */
-function makeNativeWebview(page: Page, url: string): WebviewTag {
+/** A tab's native child webview adapter, wired to Tauri's browser events. */
+function makeNativeWebview(page: Page, url: string): NativeWebviewElement {
   const native = getBridge()!.nativeBrowser!;
   const id = page.created;
-  const el = document.createElement("div") as unknown as WebviewTag;
+  const el = document.createElement("div") as unknown as NativeWebviewElement;
   el.className = "native-webview";
   let disposed = false;
   let index = -1;
@@ -256,11 +255,13 @@ function makeNativeWebview(page: Page, url: string): WebviewTag {
   void ready.catch(failed);
   const step = (action: "back" | "forward" | "reload" | "stop") => {
     direction = action === "back" ? -1 : action === "forward" ? 1 : 0;
-    index += direction;
+    if (history.length > 0 && direction !== 0) {
+      index = Math.max(0, Math.min(history.length - 1, index + direction));
+    }
     void ready.then(() => native.step(id, action)).catch(failed);
   };
   Object.assign(el, {
-    getWebContentsId: () => {
+    getWebviewId: () => {
       if (index < 0) throw new Error("浏览器标签还在加载");
       return id;
     },
@@ -323,10 +324,10 @@ function makeNativeWebview(page: Page, url: string): WebviewTag {
   return el;
 }
 
-function makeWebview(page: Page, url: string): WebviewTag {
+function makeWebview(page: Page, url: string): NativeWebviewElement {
   const el = makeNativeWebview(page, url);
   el.addEventListener("dom-ready", () => {
-    page.wcId = el.getWebContentsId();
+    page.wcId = el.getWebviewId();
     el.insertCSS(PAGE_SCROLLBAR).catch(() => {});
     page.back = el.canGoBack();
     page.forward = el.canGoForward();
@@ -487,9 +488,10 @@ export async function openBrowserFile(scope: FileScope, path: string, dock?: Doc
 function navigate(page: Page, text: string) {
   const url = browserUrl(text);
   if (!url) return;
+  const hashOnly = page.wcId !== null && !page.loading && isHashOnlyChange(page.url, url);
   page.problem = null;
   page.url = url;
-  page.loading = url !== "about:blank";
+  page.loading = url !== "about:blank" && !hashOnly;
   rememberWebUrl(page.tab, url);
   if (page.el) {
     // A tab that was never shown has no page yet: it starts when the element attaches.
@@ -516,18 +518,19 @@ function navigate(page: Page, text: string) {
 }
 
 /**
- * 后退 / 前进 / 刷新: the tab's own page does it, not the main process. Returns why it could not
- * (an agent hears it; the toolbar's buttons are already disabled then). The load is marked as
- * starting here, so `whenLoaded` waits for it however fast `did-start-loading` arrives.
+ * 后退 / 前进 / 刷新: executed inside the native child webview. Returns why it could not run
+ * (the toolbar's buttons are already disabled then; agent calls pass `checkHistory: false` so SPA
+ * `history.pushState` entries can still go back/forward).
  */
-function step(page: Page, action: "back" | "forward" | "reload"): string | null {
+function step(page: Page, action: "back" | "forward" | "reload", opts: { checkHistory?: boolean } = {}): string | null {
+  const checkHistory = opts.checkHistory ?? true;
   if (page.el) {
     if (!page.el.isConnected) return "这个标签现在没有显示，先打开它再" + (action === "back" ? "后退" : action === "forward" ? "前进" : "刷新");
     if (action === "back") {
-      if (!page.el.canGoBack()) return "没有上一页";
+      if (checkHistory && !page.el.canGoBack()) return "没有上一页";
       page.el.goBack();
     } else if (action === "forward") {
-      if (!page.el.canGoForward()) return "没有下一页";
+      if (checkHistory && !page.el.canGoForward()) return "没有下一页";
       page.el.goForward();
     } else page.el.reload();
     page.loading = true;
@@ -543,6 +546,53 @@ function step(page: Page, action: "back" | "forward" | "reload"): string | null 
   }
   publish();
   return null;
+}
+
+/**
+ * Waits for `back` / `forward` / `reload` to finish. For `back` / `forward`, an SPA popstate
+ * navigation may not emit a native `PageLoadEvent::Started`; if none arrives within 450 ms,
+ * settle cleanly instead of hanging for `LOAD_TIMEOUT`.
+ */
+async function stepAndWait(page: Page, action: "back" | "forward" | "reload"): Promise<void> {
+  if (!page.el || action === "reload") {
+    const refused = step(page, action, { checkHistory: false });
+    if (refused) throw new Error(refused);
+    await whenLoaded(page);
+    return;
+  }
+  const el = page.el;
+  let loadEventSeen = false;
+  const markSeen = () => { loadEventSeen = true; };
+  el.addEventListener("did-start-loading", markSeen, { once: true });
+  el.addEventListener("did-stop-loading", markSeen, { once: true });
+  el.addEventListener("did-fail-load", markSeen, { once: true });
+  try {
+    const refused = step(page, action, { checkHistory: false });
+    if (refused) throw new Error(refused);
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        el.removeEventListener("did-start-loading", done);
+        el.removeEventListener("did-stop-loading", done);
+        el.removeEventListener("did-fail-load", done);
+        resolve();
+      };
+      const timer = setTimeout(done, 450);
+      el.addEventListener("did-start-loading", done, { once: true });
+      el.addEventListener("did-stop-loading", done, { once: true });
+      el.addEventListener("did-fail-load", done, { once: true });
+    });
+  } finally {
+    el.removeEventListener("did-start-loading", markSeen);
+    el.removeEventListener("did-stop-loading", markSeen);
+    el.removeEventListener("did-fail-load", markSeen);
+  }
+  if (loadEventSeen) {
+    await whenLoaded(page);
+  } else {
+    page.loading = false;
+    publish();
+  }
 }
 
 function stop(page: Page) {
@@ -678,6 +728,20 @@ async function runTool(tool: string, input: Record<string, unknown>, control: (p
       if (!wanted) throw new Error("browser_open 要给 url 或 path");
       return browser.chromeAction({ ...input, tool, url: wanted });
     }
+    if (tool === "browser_wait") {
+      return runBrowserWait({
+        input,
+        probe: (cond) =>
+          browser.chromeAction!({
+            tab: input.tab,
+            tool: "browser_probe",
+            ...(cond.text ? { text: cond.text } : {}),
+            ...(cond.textGone ? { text_gone: cond.textGone } : {}),
+            ...(cond.selector ? { selector: cond.selector } : {}),
+            ...(cond.url ? { url: cond.url } : {}),
+          }) as Promise<{ matched: boolean; url: string; title: string }>,
+      });
+    }
     return browser.chromeAction({ ...input, tool });
   }
   if (tool === "browser_open") {
@@ -704,26 +768,37 @@ async function runTool(tool: string, input: Record<string, unknown>, control: (p
     return { tab: page.id, url: page.url, title: pageName(page) };
   }
   const page = mustPage(input.tab, tool);
-  // 后退 / 前进 / 刷新 go through the <webview> itself, and wait for the load rather than an id.
+  if (tool === "browser_close") {
+    closeBrowserTab(page.tab);
+    return { ok: true };
+  }
+  // 后退 / 前进 / 刷新 go through the native webview itself, and wait for the load (or SPA settle).
   if (tool === "browser_navigate") {
     const action = input.action;
     if (action !== "back" && action !== "forward" && action !== "reload") throw new Error("browser_navigate 的 action 是 back、forward 或 reload");
-    const refused = step(page, action);
-    if (refused) throw new Error(refused);
-    await whenLoaded(page);
+    await stepAndWait(page, action);
     return { ok: true, action };
   }
   const wcId = await whenAttached(page);
   switch (tool) {
-    case "browser_snapshot":
-      return browser.snapshot(wcId);
+    case "browser_snapshot": {
+      const selector = typeof input.selector === "string" && input.selector.trim() ? input.selector.trim() : undefined;
+      const maxChars = input.max_chars !== undefined && Number.isFinite(Number(input.max_chars))
+        ? Math.round(Number(input.max_chars))
+        : undefined;
+      return browser.snapshot(wcId, { selector, maxChars });
+    }
     case "browser_click":
       await browser.click(wcId, refOf(input.ref));
       return { ok: true };
     case "browser_type": {
       const text = typeof input.text === "string" ? input.text : String(input.text ?? "");
-      await browser.type(wcId, refOf(input.ref), text, input.submit === true);
+      await browser.type(wcId, refOf(input.ref), text, input.submit === true, input.clear !== false);
       return { ok: true };
+    }
+    case "browser_select": {
+      if (typeof input.value !== "string" || !input.value) throw new Error("browser_select 要给非空 value");
+      return browser.select(wcId, refOf(input.ref), input.value);
     }
     case "browser_press": {
       if (typeof input.key !== "string" || !input.key) throw new Error("browser_press 要给 key");
@@ -733,9 +808,22 @@ async function runTool(tool: string, input: Record<string, unknown>, control: (p
     case "browser_scroll": {
       const dy = Number(input.dy);
       if (!Number.isFinite(dy)) throw new Error("browser_scroll 的 dy 要是数字");
-      await browser.scroll(wcId, dy);
-      return { ok: true };
+      const ref = input.ref !== undefined && input.ref !== null ? refOf(input.ref) : undefined;
+      return browser.scroll(wcId, dy, ref);
     }
+    case "browser_wait":
+      return runBrowserWait({
+        input,
+        onTick: () => {
+          if (pages.get(page.id) !== page) throw new Error("浏览器标签已关闭");
+          if (page.controller?.kind === "human") throw new Error(HUMAN_CONTROL);
+          control(page);
+        },
+        probe: async (cond) => {
+          const id = await whenAttached(page);
+          return browser.probe(id, cond);
+        },
+      });
     case "browser_screenshot": {
       const shot = await browser.screenshot(wcId);
       return { image_base64: shot.base64, mime: shot.mime };
@@ -835,10 +923,10 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
     // back in the vault (its effect cleanup) before this one is attached here.
     host.appendChild(el);
     const detachNative = nativeViews.get(el)?.attach(host);
-    // Attached again: if the guest survived (no dom-ready to come), its id is readable now.
+    // Attached again: if the child webview survived (no dom-ready to come), its id is readable now.
     if (page.wcId === null) {
       try {
-        page.wcId = el.getWebContentsId();
+        page.wcId = el.getWebviewId();
         settle(page, null);
         publish();
       } catch {
@@ -1251,7 +1339,7 @@ function ControlBar({ page }: { page: Page }) {
   );
 }
 
-/** The mock preview's page: there is no `<webview>` in a plain page, so the scenario draws one. */
+/** The mock preview's page: there is no native child webview in a plain page, so the scenario draws one. */
 function MockPage({ page }: { page: Page }) {
   const shown = mockBrowser()?.page(page.tab);
   return (

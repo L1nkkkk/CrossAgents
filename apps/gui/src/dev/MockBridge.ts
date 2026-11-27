@@ -1,4 +1,4 @@
-// A stand-in for the Electron bridge (`window.crossagents`, bridge.d.ts) in `preview:mock`: it
+// A stand-in for the Tauri desktop bridge (`window.crossagents`, bridge.d.ts) in `preview:mock`: it
 // answers `/v1/...` from a scenario's state and plays the scenario's event script on the event
 // stream. Events change the state the same way the hub's do, so REST re-fetches agree with
 // what streamed (transcripts fold with the GUI's own session.ts). Writes that matter to the
@@ -332,7 +332,7 @@ export class MockBridge implements CrossAgentsBridge {
     },
   };
 
-  /** The shell's extension IPC (electron/preload.cts); safe mode is the scenario's word. */
+  /** The shell's extension IPC (tauriBridge.ts); safe mode is the scenario's word. */
   extensions = {
     safeMode: async () => this.state.safeMode ?? { enabled: false, reason: null },
     loading: async () => {},
