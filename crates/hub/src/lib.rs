@@ -25,6 +25,7 @@ pub mod guard;
 pub mod identity;
 pub mod image;
 pub mod install;
+pub mod jobs;
 pub mod lessons;
 pub mod link;
 pub mod media;
@@ -441,6 +442,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let web_push = Arc::new(web_push::WebPushService::new(&paths.home));
     web_push.clone().watch(bus.clone(), shutdown.clone());
     let webrtc = Arc::new(webrtc::WebRtcService::new());
+    let jobs = Arc::new(jobs::SessionJobs::new(
+        bus.clone(),
+        runtime.clone(),
+        paths.home.join("jobs"),
+    ));
     let state = Arc::new(api::AppState {
         devices: Default::default(),
         extensions: extensions.clone(),
@@ -468,6 +474,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         remote_nodes,
         web_push,
         webrtc: webrtc.clone(),
+        jobs: jobs.clone(),
     });
     // The hole-punching entrance, when the person left it on (docs/MULTI-NODE.md §14).
     state.link.resume(&state, addr).await;
@@ -500,6 +507,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 .await;
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
+            jobs.shutdown_all().await;
             webrtc.stop_all().await;
             link.stop().await;
             let _ = account_start.await;

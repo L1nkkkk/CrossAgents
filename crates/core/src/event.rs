@@ -399,6 +399,12 @@ pub enum EventKind {
     /// The agent's vendor session id, for joining with the vendor's usage logs.
     #[serde(rename = "agent.session_started")]
     AgentSessionStarted { id: AgentId, session_id: String },
+    /// A hub-managed background job owned by this agent session started or finished.
+    #[serde(rename = "agent.job_updated")]
+    AgentJobUpdated {
+        id: AgentId,
+        job: crate::SessionJob,
+    },
     /// An agent asked the person something (`human_ask`) or told them something
     /// (`human_notify`); also the hub's own questions (budget).
     #[serde(rename = "human.asked")]
@@ -933,6 +939,7 @@ impl EventKind {
             Self::AgentExited { .. } => "agent.exited",
             Self::AgentAdopted { .. } => "agent.adopted",
             Self::AgentSessionStarted { .. } => "agent.session_started",
+            Self::AgentJobUpdated { .. } => "agent.job_updated",
             Self::AccountCreated { .. } => "account.created",
             Self::AccountRemoved { .. } => "account.removed",
             Self::AccountQuotaUpdated { .. } => "account.quota_updated",
@@ -1033,6 +1040,7 @@ impl EventKind {
             | Self::BrowserRequest { .. }
             | Self::BrowserRequestDone { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
+            Self::AgentJobUpdated { id, .. } => Some(*id),
             Self::TaskReviewer { reviewer, .. } => Some(*reviewer),
             Self::TaskReworkSession { agent, .. } => Some(*agent),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),

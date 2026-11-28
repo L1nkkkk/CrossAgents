@@ -13,8 +13,8 @@ pub use crossagents_core::{
     DeliveryState, DeliveryStatus, Device, DeviceKind, DeviceLevel, DeviceOs, DiffSource,
     DriverKind, Event, EventKind, FindingAnswer, FindingStatus, Handoff, HandoffKind, HistoryTask,
     LeadPlace, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, QueuedReason, Role,
-    Run, RunHistory, RunId, RunPolicy, RunStatus, SessionRef, StopReason, Task, TaskId, TaskStatus,
-    TokenTotals, ToolInfo, ToolStatus,
+    Run, RunHistory, RunId, RunPolicy, RunStatus, SessionJob, SessionJobStatus, SessionRef,
+    StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.
@@ -49,6 +49,26 @@ pub struct CreateDeviceResponse {
 #[ts(export)]
 pub struct ListDevicesResponse {
     pub devices: Vec<Device>,
+}
+
+/// `POST /v1/me/jobs` and `POST /v1/agents/{key}/jobs`: start a hub-managed background job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StartJobRequest {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cwd: Option<String>,
+}
+
+/// `GET /v1/jobs`, `GET /v1/agents/{key}/jobs`, and `GET /v1/me/jobs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListJobsResponse {
+    pub jobs: Vec<SessionJob>,
 }
 
 /// `POST /v1/devices/{id}/level` (admin): promote or demote an active device's permission level.
@@ -4008,6 +4028,8 @@ mod tests {
         crossagents_core::TaskBudget::export_all(&cfg).unwrap();
         crossagents_core::LeadPhaseModels::export_all(&cfg).unwrap();
         crossagents_core::SessionRef::export_all(&cfg).unwrap();
+        crossagents_core::SessionJob::export_all(&cfg).unwrap();
+        crossagents_core::SessionJobStatus::export_all(&cfg).unwrap();
         crossagents_core::SessionSearchHit::export_all(&cfg).unwrap();
         crossagents_core::CouncilRecord::export_all(&cfg).unwrap();
         crossagents_core::CouncilMemberSpec::export_all(&cfg).unwrap();

@@ -65,6 +65,8 @@ pub fn required(method: &Method, pattern: &str) -> Level {
             | ("POST", "/v1/link/invites")
             // Settings can restore automatic execution, enable hooks or change setting sources.
             | ("POST", "/v1/agents/{key}/settings")
+            // Starts an arbitrary shell command in the session's workspace on this machine.
+            | ("POST", "/v1/agents/{key}/jobs")
             // Runs git init and an initial commit at any path supplied by the caller.
             | ("POST", "/v1/repos/init")
             | ("POST", "/v1/shutdown")

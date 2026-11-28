@@ -211,7 +211,28 @@ impl SessionSetup for CollabSetup {
             .cloned()
             .ok_or_else(|| CoreError::Agent("hub URL not known yet".into()))?;
         let token = self.tokens.issue(agent.id).await;
-        let env = BTreeMap::from([(URL_ENV.to_owned(), url), (TOKEN_ENV.to_owned(), token)]);
+        let env = BTreeMap::from([
+            (URL_ENV.to_owned(), url.clone()),
+            (TOKEN_ENV.to_owned(), token.clone()),
+        ]);
+        // Also expose the scoped `/v1/me` session credentials to local agent shells so CLIs
+        // without per-session MCP (e.g. `antigravity-native`) can launch hub-managed background
+        // jobs via `crossagents exec --bg -- <cmd>`.
+        let mut agent_env = agent_env;
+        if !remote {
+            if !agent_env
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case(URL_ENV))
+            {
+                agent_env.push((URL_ENV.to_owned(), url));
+            }
+            if !agent_env
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case(TOKEN_ENV))
+            {
+                agent_env.push((TOKEN_ENV.to_owned(), token));
+            }
+        }
         let mut mcp_servers = vec![McpServerSpec {
             name: "crossagents".into(),
             command: PathBuf::from(program),

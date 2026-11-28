@@ -5,6 +5,7 @@ import { startActivity } from "./activity";
 import { startEventLog } from "./eventlog";
 import { startExtensionsUi } from "./extensions/wire";
 import { startEvents } from "./hub";
+import { startJobs } from "./jobs";
 import { startChatProfileSync } from "./lib/chatProfile";
 import { startTheme } from "./lib/theme";
 import { installTauriBridge } from "./tauriBridge";
@@ -25,6 +26,7 @@ if (start) {
   startEvents();
   startChatProfileSync();
   startActivity();
+  startJobs();
   startEventLog();
   // Extensions load beside the app: a failure marks that one failed, the page keeps running.
   startExtensionsUi();

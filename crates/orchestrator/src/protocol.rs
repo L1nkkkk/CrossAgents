@@ -173,7 +173,11 @@ const LOCKS: &str = "Commands that build or test in your checkout go through the
 `crossagents exec --resource build -- <command>` (cargo already goes through it by itself: the \
 checkout's PATH has a shim). When you see `waiting for …` another command holds the build \
 directory and you are queued, so do not start the same command again; exit code 75 is the wait \
-timing out, and you can retry.";
+timing out, and you can retry. For long-running builds, tests, or release scripts that should \
+survive turn boundaries or CLI restarts, launch them as hub-managed background jobs with \
+`job_start` (or `crossagents exec --bg --label \"...\" -- <cmd>`): the hub keeps them running, \
+shows continuous running status to the person, and automatically wakes you with the exit code and \
+tail output when they finish.";
 
 /// Codex names MCP tools `mcp__<server>__<tool>`, and its code-mode models (`tool_mode:
 /// code_mode_only`, e.g. gpt-6-luna) see no tool but `exec`: told only "call task_complete",

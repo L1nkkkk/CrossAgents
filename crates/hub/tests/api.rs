@@ -674,9 +674,19 @@ async fn drivers_say_which_files_they_take() {
             .status(),
         201
     );
-    // Antigravity's native driver accepts images and text, not PDFs.
+    // Antigravity's native driver keeps image/PDF attachments on persistent stream-json
+    // via path references for its native multimodal `read_file` tool, so every kind is accepted.
     assert_eq!(
         create("antigrav", "antigravity", "antigravity-native")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
+    // With's native driver accepts images and text, not PDFs.
+    assert_eq!(
+        create("wither", "with", "with-native")
             .send()
             .await
             .unwrap()
@@ -745,12 +755,25 @@ async fn drivers_say_which_files_they_take() {
     assert_eq!(antigrav["driver"], "antigravity-native");
     assert_eq!(
         antigrav["capabilities"]["attachments"],
+        json!({ "image": true, "pdf": true, "text": true })
+    );
+    let wither: Value = t
+        .get("/v1/agents/wither/transcript")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(wither["driver"], "with-native");
+    assert_eq!(
+        wither["capabilities"]["attachments"],
         json!({ "image": true, "pdf": false, "text": true })
     );
 
     // No CLI process is needed: the driver's answer is known without one.
     let resp = t
-        .post("/v1/agents/antigrav/messages")
+        .post("/v1/agents/wither/messages")
         .json(&json!({
             "text": "read this",
             "attachments": [{ "name": "spec.pdf", "mime": "application/pdf", "data": "JVBERg==" }],
@@ -762,7 +785,7 @@ async fn drivers_say_which_files_they_take() {
     let offered = resp.text().await.unwrap();
     assert!(offered.contains("spec.pdf"), "{offered}");
     assert!(offered.contains("PDFs"), "{offered}");
-    assert!(offered.contains("antigravity-native"), "{offered}");
+    assert!(offered.contains("with-native"), "{offered}");
     assert!(offered.contains("images, text"), "{offered}");
 }
 
@@ -2198,5 +2221,97 @@ async fn session_refs_record_clean_bubble_and_inject_context() {
             .join(format!("{}.md", source.id))
             .is_file(),
         "read-only markdown snapshot should be written on disk"
+    );
+}
+
+#[tokio::test]
+async fn session_background_jobs_run_and_can_be_listed_and_cancelled() {
+    let t = TestHub::start().await;
+    let cwd = t._home.path().display().to_string();
+    let agent: Agent = t
+        .post("/v1/agents")
+        .json(&json!({
+            "name": "builder",
+            "plugin": "external",
+            "cwd": cwd,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let connect: Value = t
+        .post(&format!("/v1/agents/{}/connect", agent.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let agent_token = connect["token"].as_str().unwrap();
+
+    // Agent launches a hub-managed job through `/v1/me/jobs`.
+    let cmd = if cfg!(windows) {
+        "Start-Sleep -Seconds 30"
+    } else {
+        "sleep 30"
+    };
+    let created: crossagents_api_types::SessionJob = t
+        .client
+        .post(t.url("/v1/me/jobs"))
+        .bearer_auth(agent_token)
+        .json(&json!({ "command": cmd, "label": "long build" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created.agent_id, agent.id);
+    assert_eq!(created.label, "long build");
+    assert_eq!(created.status, crossagents_api_types::SessionJobStatus::Running);
+
+    // GUI/control routes see the running job.
+    let list: crossagents_api_types::ListJobsResponse = t
+        .get(&format!("/v1/agents/{}/jobs", agent.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(list.jobs.iter().any(|j| j.id == created.id));
+
+    // Read-only token can view jobs, not cancel them.
+    let read_get = t
+        .client
+        .get(t.url("/v1/jobs"))
+        .bearer_auth(&t.hub.read_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read_get.status(), StatusCode::OK);
+    let read_del = t
+        .client
+        .delete(t.url(&format!("/v1/jobs/{}", created.id)))
+        .bearer_auth(&t.hub.read_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read_del.status(), StatusCode::FORBIDDEN);
+
+    // Control cancel stops the job cleanly.
+    let stopped: crossagents_api_types::SessionJob = t
+        .delete(&format!("/v1/jobs/{}", created.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        stopped.status,
+        crossagents_api_types::SessionJobStatus::Cancelled
     );
 }

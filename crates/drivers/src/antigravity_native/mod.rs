@@ -3,11 +3,12 @@
 //!
 //! One process per session: `agy --input-format stream-json --output-format stream-json`
 //! stays up and takes one `user` message per turn on stdin, answering in NDJSON. That is
-//! cheaper than restarting it per turn, and the process holds the conversation; when it is
-//! gone (an interrupt, a crash), the next turn starts a new one with
-//! `--conversation <id>`, which is also what [`Driver::resume`] does.
-//! Image turns use `agy acp` with the same conversation id because headless input
-//! supports only text blocks.
+//! cheaper than restarting it per turn, and the process holds the conversation (including any
+//! background tasks/subagents); when it is gone (an interrupt, a crash), the next turn starts
+//! a new one with `--conversation <id>`, which is also what [`Driver::resume`] does.
+//! Image and PDF attachments stay on the same persistent headless process by passing their
+//! saved file paths for Antigravity's native multimodal `read_file` tool, avoiding a destructive
+//! process teardown / `agy acp` hop that would cancel running background tasks.
 //!
 //! - The conversation id is the CLI's: it arrives in `init`/`result`, and the session
 //!   reports it as [`SessionEventKind::Started`] once it has it. A new session therefore
@@ -39,9 +40,8 @@ use crossagents_core::{
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
-use crate::acp::{AcpLaunch, AcpOptions, AcpSession, ImageTurnOptions};
 use crate::launch::{BoxWrite, LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
 use crate::process::{StderrTail, hide_console, resolve_program, system_proxy_env};
@@ -49,7 +49,7 @@ use wire::{Event, Step};
 
 const ATTACHMENTS: AttachmentSupport = AttachmentSupport {
     image: true,
-    pdf: false,
+    pdf: true,
     text: true,
 };
 
@@ -557,7 +557,6 @@ pub struct AntigravitySession {
     child: tokio::sync::Mutex<Option<Live>>,
     running: Mutex<Option<Arc<ProcessHandle>>>,
     cancelled: AtomicBool,
-    interrupt_image: Notify,
     closed: AtomicBool,
 }
 
@@ -622,7 +621,6 @@ impl AntigravitySession {
             child: tokio::sync::Mutex::new(None),
             running: Mutex::new(None),
             cancelled: AtomicBool::new(false),
-            interrupt_image: Notify::new(),
             closed: AtomicBool::new(false),
         }
     }
@@ -631,7 +629,9 @@ impl AntigravitySession {
         let _ = self.events.send(kind.into());
     }
 
-    /// The headless message includes the opening instructions once and references to text files.
+    /// The headless message includes the opening instructions once and references to attached files.
+    /// Images and PDFs are referenced with explicit `read_file` hints so Antigravity inspects them
+    /// natively on the persistent `stream-json` process without killing background tasks via ACP.
     fn prompt_text(&self, prompt: &Prompt) -> String {
         let mut text = match self.instructions.lock().expect("instructions").take() {
             Some(instructions) => format!("{instructions}\n\n{}", prompt.text),
@@ -639,7 +639,25 @@ impl AntigravitySession {
         };
         for attachment in &prompt.attachments {
             text.push_str("\n\n");
-            text.push_str(&attachment.reference());
+            if attachment.is_image() {
+                text.push_str(&format!(
+                    "[attached image: {} ({}, {} bytes) at {} - inspect it directly with `read_file`]",
+                    attachment.name,
+                    attachment.mime,
+                    attachment.size,
+                    attachment.path.display()
+                ));
+            } else if attachment.is_pdf() {
+                text.push_str(&format!(
+                    "[attached PDF: {} ({}, {} bytes) at {} - inspect it directly with `read_file`]",
+                    attachment.name,
+                    attachment.mime,
+                    attachment.size,
+                    attachment.path.display()
+                ));
+            } else {
+                text.push_str(&attachment.reference());
+            }
         }
         text
     }
@@ -908,13 +926,6 @@ impl AntigravitySession {
         self.cancelled.store(false, Ordering::SeqCst);
         self.tools.lock().expect("tools").clear();
         self.usage.lock().expect("usage").start_turn();
-        if prompt
-            .attachments
-            .iter()
-            .any(|attachment| attachment.is_image())
-        {
-            return self.run_image_turn(prompt).await;
-        }
         let text = self.prompt_text(prompt);
         if let Err(err) = self.ensure().await {
             self.emit(SessionEventKind::Error {
@@ -935,6 +946,9 @@ impl AntigravitySession {
         let Some(live) = child.as_mut() else {
             return Err(CoreError::Agent("Antigravity CLI is not running".into()));
         };
+        // Re-arm the running handle on every turn (not just initial spawn) so interrupt/shutdown
+        // always kills the active process on turn 2+ as well.
+        *self.running.lock().expect("running") = Some(live.process.clone());
         if let Err(err) = live.stdin.write_all(message.as_bytes()).await {
             self.emit(SessionEventKind::Error {
                 message: format!("cannot send the turn to Antigravity CLI: {err}"),
@@ -1024,100 +1038,6 @@ impl AntigravitySession {
         })
     }
 
-    async fn run_image_turn(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
-        let cancelled = || TurnOutcome {
-            stop_reason: StopReason::Cancelled,
-            turn_id: None,
-        };
-        let interrupted = self.interrupt_image.notified();
-        tokio::pin!(interrupted);
-        if self.cancelled.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
-            return Ok(cancelled());
-        }
-        // Flush the headless process before another process opens the same conversation.
-        if let Some(live) = self.child.lock().await.take() {
-            drop(live.stdin);
-            if live
-                .process
-                .exit_within(Duration::from_secs(5))
-                .await
-                .is_none()
-            {
-                live.process.start_kill();
-                if live
-                    .process
-                    .exit_within(Duration::from_secs(5))
-                    .await
-                    .is_none()
-                {
-                    return Err(CoreError::Agent(
-                        "could not stop the Antigravity headless process".into(),
-                    ));
-                }
-            }
-        }
-
-        let mut launch = AcpLaunch::from_command(&self.command, self.cwd.clone())?;
-        launch.args.push("acp".into());
-        if self.permission == PermissionPolicy::Bypass {
-            launch.args.push("--dangerously-skip-permissions".into());
-        }
-        launch.env = system_proxy_env();
-        launch.env.extend(self.env.iter().cloned());
-        #[cfg(windows)]
-        launch
-            .env
-            .push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
-
-        let (effective_model, effective_effort) = self.effective_model_and_effort();
-        let opts = AcpOptions {
-            launch,
-            mcp_servers: Vec::new(),
-            // Guard accepts edits through the ACP mode. Other permission requests are declined.
-            permission: if self.permission == PermissionPolicy::Bypass {
-                PermissionPolicy::Bypass
-            } else {
-                PermissionPolicy::Deny
-            },
-            model: effective_model,
-            instructions: self.instructions.lock().expect("instructions").clone(),
-            events: self.events.clone(),
-        };
-        let image = ImageTurnOptions {
-            resume: self.conversation.lock().expect("conversation").clone(),
-            effort: effective_effort,
-            mode: match self.permission {
-                PermissionPolicy::Bypass => None,
-                PermissionPolicy::Guard => Some("accept-edits"),
-                PermissionPolicy::Deny => Some("default"),
-            },
-        };
-        let acp = tokio::select! {
-            biased;
-            () = &mut interrupted => return Ok(cancelled()),
-            session = AcpSession::start_for_image(opts, image) => session?,
-        };
-        self.remember(acp.session_id());
-        let send = acp.prompt_with_images(prompt);
-        tokio::pin!(send);
-        let outcome = tokio::select! {
-            biased;
-            () = &mut interrupted => {
-                let _ = acp.interrupt().await;
-                Ok(cancelled())
-            }
-            result = &mut send => result,
-        };
-        if outcome
-            .as_ref()
-            .is_ok_and(|result| result.stop_reason != StopReason::Cancelled)
-        {
-            self.instructions.lock().expect("instructions").take();
-        }
-        acp.close_image_turn().await;
-        outcome
-    }
-
     fn stop_reason(&self, result: &wire::Result) -> StopReason {
         if self.cancelled.load(Ordering::SeqCst) {
             return StopReason::Cancelled;
@@ -1148,7 +1068,6 @@ impl AntigravitySession {
 
     fn stop(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
-        self.interrupt_image.notify_waiters();
         if let Some(process) = self.running.lock().expect("running").as_ref() {
             process.start_kill();
         }
@@ -1411,92 +1330,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_image_turn_resumes_via_acp_and_text_returns_to_headless() {
+    async fn image_and_pdf_turns_stay_on_persistent_stream_json_process() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("log.txt");
         let (mut spec, _) = spec(dir.path());
         spec.agent.model = None;
         spec.env = vec![("CROSSAGENTS_AGY_TEST_LOG".into(), log.display().to_string())];
-        let init = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":true},"sessionCapabilities":{"resume":{},"close":{}}}}}"#;
-        let resume = r#"{"jsonrpc":"2.0","id":2,"result":{}}"#;
-        let prompt_result = r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#;
-        let close = r#"{"jsonrpc":"2.0","id":4,"result":{}}"#;
-        let windows = format!(
-            r#"
-if ($args[0] -eq 'acp') {{
-    foreach ($response in @('{init}', '{resume}', '{prompt_result}', '{close}')) {{
-        $line = [Console]::In.ReadLine()
-        Add-Content -Path $env:CROSSAGENTS_AGY_TEST_LOG -Value $line
-        [Console]::Out.WriteLine($response)
-        [Console]::Out.Flush()
-    }}
-    exit
-}}
-{}"#,
-            stream_for(true),
-        );
-        let unix = format!(
-            r#"
-if [ "$1" = acp ]; then
-    for response in '{init}' '{resume}' '{prompt_result}' '{close}'; do
-        IFS= read -r line || exit 1
-        printf '%s\n' "$line" >> "$CROSSAGENTS_AGY_TEST_LOG"
-        printf '%s\n' "$response"
-    done
-    exit
-fi
-{}"#,
-            stream_for(false),
-        );
-        let command = mock_cli(dir.path(), &windows, &unix);
+        let command = mock_cli(dir.path(), &stream_for(true), &stream_for(false));
         let driver = AntigravityDriver::new("antigravity", Cli::at(command), vec![]);
-        assert!(driver.capabilities().attachments.unwrap().image);
+        let caps = driver.capabilities().attachments.unwrap();
+        assert!(caps.image);
+        assert!(caps.pdf);
         let session = driver.open(spec).await.unwrap();
         session.prompt("before").await.unwrap();
 
-        let path = dir.path().join("shot.png");
-        let bytes = b"\x89PNG\r\n\x1a\n";
-        std::fs::write(&path, bytes).unwrap();
+        let img_path = dir.path().join("shot.png");
+        let img_bytes = b"\x89PNG\r\n\x1a\n";
+        std::fs::write(&img_path, img_bytes).unwrap();
+        let pdf_path = dir.path().join("spec.pdf");
+        let pdf_bytes = b"%PDF-1.4\n";
+        std::fs::write(&pdf_path, pdf_bytes).unwrap();
         let image = crossagents_core::Attachment {
             id: "shot".into(),
             name: "shot.png".into(),
             mime: "image/png".into(),
-            size: bytes.len() as u64,
-            path,
+            size: img_bytes.len() as u64,
+            path: img_path.clone(),
+        };
+        let pdf = crossagents_core::Attachment {
+            id: "spec".into(),
+            name: "spec.pdf".into(),
+            mime: "application/pdf".into(),
+            size: pdf_bytes.len() as u64,
+            path: pdf_path.clone(),
         };
         let outcome = session
             .prompt_with(&Prompt {
                 text: "look".into(),
-                attachments: vec![image],
+                attachments: vec![image, pdf],
             })
             .await
             .unwrap();
         assert_eq!(outcome.stop_reason, StopReason::EndTurn);
-        session.prompt("after").await.unwrap();
-        session.shutdown().await;
-
-        let log = read_log(&log);
-        let requests: Vec<serde_json::Value> = log
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        assert_eq!(requests[1]["method"], "session/resume");
-        assert_eq!(requests[1]["params"]["sessionId"], "conv-1");
-        assert_eq!(requests[2]["method"], "session/prompt");
-        assert_eq!(requests[2]["params"]["sessionId"], "conv-1");
         assert_eq!(
-            requests[2]["params"]["prompt"],
-            json!([
-                { "type": "text", "text": "look" },
-                { "type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo=" }
-            ])
+            session.prompt("after").await.unwrap().stop_reason,
+            StopReason::EndTurn
         );
-        assert_eq!(requests[3]["method"], "session/close");
+
+        let log = std::fs::read_to_string(&log).expect("mock log should exist");
+        let args = logged_args(&log);
+        // Only a single headless process launch: never restarted or switched to `acp`.
         assert!(
-            logged_args(&log)
-                .windows(2)
-                .any(|pair| pair == ["--conversation", "conv-1"])
+            !args.iter().any(|a| a == "acp"),
+            "unexpected acp args: {args:?}\nlog:\n{log}"
         );
+        assert_eq!(
+            args.iter().filter(|a| a.as_str() == "--input-format").count(),
+            1,
+            "persistent process should not be torn down across image turns: {args:?}\nlog:\n{log}"
+        );
+        let inputs: Vec<serde_json::Value> = log
+            .lines()
+            .filter_map(|line| line.strip_prefix("IN\t"))
+            .map(|json| serde_json::from_str(json).unwrap())
+            .collect();
+        assert_eq!(inputs.len(), 3, "log:\n{log}");
+        let content = inputs[1]["message"]["content"].as_str().unwrap();
+        assert!(content.contains("look"));
+        assert!(content.contains(&img_path.display().to_string()));
+        assert!(content.contains(&pdf_path.display().to_string()));
+        assert!(content.contains("read_file"));
+        session.shutdown().await;
     }
 
     #[tokio::test]

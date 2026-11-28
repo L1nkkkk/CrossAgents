@@ -37,7 +37,9 @@ import type { HumanItem } from "@bindings/HumanItem";
 import type { InitRepoRequest } from "@bindings/InitRepoRequest";
 import type { LandMode } from "@bindings/LandMode";
 import type { ListNotesResponse } from "@bindings/ListNotesResponse";
+import type { ListJobsResponse } from "@bindings/ListJobsResponse";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
+import type { SessionJob } from "@bindings/SessionJob";
 import type { ListQuestionsResponse } from "@bindings/ListQuestionsResponse";
 import type { LoginStarted } from "@bindings/LoginStarted";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
@@ -581,6 +583,9 @@ export const api = {
   dismiss: (id: string) => request<void>("POST", `/v1/questions/${enc(id)}/dismiss`),
 
   listTerminals: () => request<ListTerminalsResponse>("GET", "/v1/terminals"),
+  listJobs: () => request<ListJobsResponse>("GET", "/v1/jobs"),
+  listAgentJobs: (key: string) => request<ListJobsResponse>("GET", `/v1/agents/${enc(key)}/jobs`),
+  cancelJob: (id: string) => request<SessionJob>("DELETE", `/v1/jobs/${enc(id)}`),
   profile: () => request<{ name: string; avatar: string | null }>("GET", "/v1/profile"),
   setProfile: (profile: { name: string; avatar: string | null }) =>
     request<{ name: string; avatar: string | null }>("POST", "/v1/profile", profile),

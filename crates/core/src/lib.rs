@@ -18,6 +18,7 @@ pub mod expertise;
 pub mod handoff;
 pub mod human;
 pub mod ids;
+pub mod job;
 pub mod lesson;
 pub mod model;
 pub mod names;
@@ -62,6 +63,7 @@ pub use expertise::{
 pub use handoff::{Handoff, HandoffKind, HandoffOutcome};
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId, WorkId};
+pub use job::{SessionJob, SessionJobStatus};
 pub use lesson::{
     Evidence, ISSUE_PREFIX, IssueRef, Lesson, LessonOutcome, LessonStatus, Project, ProjectPath,
     RelatedLesson, Triage, TriageRecord, TriageStep,

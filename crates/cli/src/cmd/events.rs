@@ -251,6 +251,13 @@ pub fn summary(kind: &EventKind) -> String {
             format!("{} {}", short(owner), one_line(line))
         }
         EventKind::AgentTurnStarted { id, .. } => short(id),
+        EventKind::AgentJobUpdated { id, job } => format!(
+            "{} job {} ({}) {}",
+            short(id),
+            job.id,
+            enum_name(&job.status),
+            one_line(&job.label)
+        ),
         EventKind::AgentOutput { id, stream, text } => {
             format!("{} [{}] {}", short(id), enum_name(stream), one_line(text))
         }

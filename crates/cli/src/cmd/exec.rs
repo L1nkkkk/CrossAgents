@@ -52,6 +52,15 @@ pub struct ExecArgs {
     )]
     pub timeout: Duration,
 
+    /// Hand the command to the CrossAgents hub as a session-scoped background job (`POST /v1/me/jobs`).
+    /// The hub keeps it running across turns/restarts and wakes this session when it finishes.
+    #[arg(long)]
+    pub bg: bool,
+
+    /// Short human-readable label for a `--bg` background job (defaults to the command line).
+    #[arg(long, value_name = "LABEL")]
+    pub label: Option<String>,
+
     /// The command and its arguments. Everything after `--` is passed through unchanged.
     #[arg(last = true, required = true, num_args = 1.., value_name = "COMMAND")]
     pub command: Vec<String>,
@@ -59,6 +68,9 @@ pub struct ExecArgs {
 
 /// Runs the subcommand and returns the exit code the CLI should end with.
 pub async fn run_cli(args: ExecArgs) -> Result<i32> {
+    if args.bg {
+        return run_bg(args).await;
+    }
     let Some(program) = args.command.first() else {
         bail!("no command: crossagents exec [--resource NAME]… -- <command> …");
     };
@@ -84,6 +96,71 @@ pub async fn run_cli(args: ExecArgs) -> Result<i32> {
             Ok(1)
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+async fn run_bg(args: ExecArgs) -> Result<i32> {
+    let url = env_non_empty(crossagents_hub::collab::URL_ENV).context(
+        "CROSSAGENTS_URL is not set: `crossagents exec --bg` must be run inside a CrossAgents session",
+    )?;
+    let token = env_non_empty(crossagents_hub::collab::TOKEN_ENV).context(
+        "CROSSAGENTS_AGENT_TOKEN is not set: `crossagents exec --bg` must be run inside a CrossAgents session",
+    )?;
+    let command = if args.command.len() == 1 {
+        args.command[0].clone()
+    } else {
+        args.command
+            .iter()
+            .map(|part| quote_shell_arg(part))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.display().to_string());
+    let req = crossagents_api_types::StartJobRequest {
+        command,
+        label: args.label,
+        cwd,
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/me/jobs", url.trim_end_matches('/')))
+        .bearer_auth(token)
+        .json(&req)
+        .send()
+        .await
+        .context("cannot reach the CrossAgents hub to start background job")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("hub rejected background job ({status}): {body}");
+    }
+    let job: crossagents_api_types::SessionJob = resp
+        .json()
+        .await
+        .context("invalid response from /v1/me/jobs")?;
+    println!(
+        "Started hub-managed background job {} ({})\nLog: {}\nThe hub will automatically wake this session when the job finishes.",
+        job.id, job.label, job.log_path
+    );
+    Ok(0)
+}
+
+fn quote_shell_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '\\' | ':' | '='))
+    {
+        return arg.to_owned();
+    }
+    #[cfg(windows)]
+    {
+        format!("'{}'", arg.replace('\'', "''"))
+    }
+    #[cfg(not(windows))]
+    {
+        format!("'{}'", arg.replace('\'', "'\\''"))
     }
 }
 

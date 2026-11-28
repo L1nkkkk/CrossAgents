@@ -137,6 +137,7 @@ pub struct AcpOptions {
     pub events: mpsc::UnboundedSender<SessionEvent>,
 }
 
+#[allow(dead_code)]
 pub(crate) struct ImageTurnOptions {
     pub resume: Option<String>,
     pub effort: Option<String>,
@@ -168,6 +169,7 @@ impl AcpSession {
     }
 
     /// Opens the ACP side of an Antigravity conversation for an image turn.
+    #[allow(dead_code)]
     pub(crate) async fn start_for_image(
         opts: AcpOptions,
         image: ImageTurnOptions,
@@ -399,6 +401,7 @@ impl AcpSession {
             .map_err(|err| CoreError::Agent(err.to_string()))
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn close_image_turn(&self) {
         if self.can_close {
             let _ = tokio::time::timeout(
@@ -572,6 +575,7 @@ impl AcpSession {
         Ok(blocks)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn prompt_with_images(
         &self,
         prompt: &Prompt,

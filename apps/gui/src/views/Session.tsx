@@ -44,7 +44,7 @@ import { useWidths } from "../lib/widths";
 import { useSidebar } from "../titlebar";
 import { planWaitsForPerson } from "../lib/policy";
 import { runState, taskState } from "../lib/taskState";
-import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, workGroups, type ActionTool, type Step } from "../lib/workGroups";
+import { QUIET_AFTER, actionOf, compressSteps, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, workGroups, type ActionTool, type CompressedStep, type Step } from "../lib/workGroups";
 import { LiveExtras, type LiveTurn } from "../liveTurn";
 import { Ellipsis } from "lucide-react";
 import { PeerMessage, StateWord, useArmed } from "../parts";
@@ -58,6 +58,7 @@ import "./session-polish.css";
 import { workDecisions, type WorkDecision } from "../lib/workNotes";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
+import { useAgentRunningJobs } from "../jobs";
 import { isRemoteNodeId, normalizeNodeOs, useNodes } from "../nodes";
 import { OsIcon } from "../osIcon";
 import { ContextUsageButton, useCompact } from "../contextusage";
@@ -360,6 +361,7 @@ export function SessionView({
           {!onClose && !side && <div className="dock-asks" ref={questionArea}><QuestionCards agents={everyone} />{questionId && !questions.loading && (!questions.data || !pending(questions.data.items).some((item) => item.id === questionId && item.from === agent.id)) && <p role="alert" className="question-missing">找不到这条待办：它可能已处理、已过期或不属于此会话。{questions.error && ` ${questions.error}`}</p>}</div>}
           {!onClose && !sidebar.docked && <NeedsYouStrip agents={everyone} tree={runs} />}
           {!side && <RunStrip runs={liveRuns} agents={everyone} />}
+          <BackgroundJobsBar agent={agent} />
           <QueuePanel agent={agent} queued={queued} delivery={transcript.delivery} />
           {agent.status === "error" && transcript.error && !isModerationError(transcript.error) && (
             <div className="error-bar" role="alert" title={transcript.error}>
@@ -461,6 +463,82 @@ function ExecutionBar({ agent, execution: x, reload }: { agent: Agent; execution
           中断执行
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * Live bar pinned above the composer whenever the hub is running background commands for this
+ * session, so the user clearly sees continuous activity + tail output even between model turns.
+ */
+function BackgroundJobsBar({ agent }: { agent: Agent }) {
+  const jobs = useAgentRunningJobs(agent.id);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [stopping, setStopping] = useState<Record<string, boolean>>({});
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!jobs.length) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [jobs.length]);
+  if (!jobs.length) return null;
+
+  async function stopJob(id: string) {
+    setStopping((s) => ({ ...s, [id]: true }));
+    try {
+      await api.cancelJob(id);
+    } catch {
+      // Errors clear when the job state refreshes.
+    } finally {
+      setStopping((s) => ({ ...s, [id]: false }));
+    }
+  }
+
+  return (
+    <div className="bg-jobs-bar" role="status" aria-live="polite">
+      {jobs.map((job) => {
+        const open = !!expanded[job.id];
+        const elapsed = duration(Math.max(0, now - Date.parse(job.started_at)));
+        const tailText = job.tail.trim();
+        return (
+          <div key={job.id} className="bg-job-card">
+            <div className="bg-job-head">
+              <button
+                type="button"
+                className="bg-job-toggle"
+                onClick={() => setExpanded((e) => ({ ...e, [job.id]: !open }))}
+                aria-expanded={open}
+                title={`${job.command}\n日志：${job.log_path}`}
+              >
+                <span className="dot accent pulse" />
+                <span className="bg-job-badge">后台持续运行中</span>
+                <span className="bg-job-label">{job.label}</span>
+                <span className="bg-job-elapsed">{elapsed}</span>
+                <span className="disclosure muted" aria-hidden="true">
+                  {open ? "▾" : "▸"}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="bg-job-stop"
+                disabled={!!stopping[job.id]}
+                onClick={() => void stopJob(job.id)}
+                title="停止该后台任务"
+              >
+                {stopping[job.id] ? "停止中…" : "停止"}
+              </button>
+            </div>
+            {open && (
+              <div className="bg-job-body">
+                <div className="bg-job-cmd">$ {job.command}</div>
+                <pre className="bg-job-tail">{tailText || "（正在运行，暂无输出…）"}</pre>
+                <div className="muted tiny mono">日志：{job.log_path} · 完成后 Hub 将自动唤醒会话续跑</div>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -579,6 +657,7 @@ function Header({
   const compact = useCompact(agent);
   const stop = useArmed();
   const nodes = useNodes();
+  const bgJobs = useAgentRunningJobs(agent.id);
   const remoteNode = isRemoteNodeId(agent.node)
     ? nodes.data?.find((n) => !n.local && (n.id === agent.node || n.name === agent.node))
     : undefined;
@@ -609,7 +688,14 @@ function Header({
           <AgentName agent={agent} />
           <TopicSubtitle agent={agent} />
         </span>
-        <StatusChip status={agent.status} tone={agentTone(agent.status)} />
+        {bgJobs.length > 0 && agent.status !== "running" && agent.status !== "error" ? (
+          <span className="job-live-chip" title={`Hub 正在为本会话执行 ${bgJobs.length} 个后台任务，完成后自动唤醒`}>
+            <span className="dot accent pulse" />
+            后台运行{bgJobs.length > 1 ? ` · ${bgJobs.length}` : ""}
+          </span>
+        ) : (
+          <StatusChip status={agent.status} tone={agentTone(agent.status)} />
+        )}
         {isRemoteNodeId(agent.node) && (
           <a
             href="#/settings/devices"
@@ -1445,11 +1531,20 @@ function Steps({ steps, closed, live }: { steps: Step[]; closed: boolean; live?:
   const [manual, setManual] = useState<boolean>();
   const expanded = manual ?? !closed;
   const [all, setAll] = useState(false);
-  const hidden = expanded ? (all || steps.length <= OPEN_STEPS ? 0 : steps.length - OPEN_STEPS) : steps.length;
+  const cwd = useContext(CwdContext);
+  const compressed = useMemo(() => compressSteps(steps, cwd), [steps, cwd]);
+  const hiddenEntries = expanded ? (all || compressed.length <= OPEN_STEPS ? 0 : compressed.length - OPEN_STEPS) : compressed.length;
+  const hiddenSteps = useMemo(
+    () =>
+      compressed
+        .slice(0, hiddenEntries)
+        .reduce((sum, entry) => sum + (entry.kind === "batch" ? entry.steps.length : 1), 0),
+    [compressed, hiddenEntries],
+  );
   // What `live` reports is whether the newest step is on screen: the block open (not folded to
-  // its summary) and the newest step past the "+N 个更早的步骤" fold.
+  // its summary) and the newest entry past the "+N 个更早的步骤" fold.
   const newest = steps[steps.length - 1];
-  const shown = expanded && steps.length - 1 >= hidden && newest?.type === "tool_call" ? newest.tool_call_id : null;
+  const shown = expanded && compressed.length - 1 >= hiddenEntries && newest?.type === "tool_call" ? newest.tool_call_id : null;
   useEffect(() => {
     live?.(shown);
   }, [live, shown]);
@@ -1483,14 +1578,59 @@ function Steps({ steps, closed, live }: { steps: Step[]; closed: boolean; live?:
           {outcomeOf(steps).title}
         </button>
       )}
-      {hidden > 0 && (
+      {hiddenSteps > 0 && (
         <button className="tools-more" onClick={() => setAll(true)}>
-          ▸ {hidden} 个更早的步骤
+          ▸ {hiddenSteps} 个更早的步骤
         </button>
       )}
-      {steps.slice(hidden).map((s, i) => (
-        <StepRow key={i} step={s} />
-      ))}
+      {compressed.slice(hiddenEntries).map((entry, i) =>
+        entry.kind === "batch" ? (
+          <ToolBatchRow key={`b-${hiddenEntries + i}`} batch={entry} />
+        ) : (
+          <StepRow key={`s-${hiddenEntries + i}`} step={entry.step} />
+        ),
+      )}
+    </div>
+  );
+}
+
+/** Expandable row for consecutive repeated/batched tool steps (e.g. `✎ desktop.rs ×6`). */
+function ToolBatchRow({ batch }: { batch: Extract<CompressedStep, { kind: "batch" }> }) {
+  const [open, setOpen] = useState(false);
+  const bad = batch.failedCount > 0;
+  const tone = batch.running ? "accent pulse" : bad ? "danger" : "ok";
+  const changes = useMemo(() => {
+    if (batch.mode !== "same" || bad) return [];
+    return batch.steps.flatMap((s) => (toolShowsStat(s) ? toolChanges(s).flatMap((c) => parseDiff(c.diff, c.path)) : []));
+  }, [batch, bad]);
+  const liveStep = batch.running ? [...batch.steps].reverse().find((s) => (s.status === "in_progress" || s.status === "pending") && s.output) : undefined;
+  const live = liveStep?.output ? tailLines(liveStep.output, LIVE_LINES) : undefined;
+  return (
+    <div className={`tool-step tool-batch${bad ? " failed" : ""}`}>
+      <button
+        className="tool"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        title={`${batch.label}（共 ${batch.steps.length} 步，点击展开明细）`}
+      >
+        <span className={`dot ${tone}`} />
+        <span className="title">{batch.label}</span>
+        {batch.mode === "same" && <span className="step-batch-count">×{batch.steps.length}</span>}
+        {bad && <span className="chip danger tiny">{batch.failedCount} 个失败</span>}
+        {batch.durationMs != null && <span className="muted tiny">{took(batch.durationMs)}</span>}
+        {changes.length > 0 && <ChangeStat files={changes} />}
+        <span className="disclosure muted" aria-hidden="true">
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {live && !open && <pre className="out live">{live.text}</pre>}
+      {open && (
+        <div className="tool-batch-children">
+          {batch.steps.map((s) => (
+            <ToolStep key={s.tool_call_id} step={s} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -118,6 +118,8 @@ pub struct AppState {
     pub web_push: Arc<crate::web_push::WebPushService>,
     /// Pure-Rust WebRTC DataChannel P2P gateway (`POST /v1/link/webrtc/offer`).
     pub webrtc: Arc<crate::webrtc::WebRtcService>,
+    /// Session-scoped background jobs owned by the hub.
+    pub jobs: Arc<crate::jobs::SessionJobs>,
 }
 
 impl AppState {
@@ -328,12 +330,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::api_bytes::router())
         .merge(crate::web_push::router())
         .merge(crate::webrtc::router())
+        .merge(crate::jobs::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     // Routes for agents, authenticated with their per-session token.
     let me = Router::new()
         .route("/v1/me", get(me))
         .route("/v1/me/tools", get(my_tools))
         .route("/v1/me/tools/{name}", post(call_tool))
+        .merge(crate::jobs::me_router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_agent_token,
@@ -3911,6 +3915,7 @@ async fn my_tools(
 ) -> Json<ListToolsResponse> {
     let mut tools = state.orchestrator.tools_for(&agent).await;
     tools.extend(crate::api_nodes::mcp_tools());
+    tools.extend(crate::jobs::mcp_tools());
     Json(ListToolsResponse { tools })
 }
 
@@ -3931,6 +3936,10 @@ async fn call_tool(
     let call = tokio::spawn(async move {
         let result =
             if let Some(res) = crate::api_nodes::call_mcp_tool(&state_for_task, &name, input.clone()).await {
+                res
+            } else if let Some(res) =
+                crate::jobs::call_mcp_tool(&state_for_task, &agent, &name, input.clone()).await
+            {
                 res
             } else {
                 orchestrator.call_tool(&agent, &name, input).await

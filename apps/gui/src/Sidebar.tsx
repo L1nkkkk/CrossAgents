@@ -9,6 +9,7 @@ import type { SessionSearchHit } from "@bindings/SessionSearchHit";
 import type { Work } from "@bindings/Work";
 import type { WorkDetail } from "@bindings/WorkDetail";
 import { deliveryOf, lastError, markAllSeen, useActivity, useDelivery, useUnread } from "./activity";
+import { agentHasRunningJobs, useAgentRunningJobs, useRunningJobs } from "./jobs";
 import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
@@ -108,6 +109,7 @@ export function SidebarRail({ route, onExpand }: { route: string[]; onExpand: ()
   const agents = useHubData(() => api.listAgents().then((r) => r.agents), [], (e) => e.type.startsWith("agent."));
   const questions = useQuestions();
   const unread = useUnread();
+  const runningJobs = useRunningJobs();
   const [toolsOpen, setToolsOpen] = useState(false);
   const inToolRoute = ["usage", "expertise", "git", "lessons", "extensions", "ext"].includes(route[0] ?? "");
   const waitingIds = new Set((questions.data?.items ?? []).filter((q) => q.status === "open").map((q) => q.from));
@@ -116,7 +118,7 @@ export function SidebarRail({ route, onExpand }: { route: string[]; onExpand: ()
     .filter((a) => !a.archived_at)
     .map((a) => {
       const state = deliveryOf(a.id)?.state;
-      const running = state ? state !== "idle" : a.status === "running";
+      const running = (state ? state !== "idle" : a.status === "running") || runningJobs.some((j) => j.agent_id === a.id);
       const waiting = waitingIds.has(a.id);
       const err = a.status === "error" || unread[a.id]?.kind === "error";
       const done = unread[a.id]?.kind === "done";
@@ -1134,9 +1136,11 @@ function Group({
   const name = group.key === CHATS ? t("sidebar.standalone") : group.name;
   const needs = useContext(Needs);
   const confirmed = useContext(Confirmed);
+  useRunningJobs();
   const waits = (m: SidebarMember) => m.agent.status === "error" || needs.some((item) => item.agent === m.agent.id);
   const waiting = group.members.filter(waits);
   const busy = group.members.filter((m) => {
+    if (agentHasRunningJobs(m.agent.id)) return true;
     // "忙" is the hub's delivery state (P1-4); before it has said anything about this session,
     // its process status is the only hint there is.
     const state = deliveryOf(m.agent.id)?.state;
@@ -1275,7 +1279,10 @@ function SessionRow({
   const uncertain = connection !== "connected" || !confirmed || !agent.status;
   // The hub's delivery state is the one word for "busy" (P1-4); `status` is the process's.
   const delivery = useDelivery(agent.id);
-  const running = !uncertain && (delivery ? delivery.state === "turn" : agent.status === "running");
+  const bgJobs = useAgentRunningJobs(agent.id);
+  const hasBgJob = !uncertain && bgJobs.length > 0;
+  const turnRunning = !uncertain && (delivery ? delivery.state === "turn" : agent.status === "running");
+  const running = turnRunning || hasBgJob;
   const error = !uncertain && agent.status === "error";
   const status = uncertain
     ? t(connection === "connecting" ? "sidebar.connecting" : "sidebar.unknownStatus")
@@ -1287,13 +1294,15 @@ function SessionRow({
           ? "启动中"
           : delivery?.state === "held"
             ? "等它来取"
-            : running
+            : turnRunning
               ? t("sidebar.working")
-              : nodeOffline
-                ? "节点离线"
-                : agent.status === "stopped"
-                  ? t("sidebar.stopped")
-                  : t("sidebar.idle");
+              : hasBgJob
+                ? "后台运行中"
+                : nodeOffline
+                  ? "节点离线"
+                  : agent.status === "stopped"
+                    ? t("sidebar.stopped")
+                    : t("sidebar.idle");
   const turn = useRowLive(agent);
   const summary = summaryText(member.summary) || summaryText(agent.topic);
   const fresh = unread?.kind === "done";
@@ -1304,9 +1313,17 @@ function SessionRow({
   // Only news earns a second line: the rest is one small row, so what is alive stands out by size.
   const compact = quiet && !fresh && !failed;
   const newest = turn?.items.at(-1);
-  const step = running && newest?.type === "tool_call" ? stepLine(newest) : "";
+  const step = turnRunning && newest?.type === "tool_call" ? stepLine(newest) : "";
   // The second line is the row's latest news: what it asks, what went wrong, what it does now.
-  const line = !uncertain && needs ? waitingOn[0].summary : error ? lastError(agent.id) || summary || status : running ? step || summaryText(doing) || summary || status : summary || status;
+  const line = !uncertain && needs
+    ? waitingOn[0].summary
+    : error
+      ? lastError(agent.id) || summary || status
+      : turnRunning
+        ? step || summaryText(doing) || summary || status
+        : hasBgJob
+          ? `后台运行 · ${bgJobs[0].label}`
+          : summary || status;
   const tone = uncertain ? "" : needs ? "attention" : error || failed ? "danger" : "";
   const runs = useContext(Runs);
   const work = useMemo(() => sessionWork(agent.id, runs), [agent.id, runs]);
@@ -1387,7 +1404,8 @@ function SessionRow({
           {plan.length > 0 && !running && !(!uncertain && needs > 0) && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
           {quiet && !plan.length && member.lastAt && <span className="member-time" title={ago(member.lastAt)}>{shortSince(member.lastAt, Date.now())}</span>}
           {!uncertain && needs > 0 && <time className="member-time attention" title={ago(waitingOn[0].since)}>{[actionWord(waitingOn[0].action), shortSince(waitingOn[0].since, Date.now())].filter(Boolean).join(" · ")}</time>}
-          {running && <RowElapsed agentId={agent.id} since={turn?.since} at={turn?.at} items={turn?.items ?? []} />}
+          {turnRunning && <RowElapsed agentId={agent.id} since={turn?.since} at={turn?.at} items={turn?.items ?? []} />}
+          {!turnRunning && hasBgJob && <span className="member-status">后台</span>}
           {uncertain && <span className="member-status quiet">{status}</span>}
         </span>
       }
