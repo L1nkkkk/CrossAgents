@@ -121,13 +121,25 @@ pub enum WindowAction {
 
 #[tauri::command]
 pub fn window_command(
+    app: AppHandle,
     window: Window,
     webview: Webview,
     zoom: State<'_, Zoom>,
     action: WindowAction,
 ) -> Result<(), String> {
     let result = match action {
-        WindowAction::Drag => window.start_dragging(),
+        WindowAction::Drag => {
+            let custom_drag = {
+                let state = app.state::<WindowModeState>();
+                let inner = state.inner.lock().expect("window mode state");
+                matches!(inner.prefs.mode, WindowMode::Classic | WindowMode::Mini)
+            };
+            if custom_drag && start_custom_drag_win(&app, &window) {
+                Ok(())
+            } else {
+                window.start_dragging()
+            }
+        }
         WindowAction::Minimize => window.minimize(),
         WindowAction::Maximize => window.is_maximized().and_then(|max| {
             if max {
@@ -528,6 +540,9 @@ impl StoredModePrefs {
 pub struct WindowModeState {
     inner: Mutex<WindowModeInner>,
     wake: std::sync::Arc<tokio::sync::Notify>,
+    anim_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    dragging: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    drag_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Default)]
@@ -622,7 +637,9 @@ fn default_bounds_for(window: &Window, mode: WindowMode, mini_collapsed: bool, m
             let w = 368.0;
             let h = 780.0_f64.min((work_h - 80.0).max(520.0));
             (
-                LogicalPosition::new((work_x + work_w - w - 16.0).max(work_x), work_y + 38.0),
+                // Leave a comfortable gap (> snap threshold) on initial open so Classic
+                // only docks when the user intentionally drags it to a screen edge.
+                LogicalPosition::new((work_x + work_w - w - 40.0).max(work_x), work_y + 40.0),
                 LogicalSize::new(w, h),
             )
         }
@@ -853,38 +870,239 @@ fn set_window_pos_no_activate(window: &Window, x: i32, y: i32, topmost: Option<b
     }
 }
 
+/// Enforces the OS-level topmost z-order directly (in addition to Tauri's cached state) so
+/// edge-docking's `HWND_TOPMOST` can never leave Efficiency or undocked Classic stuck on top.
+fn apply_topmost_native(window: &Window, enabled: bool) -> Result<(), String> {
+    let _ = window.set_always_on_top(enabled);
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+            SWP_NOSIZE, SetWindowPos,
+        };
+        let raw = window.hwnd().map_err(|err| err.to_string())?;
+        let hwnd = HWND(raw.0 as *mut _);
+        let z = if enabled { HWND_TOPMOST } else { HWND_NOTOPMOST };
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(z),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            )
+            .map_err(|err| err.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(not(windows))]
 fn set_window_pos_no_activate(window: &Window, x: i32, y: i32, topmost: Option<bool>) {
     let _ = window.set_position(PhysicalPosition::new(x, y));
     if let Some(top) = topmost {
-        let _ = window.set_always_on_top(top);
+        let _ = apply_topmost_native(window, top);
     }
 }
 
-/// Slides the window smoothly from `(from_x, from_y)` to `(to_x, to_y)` using a 60fps cubic
-/// ease-out curve without stealing focus from games or other active applications.
-async fn slide_window_no_activate(
+/// Starts a smooth DWM-VSync custom drag loop on Windows for Classic / Mini modes.
+/// Bypassing `WM_SYSCOMMAND(SC_MOVE)` completely eliminates Windows Aero Snap half-screen
+/// deformation previews when dragging Classic close to the monitor border.
+#[cfg(windows)]
+fn start_custom_drag_win(app: &AppHandle, window: &Window) -> bool {
+    use std::sync::atomic::Ordering;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::DwmFlush;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    };
+
+    let (Some((start_cx, start_cy)), Some(win_rect), Ok(raw_hwnd)) =
+        (cursor_pos_px(), window_rect_px(window), window.hwnd())
+    else {
+        return false;
+    };
+    let state = app.state::<WindowModeState>();
+    if state.dragging.swap(true, Ordering::SeqCst) {
+        return true;
+    }
+    // Cancel any in-flight drawer slide immediately.
+    state.anim_gen.fetch_add(1, Ordering::SeqCst);
+    let dragging = state.dragging.clone();
+    let drag_ended = state.drag_ended.clone();
+    let wake = state.wake.clone();
+    let hwnd_raw = raw_hwnd.0 as isize;
+    let start_wx = win_rect.left;
+    let start_wy = win_rect.top;
+
+    std::thread::spawn(move || {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        let mut last = (start_wx, start_wy);
+        while left_mouse_down() {
+            if let Some((cx, cy)) = cursor_pos_px() {
+                let nx = start_wx + (cx - start_cx);
+                let ny = start_wy + (cy - start_cy);
+                if (nx, ny) != last {
+                    last = (nx, ny);
+                    unsafe {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            nx,
+                            ny,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                        );
+                    }
+                }
+            }
+            unsafe {
+                if DwmFlush().is_err() {
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+            }
+        }
+        dragging.store(false, Ordering::SeqCst);
+        drag_ended.store(true, Ordering::SeqCst);
+        wake.notify_one();
+    });
+    true
+}
+
+#[cfg(not(windows))]
+fn start_custom_drag_win(_app: &AppHandle, _window: &Window) -> bool {
+    false
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlideOutcome {
+    Completed,
+    Interrupted,
+}
+
+/// Slides the window smoothly from `from` to `to` locked to the monitor's native DWM VSync
+/// refresh rate (60Hz / 120Hz / 144Hz / 240Hz) using a quartic ease-out curve without stealing
+/// focus. If `abort_on_reenter` is true (during collapse), moving the mouse back onto the window
+/// interrupts immediately on the exact frame so the caller can smoothly glide it back open.
+async fn slide_window_vsync(
+    app: &AppHandle,
     window: &Window,
     from: (i32, i32),
     to: (i32, i32),
     topmost: Option<bool>,
-) {
+    duration_ms: u64,
+    abort_on_reenter: bool,
+) -> SlideOutcome {
+    use std::sync::atomic::Ordering;
+    let anim_gen = app.state::<WindowModeState>().anim_gen.clone();
+    let my_gen = anim_gen.fetch_add(1, Ordering::SeqCst) + 1;
+
     if (from.0 - to.0).abs() <= 2 && (from.1 - to.1).abs() <= 2 {
         set_window_pos_no_activate(window, to.0, to.1, topmost);
-        return;
+        return SlideOutcome::Completed;
     }
-    const STEPS: usize = 11;
-    for step in 1..=STEPS {
-        let t = step as f64 / STEPS as f64;
-        // Cubic ease-out: quick departure, gentle landing against the screen edge.
-        let eased = 1.0 - (1.0 - t).powi(3);
-        let x = from.0 + ((to.0 - from.0) as f64 * eased).round() as i32;
-        let y = from.1 + ((to.1 - from.1) as f64 * eased).round() as i32;
-        let z = if step == 1 { topmost } else { None };
-        set_window_pos_no_activate(window, x, y, z);
-        if step < STEPS {
-            tokio::time::sleep(Duration::from_millis(14)).await;
-        }
+
+    #[cfg(windows)]
+    {
+        let Ok(raw_hwnd) = window.hwnd() else {
+            return SlideOutcome::Interrupted;
+        };
+        let hwnd_raw = raw_hwnd.0 as isize;
+        let win_size = window_rect_px(window)
+            .map(|r| (r.width(), r.height()))
+            .unwrap_or((368, 760));
+        let duration = Duration::from_millis(duration_ms.max(60));
+        tokio::task::spawn_blocking(move || {
+            use std::time::Instant;
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::Graphics::Dwm::DwmFlush;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+                SWP_NOZORDER, SetWindowPos,
+            };
+
+            let hwnd = HWND(hwnd_raw as *mut _);
+            let start = Instant::now();
+            let mut applied_z = false;
+
+            loop {
+                if anim_gen.load(Ordering::SeqCst) != my_gen {
+                    return SlideOutcome::Interrupted;
+                }
+                let t = (start.elapsed().as_secs_f64() / duration.as_secs_f64()).clamp(0.0, 1.0);
+                // Quartic ease-out: crisp launch, silky glide into the screen edge.
+                let eased = 1.0 - (1.0 - t).powi(4);
+                let x = from.0 + ((to.0 - from.0) as f64 * eased).round() as i32;
+                let y = from.1 + ((to.1 - from.1) as f64 * eased).round() as i32;
+
+                if abort_on_reenter {
+                    if left_mouse_down() {
+                        return SlideOutcome::Interrupted;
+                    }
+                    if let Some((cx, cy)) = cursor_pos_px() {
+                        let cur_rect = PxRect {
+                            left: x,
+                            top: y,
+                            right: x + win_size.0,
+                            bottom: y + win_size.1,
+                        };
+                        if cur_rect.contains(cx, cy, 4) {
+                            return SlideOutcome::Interrupted;
+                        }
+                    }
+                }
+
+                let (insert_after, flags) = if !applied_z {
+                    applied_z = true;
+                    match topmost {
+                        Some(true) => (
+                            Some(HWND_TOPMOST),
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                        ),
+                        Some(false) => (
+                            Some(HWND_NOTOPMOST),
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                        ),
+                        None => (
+                            None,
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+                        ),
+                    }
+                } else {
+                    (
+                        None,
+                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+                    )
+                };
+
+                unsafe {
+                    let _ = SetWindowPos(hwnd, insert_after, x, y, 0, 0, flags);
+                }
+
+                if t >= 1.0 {
+                    return SlideOutcome::Completed;
+                }
+
+                unsafe {
+                    if DwmFlush().is_err() {
+                        std::thread::sleep(Duration::from_millis(8));
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or(SlideOutcome::Interrupted)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (duration_ms, abort_on_reenter, my_gen);
+        set_window_pos_no_activate(window, to.0, to.1, topmost);
+        SlideOutcome::Completed
     }
 }
 
@@ -901,10 +1119,12 @@ fn notify_snapshot(app: &AppHandle) {
 
 /// Immediately restores a tucked-in Classic window back onto the visible work area.
 fn reveal_docked_sync(app: &AppHandle, clear_dock: bool) {
+    use std::sync::atomic::Ordering;
     let Some(window) = app.get_window("main") else {
         return;
     };
     let state = app.state::<WindowModeState>();
+    state.anim_gen.fetch_add(1, Ordering::SeqCst);
     let (restore_pos, restore_topmost, changed) = {
         let mut inner = state.inner.lock().expect("window mode state");
         let was_hidden = inner.dock_hidden;
@@ -931,7 +1151,7 @@ fn reveal_docked_sync(app: &AppHandle, clear_dock: bool) {
     if let Some((x, y)) = restore_pos {
         set_window_pos_no_activate(&window, x, y, restore_topmost);
     } else if let Some(top) = restore_topmost {
-        let _ = window.set_always_on_top(top);
+        let _ = apply_topmost_native(&window, top);
     }
     if changed {
         notify_snapshot(app);
@@ -939,8 +1159,8 @@ fn reveal_docked_sync(app: &AppHandle, clear_dock: bool) {
 }
 
 /// Spawns the background watcher that powers classic QQ-style screen-edge snapping and smooth
-/// auto-hide drawer reveal/collapse. Sleeps completely idle unless Classic mode + edge-dock
-/// are both active.
+/// DWM-VSync auto-hide drawer reveal/collapse. Sleeps completely idle unless Classic mode +
+/// edge-dock are both active.
 pub fn start_edge_dock_watcher(app: &AppHandle) {
     #[cfg(not(windows))]
     {
@@ -951,8 +1171,12 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
     {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
+            use std::sync::atomic::Ordering;
             use std::time::Instant;
-            let wake = app.state::<WindowModeState>().wake.clone();
+            let state_ref = app.state::<WindowModeState>();
+            let wake = state_ref.wake.clone();
+            let dragging_flag = state_ref.dragging.clone();
+            let drag_ended_flag = state_ref.drag_ended.clone();
             let mut was_dragging = false;
             let mut hover_reveal_since: Option<Instant> = None;
             let mut outside_hide_since: Option<Instant> = None;
@@ -978,7 +1202,7 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
                     continue;
                 }
 
-                tokio::time::sleep(Duration::from_millis(36)).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
 
                 let Some(window) = app.get_window("main") else {
                     continue;
@@ -988,18 +1212,24 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
                     outside_hide_since = None;
                     continue;
                 }
+                if dragging_flag.load(Ordering::SeqCst) {
+                    was_dragging = true;
+                    hover_reveal_since = None;
+                    outside_hide_since = None;
+                    continue;
+                }
+
                 let (Some(win_rect), Some(work), Some((cx, cy))) =
                     (window_rect_px(&window), monitor_work_area(&window), cursor_pos_px())
                 else {
                     continue;
                 };
                 let scale = window.scale_factor().unwrap_or(1.0);
-                let snap_px = (16.0 * scale).round() as i32;
-                let detach_px = (26.0 * scale).round() as i32;
+                let snap_px = (18.0 * scale).round() as i32;
+                let detach_px = (28.0 * scale).round() as i32;
                 let peek_px = (6.0 * scale).round() as i32;
                 let lbtn = left_mouse_down();
 
-                // While the person is dragging, never yank the window away.
                 if lbtn {
                     if win_rect.contains(cx, cy, 24) {
                         was_dragging = true;
@@ -1009,9 +1239,8 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
                     continue;
                 }
 
-                // Drag just finished (or initial Classic placement): check whether we snapped to
-                // a screen edge or pulled away into open space.
-                if was_dragging || docked_edge == DockEdge::None {
+                let finished_custom_drag = drag_ended_flag.swap(false, Ordering::SeqCst);
+                if finished_custom_drag || was_dragging || docked_edge == DockEdge::None {
                     was_dragging = false;
                     let snapped = compute_snap_edge(win_rect, work, snap_px);
                     if snapped != DockEdge::None && !dock_hidden {
@@ -1019,11 +1248,14 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
                         if (win_rect.left - expanded.0).abs() > 1
                             || (win_rect.top - expanded.1).abs() > 1
                         {
-                            slide_window_no_activate(
+                            let _ = slide_window_vsync(
+                                &app,
                                 &window,
                                 (win_rect.left, win_rect.top),
                                 expanded,
                                 Some(true),
+                                130,
+                                false,
                             )
                             .await;
                         } else {
@@ -1048,7 +1280,6 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
                         && !dock_hidden
                         && compute_snap_edge(win_rect, work, detach_px) == DockEdge::None
                     {
-                        // User dragged it back away from the screen edge -> undock cleanly.
                         {
                             let state = app.state::<WindowModeState>();
                             let mut inner = state.inner.lock().expect("window mode state");
@@ -1056,7 +1287,7 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
                             inner.dock_hidden = false;
                             inner.dock_visible_pos = None;
                         }
-                        let _ = window.set_always_on_top(pref_topmost);
+                        let _ = apply_topmost_native(&window, pref_topmost);
                         notify_snapshot(&app);
                         outside_hide_since = None;
                         hover_reveal_since = None;
@@ -1070,12 +1301,11 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
 
                 if dock_hidden {
                     outside_hide_since = None;
-                    // Check if cursor is resting on the exposed 6px edge peek strip.
                     let on_strip = win_rect.contains(cx, cy, 4);
                     if on_strip {
                         let start = *hover_reveal_since.get_or_insert_with(Instant::now);
-                        // 160ms anti-accidental-brush hover dwell before sliding out.
-                        if start.elapsed() >= Duration::from_millis(160) {
+                        // 130ms anti-accidental-brush hover dwell before sliding out.
+                        if start.elapsed() >= Duration::from_millis(130) {
                             let (expanded, _) =
                                 compute_dock_positions(win_rect, work, docked_edge, peek_px);
                             {
@@ -1084,12 +1314,16 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
                                 inner.dock_hidden = false;
                                 inner.dock_visible_pos = Some(expanded);
                             }
+                            // Paint real UI immediately, then glide into view at monitor refresh rate.
                             notify_snapshot(&app);
-                            slide_window_no_activate(
+                            let _ = slide_window_vsync(
+                                &app,
                                 &window,
                                 (win_rect.left, win_rect.top),
                                 expanded,
                                 Some(true),
+                                190,
+                                false,
                             )
                             .await;
                             hover_reveal_since = None;
@@ -1099,30 +1333,49 @@ pub fn start_edge_dock_watcher(app: &AppHandle) {
                     }
                 } else {
                     hover_reveal_since = None;
-                    // Keep expanded if cursor is inside window or user is actively typing.
                     let inside = win_rect.contains(cx, cy, 8);
                     if inside || dock_hold {
                         outside_hide_since = None;
                     } else {
                         let start = *outside_hide_since.get_or_insert_with(Instant::now);
-                        // 360ms grace delay before smoothly gliding back into the screen edge.
-                        if start.elapsed() >= Duration::from_millis(360) {
+                        // 340ms grace delay before smoothly gliding back into the screen edge.
+                        if start.elapsed() >= Duration::from_millis(340) {
                             let (expanded, hidden) =
                                 compute_dock_positions(win_rect, work, docked_edge, peek_px);
-                            {
-                                let state = app.state::<WindowModeState>();
-                                let mut inner = state.inner.lock().expect("window mode state");
-                                inner.dock_visible_pos = Some(expanded);
-                                inner.dock_hidden = true;
-                            }
-                            notify_snapshot(&app);
-                            slide_window_no_activate(
+                            // Slide FIRST without triggering a React DOM repaint mid-animation!
+                            let outcome = slide_window_vsync(
+                                &app,
                                 &window,
                                 (win_rect.left, win_rect.top),
                                 hidden,
                                 Some(true),
+                                190,
+                                true,
                             )
                             .await;
+                            if outcome == SlideOutcome::Completed {
+                                {
+                                    let state = app.state::<WindowModeState>();
+                                    let mut inner = state.inner.lock().expect("window mode state");
+                                    inner.dock_visible_pos = Some(expanded);
+                                    inner.dock_hidden = true;
+                                }
+                                notify_snapshot(&app);
+                            } else if let Some(cur) = window_rect_px(&window)
+                                && !dragging_flag.load(Ordering::SeqCst)
+                            {
+                                // Cursor re-entered mid-collapse: immediately glide back open!
+                                let _ = slide_window_vsync(
+                                    &app,
+                                    &window,
+                                    (cur.left, cur.top),
+                                    expanded,
+                                    Some(true),
+                                    140,
+                                    false,
+                                )
+                                .await;
+                            }
                             outside_hide_since = None;
                         }
                     }
@@ -1220,7 +1473,8 @@ pub fn apply_window_mode(app: &AppHandle, next_mode: WindowMode) -> Result<Windo
         }
     }
 
-    let _ = window.set_always_on_top(snapshot.always_on_top);
+    let _ = window.set_maximizable(next_mode == WindowMode::Efficiency);
+    let _ = apply_topmost_native(&window, snapshot.always_on_top);
     let _ = apply_opacity_native(&window, snapshot.opacity);
     state.wake.notify_one();
     if let Some(channel) = listener {
@@ -1232,9 +1486,15 @@ pub fn apply_window_mode(app: &AppHandle, next_mode: WindowMode) -> Result<Windo
 #[tauri::command]
 pub fn window_mode_get(app: AppHandle) -> Result<WindowModeSnapshot, String> {
     let state = app.state::<WindowModeState>();
-    let mut inner = state.inner.lock().expect("window mode state");
-    load_prefs(&app, &mut inner);
-    Ok(inner.snapshot())
+    let snapshot = {
+        let mut inner = state.inner.lock().expect("window mode state");
+        load_prefs(&app, &mut inner);
+        inner.snapshot()
+    };
+    if let Some(window) = app.get_window("main") {
+        let _ = apply_topmost_native(&window, snapshot.always_on_top);
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -1276,9 +1536,7 @@ pub fn window_always_on_top(
         save_prefs(&app, &inner.prefs);
         inner.snapshot()
     };
-    window
-        .set_always_on_top(enabled)
-        .map_err(|err| err.to_string())?;
+    apply_topmost_native(&window, enabled)?;
     Ok(WindowModeSnapshot {
         always_on_top: enabled,
         ..snapshot
@@ -1395,6 +1653,17 @@ pub async fn window_dock_now(
         return window_mode_get(app);
     }
     let (expanded, hidden) = compute_dock_positions(win_rect, work, target_edge, peek_px);
+    // Glide smoothly into the edge BEFORE flipping React to the 6px peek strip!
+    let _ = slide_window_vsync(
+        &app,
+        &window,
+        (win_rect.left, win_rect.top),
+        hidden,
+        Some(true),
+        190,
+        false,
+    )
+    .await;
     let state = app.state::<WindowModeState>();
     let snapshot = {
         let mut inner = state.inner.lock().expect("window mode state");
@@ -1407,7 +1676,6 @@ pub async fn window_dock_now(
         inner.snapshot()
     };
     notify_snapshot(&app);
-    slide_window_no_activate(&window, (win_rect.left, win_rect.top), hidden, Some(true)).await;
     state.wake.notify_one();
     Ok(snapshot)
 }

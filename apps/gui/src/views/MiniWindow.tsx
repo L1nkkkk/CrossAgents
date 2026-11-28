@@ -8,6 +8,7 @@ import { useMemo, type MouseEvent as ReactMouseEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import { Check, ChevronDown, ChevronUp, Eye, Maximize2, PanelRight, Pin } from "lucide-react";
 import { deliveryOf, lastError, markSeen, useActivity, useDelivery, useUnread } from "../activity";
+import { agentHasRunningJobs, useAgentRunningJobs, useRunningJobs } from "../jobs";
 import { navigate, useRunTree } from "../App";
 import { Avatar, BrandMark, ModelMark, displayName, useAgents } from "../components";
 import { CENTRE_MACHINE, agentMachine, shortSince, summaryText } from "../lib/sidebarTree";
@@ -38,9 +39,10 @@ export function MiniWindow() {
   const tree = useRunTree();
   const questions = useQuestions();
   const unread = useUnread();
+  const runningJobs = useRunningJobs();
 
   const agents = useMemo(() => (agentsData.data ?? []).filter((a) => !a.archived_at), [agentsData.data]);
-  const remoteNodes = nodesData.data ?? [];
+  const remoteNodes = useMemo(() => (nodesData.data ?? []).filter((n) => !n.local), [nodesData.data]);
   const nodeMetaMap = useMemo(() => {
     const map = new Map<string, NodeMeta>();
     for (const n of remoteNodes) {
@@ -61,14 +63,15 @@ export function MiniWindow() {
   );
 
   const isRunning = (a: Agent) => {
+    if (agentHasRunningJobs(a.id)) return true;
     const d = deliveryOf(a.id)?.state;
     return d ? d !== "idle" : a.status === "running";
   };
 
-  const running = useMemo(() => agents.filter(isRunning), [agents, unread]);
+  const running = useMemo(() => agents.filter(isRunning), [agents, unread, runningJobs]);
   const doneUnread = useMemo(
     () => agents.filter((a) => !isRunning(a) && (unread[a.id]?.kind === "done" || unread[a.id]?.kind === "error")),
-    [agents, unread],
+    [agents, unread, runningJobs],
   );
   const recentIdle = useMemo(
     () =>
@@ -358,6 +361,7 @@ function MiniAgentRow({
 }) {
   const delivery = useDelivery(agent.id);
   const doing = useActivity(agent.id);
+  const bgJobs = useAgentRunningJobs(agent.id);
   const turn = useRowLive(agent);
   const newest = turn?.items.at(-1);
   const step = kind === "running" && newest?.type === "tool_call" ? stepLine(newest) : "";
@@ -365,7 +369,12 @@ function MiniAgentRow({
   const line = isError
     ? lastError(agent.id) || "运行出错"
     : kind === "running"
-      ? step || summaryText(doing) || summaryText(agent.topic) || "正在运行…"
+      ? (delivery?.state === "turn" ? step || summaryText(doing) : undefined) ||
+        (bgJobs.length > 0 ? `后台运行 · ${bgJobs[0].label}` : undefined) ||
+        step ||
+        summaryText(doing) ||
+        summaryText(agent.topic) ||
+        "正在运行…"
       : summaryText(agent.topic) || "本轮已完成";
 
   return (
@@ -383,6 +392,8 @@ function MiniAgentRow({
             <span className="spacer" />
             {kind === "running" && delivery?.state === "turn" ? (
               <RowElapsed agentId={agent.id} since={turn?.since} at={turn?.at} items={turn?.items ?? []} />
+            ) : kind === "running" && bgJobs.length > 0 ? (
+              <span className="mini-tag live">后台</span>
             ) : (
               <span className={`mini-tag ${isError ? "danger" : "ok"}`}>{isError ? "出错" : "完成"}</span>
             )}

@@ -42,8 +42,8 @@ export function OsIcon({ os, size = 14 }: { os?: string; size?: number }) {
       {kind === "linux" && (
         <>
           <path d="M8 1.5c-1.7 0-2.6 1.4-2.6 3.1 0 1.2-.4 1.9-1.1 3.1-.8 1.4-1.3 2.9-.8 4.1.5 1 1.8.9 2.6 1.1.4.8 1.2 1.1 1.9 1.1s1.5-.3 1.9-1.1c.8-.2 2.1-.1 2.6-1.1.5-1.2 0-2.7-.8-4.1-.7-1.2-1.1-1.9-1.1-3.1 0-1.7-.9-3.1-2.6-3.1z" />
-          <circle cx="6.7" cy="4.4" r=".7" fill="var(--bg, #fff)" />
-          <circle cx="9.3" cy="4.4" r=".7" fill="var(--bg, #fff)" />
+          <circle cx="6.7" cy="4.4" r=".7" fill="var(--surface, #fff)" />
+          <circle cx="9.3" cy="4.4" r=".7" fill="var(--surface, #fff)" />
         </>
       )}
       {kind === "ios" && (
@@ -57,8 +57,8 @@ export function OsIcon({ os, size = 14 }: { os?: string; size?: number }) {
           <path d="M3.2 9.5a4.8 4.8 0 0 1 9.6 0z" />
           <rect x="3.2" y="10.2" width="9.6" height="4" rx="1.2" />
           <path d="M5 3.2 6.2 5M11 3.2 9.8 5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
-          <circle cx="6.2" cy="7.6" r=".6" fill="var(--bg, #fff)" />
-          <circle cx="9.8" cy="7.6" r=".6" fill="var(--bg, #fff)" />
+          <circle cx="6.2" cy="7.6" r=".6" fill="var(--surface, #fff)" />
+          <circle cx="9.8" cy="7.6" r=".6" fill="var(--surface, #fff)" />
         </>
       )}
       {kind === "other" && (

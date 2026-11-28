@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TranscriptItem } from "@bindings/TranscriptItem";
-import { QUIET_AFTER, actionOf, duration, liveActivity, liveKey, liveNow, liveProgress, quietLabel, quietSeconds, relativeTo, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
+import { QUIET_AFTER, actionOf, compressSteps, duration, liveActivity, liveKey, liveNow, liveProgress, quietLabel, quietSeconds, relativeTo, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
 
 const tool = (kind: string, status: "in_progress" | "completed" | "failed" = "completed", title = kind): TranscriptItem => ({
   type: "tool_call",
@@ -180,4 +180,56 @@ test("the live key changes only when the turn produced something", () => {
   assert.notEqual(liveKey([call]), liveKey([call, { ...call, tool_call_id: "run-2" }]));
   assert.notEqual(liveKey([text("ab")]), liveKey([text("abc")]));
   assert.notEqual(liveKey([text("ab")]), liveKey([thought("ab")]));
+});
+
+test("compressSteps merges consecutive same-target calls and read/search bursts without hiding failures", () => {
+  const timed = (kind: string, title: string, ms: number, status: "in_progress" | "completed" | "failed" = "completed"): Step => ({
+    type: "tool_call",
+    tool_call_id: Math.random().toString(36),
+    title,
+    kind,
+    status,
+    detail: { duration_ms: ms, changes: [] },
+  });
+
+  // Repeated edits to the same file collapse into one same-target batch with summed duration.
+  const edits = compressSteps(
+    [
+      timed("edit", "Edit C:\\repo\\src\\desktop.rs", 11_000),
+      timed("edit", "Edit C:\\repo\\src\\desktop.rs", 2_000),
+      timed("execute", "cargo test", 11_000),
+    ],
+    "C:\\repo",
+  );
+  assert.equal(edits.length, 2);
+  assert.equal(edits[0].kind, "batch");
+  if (edits[0].kind === "batch") {
+    assert.equal(edits[0].mode, "same");
+    assert.equal(edits[0].label, "✎ src/desktop.rs");
+    assert.equal(edits[0].steps.length, 2);
+    assert.equal(edits[0].durationMs, 13_000);
+    assert.equal(edits[0].running, false);
+    assert.equal(edits[0].failedCount, 0);
+  }
+  assert.equal(edits[1].kind, "single");
+
+  // Consecutive reads across >=3 files collapse into a group batch, while a failed read stays visible.
+  const reads = compressSteps(
+    [
+      timed("read", "Read /w/a.ts", 200),
+      timed("read", "Read /w/b.ts", 300),
+      timed("read", "Read /w/c.ts", 400),
+      timed("read", "Read /w/missing.ts", 100, "failed"),
+    ],
+    "/w",
+  );
+  assert.equal(reads.length, 2);
+  assert.equal(reads[0].kind, "batch");
+  if (reads[0].kind === "batch") {
+    assert.equal(reads[0].mode, "group");
+    assert.equal(reads[0].steps.length, 3);
+    assert.equal(reads[0].durationMs, 900);
+    assert.match(reads[0].label, /^读取 3 个文件 · a\.ts、b\.ts 等$/);
+  }
+  assert.equal(reads[1].kind, "single");
 });

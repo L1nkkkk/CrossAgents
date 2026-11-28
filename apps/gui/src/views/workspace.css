@@ -131,7 +131,7 @@
   flex: none;
   padding: 0 6px;
   border-radius: 9px;
-  background: var(--muted-bg, var(--hover));
+  background: var(--hover);
   color: var(--muted);
   font-size: 11px;
   line-height: 17px;

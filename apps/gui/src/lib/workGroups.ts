@@ -83,7 +83,23 @@ export function workGroups(items: TranscriptItem[], isOwnItem: (item: Transcript
   return blocks;
 }
 
-type Category = "command" | "edit" | "read" | "search" | "thought" | "tool" | "permission";
+export type Category = "command" | "edit" | "read" | "search" | "thought" | "tool" | "permission";
+
+export type ToolCallStep = Extract<Step, { type: "tool_call" }>;
+
+export type CompressedStep =
+  | { kind: "single"; step: Step }
+  | {
+      kind: "batch";
+      /** "same": consecutive calls on the exact same target; "group": consecutive reads or searches across targets. */
+      mode: "same" | "group";
+      category: Category;
+      label: string;
+      steps: ToolCallStep[];
+      durationMs?: number;
+      running: boolean;
+      failedCount: number;
+    };
 
 function category(step: Step): Category {
   if (step.type === "output") return "thought";
@@ -284,4 +300,155 @@ export function duration(ms: number): string {
   const m = Math.floor(secs / 60);
   if (m < 60) return `${m}m ${String(secs % 60).padStart(2, "0")}s`;
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+function sumDuration(steps: ToolCallStep[]): number | undefined {
+  let total = 0;
+  let any = false;
+  for (const s of steps) {
+    if (s.detail?.duration_ms != null) {
+      total += s.detail.duration_ms;
+      any = true;
+    }
+  }
+  return any ? total : undefined;
+}
+
+function isRunningCall(step: ToolCallStep): boolean {
+  return step.status === "in_progress" || step.status === "pending";
+}
+
+function shortTargetName(step: ToolCallStep, cwd?: string): string {
+  const line = stepLine(step, cwd)
+    .replace(/^(?:Read|View|List|Search|Grep|Find|✎|\$)\s+/i, "")
+    .trim();
+  const parts = line.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? line;
+}
+
+function groupBatchLabel(cat: Category, steps: ToolCallStep[], cwd?: string): string {
+  if (cat === "read") {
+    const names: string[] = [];
+    const seen = new Set<string>();
+    for (const s of steps) {
+      const target = stepLine(s, cwd);
+      if (seen.has(target)) continue;
+      seen.add(target);
+      names.push(shortTargetName(s, cwd));
+    }
+    const preview = names.slice(0, 2).join("、") + (names.length > 2 ? " 等" : "");
+    const count = seen.size === steps.length ? `${seen.size} 个文件` : `${seen.size} 个文件（${steps.length} 次）`;
+    return preview ? `读取 ${count} · ${preview}` : `读取 ${count}`;
+  }
+  if (cat === "search") {
+    return `搜索 ${steps.length} 次`;
+  }
+  return `${steps.length} 个步骤`;
+}
+
+function makeBatch(
+  mode: "same" | "group",
+  cat: Category,
+  label: string,
+  steps: ToolCallStep[],
+): Extract<CompressedStep, { kind: "batch" }> {
+  return {
+    kind: "batch",
+    mode,
+    category: cat,
+    label,
+    steps,
+    durationMs: sumDuration(steps),
+    running: steps.some(isRunningCall),
+    failedCount: steps.filter(failed).length,
+  };
+}
+
+/**
+ * Compresses consecutive redundant/batched tool steps into expandable rows:
+ * 1. Two or more consecutive tool calls with the same category, target line, and pass/fail state
+ *    collapse into a single row (`✎ desktop.rs ×6`) so repeated edits/reads never spam the feed.
+ * 2. Three or more consecutive passing `read` or `search` steps across multiple targets collapse
+ *    into a single batch row (`读取 5 个文件 · Session.tsx、workGroups.ts 等`).
+ * Failed steps never merge into passing batches so errors stay visible.
+ */
+export function compressSteps(steps: Step[], cwd?: string): CompressedStep[] {
+  // Pass 1: collapse consecutive identical-target tool calls.
+  const pass1: CompressedStep[] = [];
+  let i = 0;
+  while (i < steps.length) {
+    const cur = steps[i];
+    if (cur.type !== "tool_call") {
+      pass1.push({ kind: "single", step: cur });
+      i++;
+      continue;
+    }
+    const cat = category(cur);
+    const line = stepLine(cur, cwd);
+    const bad = failed(cur);
+    const run: ToolCallStep[] = [cur];
+    let j = i + 1;
+    while (j < steps.length) {
+      const next = steps[j];
+      if (
+        next.type === "tool_call" &&
+        category(next) === cat &&
+        failed(next) === bad &&
+        stepLine(next, cwd) === line
+      ) {
+        run.push(next);
+        j++;
+      } else {
+        break;
+      }
+    }
+    if (run.length >= 2) {
+      pass1.push(makeBatch("same", cat, line, run));
+    } else {
+      pass1.push({ kind: "single", step: cur });
+    }
+    i = j;
+  }
+
+  // Pass 2: collapse consecutive passing read/search bursts (>= 3 total calls across >= 2 entries).
+  const out: CompressedStep[] = [];
+  let k = 0;
+  while (k < pass1.length) {
+    const entry = pass1[k];
+    const groupCat = entryGroupCategory(entry);
+    if (!groupCat) {
+      out.push(entry);
+      k++;
+      continue;
+    }
+    const entries: CompressedStep[] = [entry];
+    let m = k + 1;
+    while (m < pass1.length && entryGroupCategory(pass1[m]) === groupCat) {
+      entries.push(pass1[m]);
+      m++;
+    }
+    const calls = entries.flatMap(entryToolCalls);
+    if (entries.length >= 2 && calls.length >= 3) {
+      out.push(makeBatch("group", groupCat, groupBatchLabel(groupCat, calls, cwd), calls));
+    } else {
+      out.push(...entries);
+    }
+    k = m;
+  }
+  return out;
+}
+
+function entryGroupCategory(entry: CompressedStep): "read" | "search" | undefined {
+  if (entry.kind === "single") {
+    if (entry.step.type !== "tool_call" || failed(entry.step)) return undefined;
+    const c = category(entry.step);
+    return c === "read" || c === "search" ? c : undefined;
+  }
+  if (entry.failedCount > 0) return undefined;
+  return entry.category === "read" || entry.category === "search" ? entry.category : undefined;
+}
+
+function entryToolCalls(entry: CompressedStep): ToolCallStep[] {
+  if (entry.kind === "batch") return entry.steps;
+  return entry.step.type === "tool_call" ? [entry.step] : [];
 }

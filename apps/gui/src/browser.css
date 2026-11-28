@@ -92,7 +92,7 @@
 
 .web-box { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--surface); }
 .web-box .native-webview { flex: 1; min-height: 0; }
-.web-session-transfer { padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.web-session-transfer { padding: 4px 8px; border-bottom: 1px solid var(--border); }
 .web-session-transfer .row { flex-wrap: wrap; }
 /* A tab's host element waiting while its tab is not visible in any dock. */
 #web-vault {

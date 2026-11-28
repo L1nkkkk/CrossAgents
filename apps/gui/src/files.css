@@ -265,7 +265,7 @@ button.file-link.code:hover { background: color-mix(in srgb, var(--accent) 18%, 
 .fp-crumb-actions { flex: none; display: flex; align-items: center; gap: 2px; }
 
 /* The whole-workspace name filter above the tree. */
-.fp-filter { flex: none; display: flex; align-items: center; gap: 6px; margin: 6px 8px; padding: 3px 5px 3px 7px; border: 1px solid var(--border); border-radius: var(--radius-md, 7px); background: var(--surface); color: var(--muted); }
+.fp-filter { flex: none; display: flex; align-items: center; gap: 6px; margin: 6px 8px; padding: 3px 5px 3px 7px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--muted); }
 .fp-filter:focus-within { border-color: var(--accent); }
 .fp-filter input { flex: 1; min-width: 0; padding: 2px 0; border: 0; outline: none; background: none; color: var(--text); font: inherit; font-size: 12px; }
 .fp-filter .ghost.icon { width: 20px; height: 20px; }

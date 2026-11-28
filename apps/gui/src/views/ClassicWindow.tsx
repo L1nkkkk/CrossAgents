@@ -1,9 +1,11 @@
 // QQ-style Classic Narrow Panel mode:
 // - Compact vertical floating panel (~368x780) with classic QQ-style left rail + live session list
-// - Full multi-node distinction: local machine + remote nodes (OS icon, online status, node filter
-//   pills, collapsible node sections, per-row remote node badges, node-aware quick launch)
-// - Native Windows screen-edge magnetic snapping & smooth auto-hide drawer (with glowing 6px edge
-//   status peek strip that slides open on hover without stealing game focus)
+// - Creative zero-truncation multi-node UI:
+//   1. Top compact Node Scope Trigger + floating glass Popover (full hostnames, OS icons, status,
+//      running counts, per-node quick launch) — zero horizontal overflow
+//   2. Left QQ rail vertical Node Icon Dock (Discord/Arc style OS icon tiles with live status dot
+//      & running badge for 1-click machine switching)
+// - Native Windows DWM-VSync screen-edge snapping & smooth drawer auto-hide (zero Aero Snap)
 
 import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { Agent } from "@bindings/Agent";
@@ -12,11 +14,13 @@ import type { RemoteNodeInfo } from "@bindings/RemoteNodeInfo";
 import {
   ArrowLeft,
   Bell,
+  Check,
   CheckCheck,
   ChevronDown,
   ChevronRight,
   Eye,
   FolderKanban,
+  Globe,
   Magnet,
   Maximize2,
   MessageSquare,
@@ -28,6 +32,7 @@ import {
   Zap,
 } from "lucide-react";
 import { deliveryOf, lastError, markAllSeen, useActivity, useDelivery, useUnread } from "../activity";
+import { agentHasRunningJobs, useAgentRunningJobs, useRunningJobs } from "../jobs";
 import { navigate, useRunTree } from "../App";
 import { api, errorText } from "../api";
 import { ChatAvatar } from "../ChatAvatar";
@@ -63,6 +68,7 @@ type ClassicTab = "all" | "needs" | "running" | "projects";
 type MachineSummary = {
   key: string;
   label: string;
+  subtitle?: string;
   os?: string;
   remote: boolean;
   online: boolean;
@@ -72,6 +78,16 @@ type MachineSummary = {
   node?: RemoteNodeInfo;
 };
 
+/** Friendly short name for the local centre machine (avoid ugly `DESKTOP-Q7A9...` truncation). */
+function localMachineLabel(hostname?: string | null): { label: string; subtitle?: string } {
+  const h = hostname?.trim();
+  if (!h) return { label: "本机" };
+  if (/^(?:DESKTOP|LAPTOP|WIN)-[A-Z0-9_-]{4,}$/i.test(h)) {
+    return { label: "本机", subtitle: h };
+  }
+  return { label: h };
+}
+
 export function ClassicWindow({ route }: { route: string[] }) {
   const wm = useWindowMode();
   const agentsData = useAgents();
@@ -79,6 +95,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
   const questions = useQuestions();
   const nodesData = useNodes();
   const unread = useUnread();
+  const runningJobs = useRunningJobs();
   const status = useConnectionStatus();
   const profile = useChatProfile();
 
@@ -89,6 +106,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
 
   const [tab, setTab] = useState<ClassicTab>("all");
   const [selectedNode, setSelectedNode] = useState<string>("all");
+  const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [foldedNodes, setFoldedNodes] = useState<Set<string>>(() => new Set());
   const [todosFolded, setTodosFolded] = useState(false);
@@ -102,7 +120,11 @@ export function ClassicWindow({ route }: { route: string[] }) {
 
   const quickPlugins = useNodePlugins(quickNode);
   const agents = useMemo(() => (agentsData.data ?? []).filter((a) => !a.archived_at), [agentsData.data]);
-  const remoteNodes = nodesData.data ?? [];
+  // Filter out the built-in `local` entry so the centre machine is never duplicated.
+  const remoteNodes = useMemo(
+    () => (nodesData.data ?? []).filter((n) => !n.local && n.id.toLowerCase() !== "local" && n.id !== CENTRE_MACHINE),
+    [nodesData.data],
+  );
   const remoteNodeMap = useMemo(() => new Map(remoteNodes.map((n) => [n.id, n])), [remoteNodes]);
   const runs = tree.data ?? [];
   const todos = useMemo(
@@ -112,14 +134,15 @@ export function ClassicWindow({ route }: { route: string[] }) {
   const todoIdSet = useMemo(() => new Set(todos.map((t) => t.agent)), [todos]);
 
   const isRunning = (a: Agent) => {
+    if (agentHasRunningJobs(a.id)) return true;
     const d = deliveryOf(a.id)?.state;
     return d ? d !== "idle" : a.status === "running";
   };
 
-  const runningAgents = useMemo(() => agents.filter(isRunning), [agents, unread]);
+  const runningAgents = useMemo(() => agents.filter(isRunning), [agents, unread, runningJobs]);
   const unreadCount = useMemo(() => Object.values(unread).filter((u) => u.kind === "done" || u.kind === "error").length, [unread]);
 
-  // All execution machines: centre first, then known remote nodes, then any historical node ids.
+  // All execution machines: centre first, then remote nodes, then any historical node ids.
   const machines = useMemo<MachineSummary[]>(() => {
     const order: string[] = [CENTRE_MACHINE];
     const seen = new Set<string>(order);
@@ -136,6 +159,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
         order.push(k);
       }
     }
+    const localName = localMachineLabel(hubInfo?.machine?.hostname);
     return order.map((key) => {
       const list = agents.filter((a) => agentMachine(a) === key);
       const node = key === CENTRE_MACHINE ? undefined : remoteNodeMap.get(key);
@@ -144,7 +168,8 @@ export function ClassicWindow({ route }: { route: string[] }) {
       const needs = list.filter((a) => todoIdSet.has(a.id) || a.status === "error").length;
       return {
         key,
-        label: remote ? node?.name || key : hubInfo?.machine?.hostname || "本机",
+        label: remote ? node?.name || key : localName.label,
+        subtitle: remote ? (node?.hostname && node.hostname !== node.name ? node.hostname : undefined) : localName.subtitle,
         os: remote ? normalizeNodeOs(node?.os) : normalizeNodeOs(hubInfo?.machine?.os),
         remote,
         online: remote ? Boolean(node?.online) : status === "connected",
@@ -154,11 +179,22 @@ export function ClassicWindow({ route }: { route: string[] }) {
         node,
       };
     });
-  }, [agents, remoteNodes, remoteNodeMap, todoIdSet, hubInfo?.machine?.hostname, hubInfo?.machine?.os, status, unread]);
+  }, [agents, remoteNodes, remoteNodeMap, todoIdSet, hubInfo?.machine?.hostname, hubInfo?.machine?.os, status, unread, runningJobs]);
 
   const machineMap = useMemo(() => new Map(machines.map((m) => [m.key, m])), [machines]);
   const hasMultipleNodes = machines.length > 1;
   const onlineRemoteCount = remoteNodes.filter((n) => n.online).length;
+  const selectedMachine = selectedNode === "all" ? undefined : machineMap.get(selectedNode);
+
+  // Close node popover on Escape.
+  useEffect(() => {
+    if (!nodeMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setNodeMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [nodeMenuOpen]);
 
   // Projects scoped by (machineKey, wsKey) so identical folder names across OSes never collide.
   const projects = useMemo(() => {
@@ -177,7 +213,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
       map.set(key, cur);
     }
     return [...map.values()].sort((a, b) => b.busy - a.busy || b.count - a.count || a.name.localeCompare(b.name));
-  }, [agents, selectedNode, unread]);
+  }, [agents, selectedNode, unread, runningJobs]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -197,7 +233,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
     if (q) {
       list = list.filter((a) => {
         const m = machineMap.get(agentMachine(a));
-        return [a.name, a.topic, a.model, m?.label, isChat(a) ? "独立对话" : wsName(homeOf(a))]
+        return [a.name, a.topic, a.model, m?.label, m?.subtitle, isChat(a) ? "独立对话" : wsName(homeOf(a))]
           .filter(Boolean)
           .some((s) => s!.toLowerCase().includes(q));
       });
@@ -214,7 +250,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
       if (aUnread !== bUnread) return bUnread - aUnread;
       return b.created_at.localeCompare(a.created_at);
     });
-  }, [agents, todoIdSet, tab, selectedNode, selectedProject, query, unread, machineMap]);
+  }, [agents, todoIdSet, tab, selectedNode, selectedProject, query, unread, machineMap, runningJobs]);
 
   // Group filtered list by node whenever multiple nodes exist and user hasn't isolated one node.
   const groupedByNode = useMemo(() => {
@@ -239,6 +275,18 @@ export function ClassicWindow({ route }: { route: string[] }) {
       else next.add(key);
       return next;
     });
+  };
+
+  const selectMachineScope = (key: string) => {
+    setSelectedNode(key);
+    setSelectedProject(null);
+    setNodeMenuOpen(false);
+  };
+
+  const openQuickNewOnNode = (machineKey: string) => {
+    setQuickNode(machineKey === CENTRE_MACHINE ? "" : machineKey);
+    setQuickNew(true);
+    setNodeMenuOpen(false);
   };
 
   const onDragTitle = (event: ReactMouseEvent<HTMLElement>) => {
@@ -280,6 +328,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
 
   const activeSession = openSessionId ? agents.find((a) => a.id === openSessionId) : undefined;
   const activeMachine = activeSession ? machineMap.get(agentMachine(activeSession)) : undefined;
+  const localLabel = localMachineLabel(hubInfo?.machine?.hostname).label;
 
   // Global status color for the 6px tucked-in edge peek strip.
   const peekTone =
@@ -374,7 +423,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
         )}
       </header>
 
-      {/* Profile / live status header (echoing QQ's top identity strip) */}
+      {/* Compact QQ-style hero: identity strip + floating node popover + search */}
       {!openSessionId && (
         <div className="classic-hero">
           <div className="classic-profile">
@@ -386,9 +435,27 @@ export function ClassicWindow({ route }: { route: string[] }) {
               <div className="classic-profile-row">
                 <span className="classic-profile-name">{profile.name.trim() || "CrossAgents"}</span>
                 {hasMultipleNodes && (
-                  <span className="classic-nodes-pill" title={`本机 + ${onlineRemoteCount}/${remoteNodes.length} 个远程节点在线`}>
-                    {1 + onlineRemoteCount}/{machines.length} 节点
-                  </span>
+                  <button
+                    type="button"
+                    className={`classic-node-trigger ${selectedMachine ? "scoped" : ""} ${nodeMenuOpen ? "open" : ""}`}
+                    onClick={() => setNodeMenuOpen((v) => !v)}
+                    aria-expanded={nodeMenuOpen}
+                    aria-haspopup="menu"
+                    title="切换节点视图（本机与远程执行节点）"
+                  >
+                    {selectedMachine ? (
+                      <>
+                        <OsIcon os={selectedMachine.os} size={11} />
+                        <span className="classic-node-trigger-text">{selectedMachine.label}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className={`classic-node-dot ${onlineRemoteCount > 0 ? "online" : "offline"}`} />
+                        <span className="classic-node-trigger-text">{1 + onlineRemoteCount}/{machines.length} 节点</span>
+                      </>
+                    )}
+                    <ChevronDown size={11} />
+                  </button>
                 )}
               </div>
               <div className="classic-profile-sub">
@@ -403,9 +470,80 @@ export function ClassicWindow({ route }: { route: string[] }) {
               onClick={() => setWindowAutoFade(!wm.autoFade)}
               title="失焦自动微透明，鼠标移入恢复清晰"
             >
-              {wm.autoFade ? "失焦淡化" : "常亮"}
+              {wm.autoFade ? "淡化" : "常亮"}
             </button>
           </div>
+
+          {/* Floating glass Node Switcher Popover: full hostnames, status, quick launch */}
+          {nodeMenuOpen && hasMultipleNodes && (
+            <>
+              <div className="classic-popover-scrim" onClick={() => setNodeMenuOpen(false)} />
+              <div className="classic-node-popover" role="menu" aria-label="选择执行节点">
+                <div className="classic-popover-head">
+                  <span>执行节点</span>
+                  <span className="muted tiny">{1 + onlineRemoteCount}/{machines.length} 在线</span>
+                </div>
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selectedNode === "all"}
+                  className={`classic-popover-item ${selectedNode === "all" ? "active" : ""}`}
+                  onClick={() => selectMachineScope("all")}
+                >
+                  <span className="classic-popover-icon all">
+                    <Globe size={13} />
+                  </span>
+                  <span className="classic-popover-main">
+                    <span className="classic-popover-name">全部节点</span>
+                    <span className="classic-popover-sub">按机器分组展示所有会话</span>
+                  </span>
+                  <span className="classic-popover-count">{agents.length}</span>
+                  {selectedNode === "all" && <Check size={13} className="classic-popover-check" />}
+                </button>
+                <div className="classic-popover-sep" />
+                {machines.map((m) => (
+                  <div key={m.key} className={`classic-popover-row ${selectedNode === m.key ? "active" : ""} ${m.remote && !m.online ? "offline" : ""}`}>
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={selectedNode === m.key}
+                      className="classic-popover-item"
+                      onClick={() => selectMachineScope(m.key)}
+                    >
+                      <span className="classic-popover-icon">
+                        <OsIcon os={m.os} size={14} />
+                        <span className={`classic-popover-dot ${m.online ? "online" : "offline"}`} />
+                      </span>
+                      <span className="classic-popover-main">
+                        <span className="classic-popover-name">
+                          {m.label}
+                          {!m.remote && <span className="classic-popover-tag">中心</span>}
+                        </span>
+                        <span className="classic-popover-sub">
+                          {m.subtitle ? `${m.subtitle} · ` : ""}
+                          {m.online ? "在线" : "离线"}
+                          {m.busy > 0 ? ` · ${m.busy} 运行中` : ""}
+                        </span>
+                      </span>
+                      <span className="classic-popover-count">{m.count}</span>
+                      {selectedNode === m.key && <Check size={13} className="classic-popover-check" />}
+                    </button>
+                    {m.online && (
+                      <button
+                        type="button"
+                        className="classic-popover-add"
+                        onClick={() => openQuickNewOnNode(m.key)}
+                        title={`在 ${m.label} 快速新建会话`}
+                        aria-label={`在 ${m.label} 新建`}
+                      >
+                        <Plus size={13} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
 
           <div className="classic-search-row">
             <label className="classic-search">
@@ -413,7 +551,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="搜索会话、代号、节点或项目"
+                placeholder={selectedMachine ? `在 ${selectedMachine.label} 搜索会话…` : "搜索会话、代号、节点或项目"}
                 aria-label="搜索会话"
               />
               {query && (
@@ -438,44 +576,6 @@ export function ClassicWindow({ route }: { route: string[] }) {
             </button>
           </div>
 
-          {/* Node selector pills whenever multiple execution machines exist */}
-          {hasMultipleNodes && (
-            <div className="classic-node-bar" role="tablist" aria-label="按节点筛选">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={selectedNode === "all"}
-                className={`classic-node-pill ${selectedNode === "all" ? "active" : ""}`}
-                onClick={() => {
-                  setSelectedNode("all");
-                  setSelectedProject(null);
-                }}
-              >
-                <span>全部</span>
-                <span className="classic-node-count">{agents.length}</span>
-              </button>
-              {machines.map((m) => (
-                <button
-                  key={m.key}
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedNode === m.key}
-                  className={`classic-node-pill ${selectedNode === m.key ? "active" : ""} ${m.remote && !m.online ? "offline" : ""}`}
-                  onClick={() => {
-                    setSelectedNode(m.key);
-                    setSelectedProject(null);
-                  }}
-                  title={`${m.label} · ${m.online ? "在线" : "离线"} · ${m.count} 个会话`}
-                >
-                  <OsIcon os={m.os} size={11} />
-                  <span className="classic-node-label">{m.label}</span>
-                  {m.remote && <span className={`classic-node-dot ${m.online ? "online" : "offline"}`} />}
-                  {m.busy > 0 && <span className="classic-node-busy">{m.busy}</span>}
-                </button>
-              ))}
-            </div>
-          )}
-
           {quickNew && (
             <div className="classic-quick-new">
               {hasMultipleNodes && (
@@ -487,7 +587,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
                     onChange={(e) => setQuickNode(e.target.value)}
                     aria-label="选择执行节点"
                   >
-                    <option value="">本机</option>
+                    <option value="">{localLabel}（中心）</option>
                     {remoteNodes.map((n) => (
                       <option key={n.id} value={n.id} disabled={!n.online}>
                         {n.name}
@@ -525,7 +625,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
         </div>
       )}
 
-      {/* Main body: either QQ-style rail + list, or in-pane compact session view */}
+      {/* Main body: either QQ-style rail (+ vertical Node Dock) + list, or in-pane compact chat */}
       {openSessionId ? (
         <div className="classic-chat-wrap">
           <div className="classic-chat-bar">
@@ -568,15 +668,16 @@ export function ClassicWindow({ route }: { route: string[] }) {
         </div>
       ) : (
         <div className="classic-body">
-          <aside className="classic-rail" aria-label="视图筛选">
+          <aside className="classic-rail" aria-label="视图与节点切换">
             <button
               type="button"
-              className={`classic-rail-btn ${tab === "all" ? "active" : ""}`}
+              className={`classic-rail-btn ${tab === "all" && selectedNode === "all" ? "active" : ""}`}
               onClick={() => {
                 setTab("all");
+                setSelectedNode("all");
                 setSelectedProject(null);
               }}
-              title="全部会话"
+              title="全部会话（所有节点）"
             >
               <MessageSquare size={17} />
               {unreadCount > 0 && <span className="classic-rail-badge">{unreadCount > 99 ? "99+" : unreadCount}</span>}
@@ -610,6 +711,43 @@ export function ClassicWindow({ route }: { route: string[] }) {
             >
               <FolderKanban size={17} />
             </button>
+
+            {/* Vertical Node Dock (Discord/Arc style): zero truncation regardless of node count */}
+            {hasMultipleNodes && (
+              <>
+                <span className="classic-rail-sep" aria-hidden="true" />
+                <div className="classic-rail-nodes" role="group" aria-label="快速切换执行节点">
+                  {machines.map((m) => {
+                    const active = selectedNode === m.key;
+                    const tip = [
+                      m.subtitle ? `${m.label} (${m.subtitle})` : m.label,
+                      m.online ? "在线" : "离线",
+                      `${m.count} 会话`,
+                      m.busy > 0 ? `${m.busy} 运行中` : undefined,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ");
+                    return (
+                      <button
+                        key={m.key}
+                        type="button"
+                        className={`classic-rail-node ${active ? "active" : ""} ${m.busy > 0 ? "busy" : ""} ${m.remote && !m.online ? "offline" : ""}`}
+                        onClick={() => {
+                          setSelectedNode(active ? "all" : m.key);
+                          setSelectedProject(null);
+                        }}
+                        title={active ? `${tip}（再次点击返回全部）` : tip}
+                        aria-pressed={active}
+                      >
+                        <OsIcon os={m.os} size={14} />
+                        <span className={`classic-rail-node-dot ${m.online ? "online" : "offline"}`} />
+                        {m.busy > 0 && <span className="classic-rail-badge live">{m.busy}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
 
             <div className="spacer" />
 
@@ -651,6 +789,24 @@ export function ClassicWindow({ route }: { route: string[] }) {
 
           <div className="classic-main-col">
             <div className="classic-list">
+              {selectedMachine && (
+                <div className="classic-scope-banner">
+                  <OsIcon os={selectedMachine.os} size={12} />
+                  <span className="classic-scope-name">{selectedMachine.label}</span>
+                  <span className={`classic-node-state ${selectedMachine.online ? "online" : "offline"}`}>
+                    {selectedMachine.online ? "在线" : "离线"}
+                  </span>
+                  <span className="spacer" />
+                  <button
+                    type="button"
+                    className="classic-scope-clear"
+                    onClick={() => selectMachineScope("all")}
+                  >
+                    全部节点
+                  </button>
+                </div>
+              )}
+
               {tab === "projects" && (
                 <div className="classic-proj-chips">
                   <button
@@ -780,7 +936,7 @@ export function ClassicWindow({ route }: { route: string[] }) {
                     key={agent.id}
                     agent={agent}
                     machine={machineMap.get(agentMachine(agent))}
-                    showNodeBadge={hasMultipleNodes}
+                    showNodeBadge={hasMultipleNodes && selectedNode === "all"}
                     needCount={todos.filter((t) => t.agent === agent.id).length}
                     onOpen={() => {
                       setOpenSessionId(agent.id);
@@ -826,20 +982,25 @@ function ClassicRow({
   const delivery = useDelivery(agent.id);
   const doing = useActivity(agent.id);
   const unread = useUnread()[agent.id];
+  const bgJobs = useAgentRunningJobs(agent.id);
   const turn = useRowLive(agent);
 
-  const running = delivery ? delivery.state === "turn" : agent.status === "running";
+  const turnRunning = delivery ? delivery.state === "turn" : agent.status === "running";
+  const hasBgJob = bgJobs.length > 0;
+  const running = turnRunning || hasBgJob;
   const error = agent.status === "error";
   const offline = Boolean(machine?.remote && !machine.online);
   const newest = turn?.items.at(-1);
-  const step = running && newest?.type === "tool_call" ? stepLine(newest) : "";
+  const step = turnRunning && newest?.type === "tool_call" ? stepLine(newest) : "";
   const sub = error
     ? lastError(agent.id) || "运行出错"
-    : running
+    : turnRunning
       ? step || summaryText(doing) || summaryText(agent.topic) || "正在处理…"
-      : offline
-        ? summaryText(agent.topic) || "节点离线"
-        : summaryText(agent.topic) || (isChat(agent) ? "独立对话" : wsName(homeOf(agent)));
+      : hasBgJob
+        ? `后台运行 · ${bgJobs[0].label}`
+        : offline
+          ? summaryText(agent.topic) || "节点离线"
+          : summaryText(agent.topic) || (isChat(agent) ? "独立对话" : wsName(homeOf(agent)));
 
   return (
     <button
@@ -866,8 +1027,10 @@ function ClassicRow({
           </span>
           <ModelMark plugin={agent.plugin} model={agent.model} />
           <span className="spacer" />
-          {running ? (
+          {turnRunning ? (
             <RowElapsed agentId={agent.id} since={turn?.since} at={turn?.at} items={turn?.items ?? []} />
+          ) : hasBgJob ? (
+            <span className="classic-row-time">后台中</span>
           ) : (
             <span className="classic-row-time">{shortSince(agent.created_at, Date.now())}</span>
           )}
